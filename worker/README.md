@@ -7,14 +7,14 @@ queues one heavy processing job at a time.
 Run it from the repository root with the worker directory on `PYTHONPATH`:
 
 ```sh
-PYTHONPATH=tools/meeting-archive/worker python3 -m meeting_archive_worker verify INCOMING_DIR
-PYTHONPATH=tools/meeting-archive/worker python3 -m meeting_archive_worker accept --incoming INCOMING_DIR --archive-root ARCHIVE_ROOT --db WORKER_DB --manifest-sha256 RAW_MANIFEST_SHA256 --validate-media
-PYTHONPATH=tools/meeting-archive/worker python3 -m meeting_archive_worker status --db WORKER_DB --meeting-id UUID
-PYTHONPATH=tools/meeting-archive/worker python3 -m meeting_archive_worker retry --db WORKER_DB --meeting-id UUID
-PYTHONPATH=tools/meeting-archive/worker python3 -m meeting_archive_worker process-ready --archive-root ARCHIVE_ROOT --db WORKER_DB --processor package.module:function
-PYTHONPATH=tools/meeting-archive/worker python3 -m meeting_archive_worker review-speakers --archive-dir MEETING_DIR --revision 1 --db WORKER_DB
-PYTHONPATH=tools/meeting-archive/worker python3 -m meeting_archive_worker identify --meeting-id UUID --revision 1 --speaker-id incoming:SPEAKER_00 --name "Name" --db WORKER_DB
-PYTHONPATH=tools/meeting-archive/worker python3 -m meeting_archive_worker.service --db WORKER_DB
+PYTHONPATH=worker python3 -m meeting_archive_worker verify INCOMING_DIR
+PYTHONPATH=worker python3 -m meeting_archive_worker accept --incoming INCOMING_DIR --archive-root ARCHIVE_ROOT --db WORKER_DB --manifest-sha256 RAW_MANIFEST_SHA256 --validate-media
+PYTHONPATH=worker python3 -m meeting_archive_worker status --db WORKER_DB --meeting-id UUID
+PYTHONPATH=worker python3 -m meeting_archive_worker retry --db WORKER_DB --meeting-id UUID
+PYTHONPATH=worker python3 -m meeting_archive_worker process-ready --archive-root ARCHIVE_ROOT --db WORKER_DB --processor package.module:function
+PYTHONPATH=worker python3 -m meeting_archive_worker review-speakers --archive-dir MEETING_DIR --revision 1 --db WORKER_DB
+PYTHONPATH=worker python3 -m meeting_archive_worker identify --meeting-id UUID --revision 1 --speaker-id incoming:SPEAKER_00 --name "Name" --db WORKER_DB
+PYTHONPATH=worker python3 -m meeting_archive_worker.service --db WORKER_DB
 ```
 
 Every command writes one compact JSON object. Validation and contract errors

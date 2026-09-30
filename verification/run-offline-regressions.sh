@@ -6,7 +6,7 @@ TOOL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meeting-archive-offline.XXXXXX")"
 trap 'rm -rf "$BUILD_ROOT"' EXIT
 
-export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+export DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p)}"
 : "${CLANG_MODULE_CACHE_PATH:=$BUILD_ROOT/module-cache}"
 export CLANG_MODULE_CACHE_PATH
 mkdir -p "$CLANG_MODULE_CACHE_PATH"

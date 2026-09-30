@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meeting-label-ocr.XXXXXX")"
 trap 'rm -rf "$BUILD_ROOT"' EXIT
 
-export DEVELOPER_DIR="${DEVELOPER_DIR:-/Library/Developer/CommandLineTools}"
+export DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p)}"
 : "${CLANG_MODULE_CACHE_PATH:=$BUILD_ROOT/module-cache}"
 export CLANG_MODULE_CACHE_PATH
 mkdir -p "$CLANG_MODULE_CACHE_PATH"

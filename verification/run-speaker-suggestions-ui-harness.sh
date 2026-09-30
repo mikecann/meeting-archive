@@ -8,7 +8,7 @@ APP="${2:-/private/tmp/Meeting Archive Speaker Suggestions.app}"
 [[ ! -e "$APP" ]] || { echo "App already exists: $APP" >&2; exit 2; }
 BUILD="$(mktemp -d /private/tmp/meeting-speaker-suggestions.XXXXXX)"
 trap 'rm -rf "$BUILD"' EXIT
-export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+export DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p)}"
 export CLANG_MODULE_CACHE_PATH="$BUILD/module-cache"
 mkdir -p "$CLANG_MODULE_CACHE_PATH" "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
 swiftc -j 2 -emit-library -emit-module -module-name MeetingArchiveCore \

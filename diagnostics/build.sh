@@ -3,23 +3,16 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BUILD_DIR="$SCRIPT_DIR/.build"
-CLT_DIR=/Library/Developer/CommandLineTools
-SWIFTC="$CLT_DIR/usr/bin/swiftc"
-
-# The full Xcode install on this machine currently has an unaccepted licence.
-# Use the separately installed Command Line Tools and keep the module cache local.
-SDKROOT=${SDKROOT:-$CLT_DIR/SDKs/MacOSX15.4.sdk}
-
-if [ ! -x "$SWIFTC" ] || [ ! -d "$SDKROOT" ]; then
-  echo "A usable Command Line Tools Swift compiler and macOS SDK are required." >&2
-  exit 1
-fi
+# Use the selected Xcode/Command Line Tools and its matching SDK.
+# DEVELOPER_DIR and SDKROOT can override these for a local toolchain workaround.
+SWIFTC=$(xcrun --find swiftc)
+SDKROOT=${SDKROOT:-$(xcrun --sdk macosx --show-sdk-path)}
 
 mkdir -p "$BUILD_DIR/module-cache"
 
-DEVELOPER_DIR="$CLT_DIR" "$SWIFTC" \
+"$SWIFTC" \
   -sdk "$SDKROOT" \
-  -target arm64-apple-macosx14.0 \
+  -target "$(uname -m)-apple-macosx14.0" \
   -module-cache-path "$BUILD_DIR/module-cache" \
   -parse-as-library \
   "$SCRIPT_DIR/Sources/CandidateRules.swift" \

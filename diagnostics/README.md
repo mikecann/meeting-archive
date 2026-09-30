@@ -7,21 +7,19 @@ pixels/audio, or infer which process owns a camera.
 
 ## Build and test
 
-The full Xcode installation on this machine currently has an unaccepted
-licence. These scripts deliberately use the separately installed Command Line
-Tools. Its newest macOS 26.5 SDK does not match the installed Swift compiler,
-so the tested default is the compatible macOS 15.4 SDK. Override `SDKROOT` if a
-later matching SDK is installed.
+The scripts use `xcrun` to find the selected Swift compiler and matching
+macOS SDK. Set `DEVELOPER_DIR` to choose a different Xcode or Command Line
+Tools installation, and `SDKROOT` only if you need a specific compatible SDK.
 
 ```sh
-tools/meeting-archive/diagnostics/run-tests.sh
-tools/meeting-archive/diagnostics/build.sh
+diagnostics/run-tests.sh
+diagnostics/build.sh
 ```
 
 The binary is written to:
 
 ```text
-tools/meeting-archive/diagnostics/.build/meeting-archive-diagnostic
+diagnostics/.build/meeting-archive-diagnostic
 ```
 
 ## Commands
@@ -31,19 +29,19 @@ explicit evidence boundary.
 
 ```sh
 # Device metadata and passive activity state only
-tools/meeting-archive/diagnostics/.build/meeting-archive-diagnostic camera
+diagnostics/.build/meeting-archive-diagnostic camera
 
 # One combined camera/window snapshot
-tools/meeting-archive/diagnostics/.build/meeting-archive-diagnostic snapshot
+diagnostics/.build/meeting-archive-diagnostic snapshot
 
 # Supported application windows only
-tools/meeting-archive/diagnostics/.build/meeting-archive-diagnostic inventory
+diagnostics/.build/meeting-archive-diagnostic inventory
 
 # Include every shareable window for rule development
-tools/meeting-archive/diagnostics/.build/meeting-archive-diagnostic inventory --all-windows
+diagnostics/.build/meeting-archive-diagnostic inventory --all-windows
 
 # Bounded polling, emitting initial state plus changes
-tools/meeting-archive/diagnostics/.build/meeting-archive-diagnostic watch --samples 120 --interval 0.5
+diagnostics/.build/meeting-archive-diagnostic watch --samples 120 --interval 0.5
 ```
 
 `watch` is always bounded to 1 through 3,600 polls. Add `--emit-unchanged` when

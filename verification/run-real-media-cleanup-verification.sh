@@ -27,7 +27,7 @@ snapshot_fixture() {
 
 snapshot_fixture > "$RUN_ROOT/original-before.sha256"
 
-export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+export DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p)}"
 export CLANG_MODULE_CACHE_PATH="$BUILD_ROOT/module-cache"
 mkdir -p "$CLANG_MODULE_CACHE_PATH"
 

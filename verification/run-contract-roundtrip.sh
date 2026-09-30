@@ -6,7 +6,7 @@ TOOL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 FIXTURE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meeting-archive-contract.XXXXXX")"
 trap 'rm -rf "$FIXTURE_ROOT"' EXIT
 
-export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+export DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p)}"
 export CLANG_MODULE_CACHE_PATH="$FIXTURE_ROOT/module-cache"
 mkdir -p "$CLANG_MODULE_CACHE_PATH" "$FIXTURE_ROOT/archive"
 

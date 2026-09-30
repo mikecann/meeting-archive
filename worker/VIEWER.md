@@ -60,7 +60,7 @@ Tests or an isolated Bruce fixture can supply their own roots without changing
 the production wrapper:
 
 ```sh
-PYTHONPATH=tools/meeting-archive/worker \
+PYTHONPATH=worker \
 python3 -m meeting_archive_worker.viewer \
   --archive-root /path/to/isolated/meetings \
   --db /path/to/isolated/worker.sqlite \

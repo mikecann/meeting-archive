@@ -7,7 +7,7 @@ LAUNCHER_DIR="${MEETING_ARCHIVE_LAUNCHER_DIR:-$HOME/.local/bin}"
 
 usage() {
   cat <<'EOF'
-Usage: bash tools/meeting-archive/setup_mac.sh [--with-launcher]
+Usage: bash setup_mac.sh [--with-launcher]
 
 Build and install the signed Meeting Archive.app bundle. The optional launcher
 is a symlink in ~/.local/bin (or MEETING_ARCHIVE_LAUNCHER_DIR).

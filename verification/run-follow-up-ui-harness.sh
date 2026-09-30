@@ -10,7 +10,7 @@ SOURCE_DATABASE="${MEETING_ARCHIVE_SOURCE_DB:-${HOME}/Library/Application Suppor
 BUNDLE_ID="com.mikerosoft.meeting-archive-ui-verification"
 MODE="${1:---build}"
 
-export DEVELOPER_DIR=/Library/Developer/CommandLineTools
+export DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p)}"
 export CLANG_MODULE_CACHE_PATH="$MODULE_CACHE"
 mkdir -p "$BUILD_ROOT" "$MODULE_CACHE"
 

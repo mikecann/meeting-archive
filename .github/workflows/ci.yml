@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install ffmpeg for synthetic media tests
+        run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+      - name: Swift build and tests
+        run: swift test
+      - name: Python worker tests
+        env:
+          PYTHONPATH: worker
+        run: python3 -W error::ResourceWarning -m unittest discover -s worker_tests
+      - name: Check shell syntax
+        run: |
+          while IFS= read -r script; do
+            bash -n "$script"
+          done < <(git ls-files '*.sh')
+          bash -n meeting-archive
+      - name: Offline verification
+        run: |
+          bash verification/run-state-machine-scenarios.sh
+          bash verification/run-meeting-follow-up-scenarios.sh
+          bash verification/run-contract-roundtrip.sh
+          bash verification/run-offline-regressions.sh
+          bash verification/run-speaker-review-scenarios.sh
+          bash diagnostics/run-tests.sh
+          bash diagnostics/build.sh
+          bash worker/launcher/run-tests.sh
+          bash worker/vision/run-tests.sh
