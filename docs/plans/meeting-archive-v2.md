@@ -88,6 +88,62 @@ Spool bundles, manifests, SSH transfer and verified acknowledgement, local
 cleanup, the SQLite store, worker status, speaker review, library, search,
 rename, Notion publishing and the login item.
 
+## Speaker review without the chore (2 Oct 2026)
+
+Mike found the review window annoying: it popped up by itself, and on the
+2 Oct Slack call pyannote split Micah into two voices that each needed their
+own Confirm before Complete would work. He wants it to fade away as it learns
+voices.
+
+- **No pop-ups.** The window only opens from the menu bar's **Review
+  speakers** entries or the library's button. The menu keeps its count.
+- **One click.** Per-speaker Confirm and Complete are gone. **Save names**
+  sends every filled-in name, typed, chosen, suggested or recognized, to
+  Bruce's new `identify-speakers` in one transaction. Blanks stay unknown. A
+  failed save marks nothing saved and the same button retries.
+- **One person, one card.** Voices with the same name share a card
+  ("Micah · 2 voices"), names merge cards once typed or chosen, and
+  **Not Micah** splits a voice back out.
+- **Ask less over time.** Bruce names automatically a voice matching someone
+  confirmed in two meetings (0.72), the mic's only voice once its owner's voice
+  is saved (0.65), and a voice matching one saved in the same meeting (0.72).
+  Saving a name refreshes other meetings with that voice in the background.
+  Automatic names still never train the profiles.
+
+The gates come from the voices on Bruce on 2 Oct, read from a copy of
+`worker.sqlite`: 43 voices observed in 11 meetings, 22 of them confirmed in 9.
+
+| Pairs | Count | Median | Highest |
+| --- | --- | --- | --- |
+| Different people, across meetings | 173 | 0.158 | 0.654 |
+| Different people, within a meeting | 21 | 0.131 | 0.640 |
+| Same person, across meetings | 26 | 0.276 | 0.820 |
+| Same person, within a meeting | 11 | 0.365 | 0.741 |
+
+Mike's confirmed mic tracks matched each other at 0.60 to 0.82 one to one
+(leaving out one that is probably mislabeled, below), and 0.72 to 0.96 against
+the best of his saved samples. Short or split voices give noisy
+embeddings, so the same person often scores low; the gates only have to stay
+above every different-person pair. The lowest gate with no wrong name was 0.66
+(0.65 within a meeting); 0.72 keeps a margin. With each confirmed voice left
+out in turn, the new rules named 7 of 22 automatically and all correctly; the
+old 0.82 gate named none, including Mike's own mic at 0.8199.
+
+Three saved names look wrong and are worth checking in review: on the 2 Oct
+Slack call, Call audio voice 3 is saved as Mike Cann but sounds like Micah
+(0.64 to his other voice, 0.29 at most to Mike's mic, and its lines are
+Micah's); on the 2 Oct 5:31am Zoom call, voice 4 is saved as Micah but scores
+0.05 to 0.08 against the Slack call's Micah while unnamed voice 3 matches him
+at 0.91; and on the 29 Sep 7:31am meeting, mic voice 1 is saved as Mike Cann
+but sounds more like someone else from the same call (0.61) than Mike (0.20 at
+most). The first two probably happened because
+review excerpts play both tracks mixed, so a voice that only says "yeah" over
+Mike sounds like Mike. Review now plays each voice's wordiest lines instead of
+its first ones.
+
+Deploy the worker before the app: **Save names** needs `identify-speakers` on
+Bruce, and an older worker answers it with an error the window shows.
+
 ## Live tests before installing for real
 
 Each with headphones and once on speakers:

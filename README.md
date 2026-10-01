@@ -229,29 +229,33 @@ log show --predicate 'subsystem == "com.mikerosoft.meeting-archive"' --last 1d
 
 ## Review and current limits
 
-After naming a meeting, a progress window shows transfer and processing on
-Bruce. It can be closed while that work continues. When speaker analysis is
-ready, the app brings up speaker review once per meeting revision, holding the
-popup back while you're on a call. The
-menu bar retains a count and direct review actions for speakers needing names,
-including after a review is dismissed or the app restarts. Notifications do
-not need to be enabled for this window and menu-bar flow.
+Speaker review never pops up. When Bruce has worked out who spoke, the menu
+bar shows how many voices still need a name, with a **Review speakers** entry
+for each meeting, and the library has a **Name speakers…** button. Review
+whenever you like; archiving and later recordings don't wait for it.
 
-Strong voice matches are filled in automatically and marked **Recognized**.
-Weaker matches can show **Possibly Mike Cann** after at least two different
-meetings were explicitly confirmed. These still require **Confirm**. Editing
-an automatic name also requires confirmation. Repeatedly confirming the same
-recording does not add extra evidence, and predictions never train themselves.
+The review window has one card per person. pyannote often splits one person
+into several voices, so voices with the same name share a card, like
+**Micah · 2 voices** with samples from each. Typing or choosing a name another
+card already has merges the two, and **Not Micah** takes a voice back out.
+Voices Bruce recognized are filled in and marked **Recognized**; its guesses
+are filled in and marked **Suggested**. **Save names** saves every name that's
+filled in, whether you typed it, chose it or Bruce did, in one go. Anyone left
+blank stays unknown, and you can save and close with blanks. If the save
+fails, the window stays open with the error and nothing is marked saved, so
+**Save names** again retries. **Later** closes without saving.
+
+Bruce asks less as it hears people again. Your own mic is named for you once
+your voice has been saved once, a voice that matches someone saved in two
+earlier meetings is named automatically, and a voice split off from one you
+saved in the same meeting gets that name too. Saving a name also names the
+same voice in other meetings still waiting for review, in the background.
+Automatic names never train the voice profiles; only names you save do.
 Similarity scores are not confidence percentages.
 
-Confirm any remaining names, then choose **Complete**. **Later** closes review
-without marking unresolved speakers complete. Confirmed names remain saved
-when reopening review. Archiving and subsequent recordings do not wait for
-speaker review.
-
 The library supports playback, transcript access, and speaker review after a
-processed archive is available. Calendar candidates are suggestions and need
-manual confirmation. Keep the app’s minimal settings explicit: selected
+processed archive is available. Calendar attendees are only offered as names
+to choose; they never fill in a name by themselves. Keep the app’s minimal settings explicit: selected
 calendars, Bruce host and archive path, and the backup-coverage confirmation.
 
 Do not describe the app as production-ready until a representative live run has
