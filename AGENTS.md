@@ -22,8 +22,10 @@ archive worker. All source paths and commands below are relative to this clone.
   Full Xcode is required for XCTest; select it with `xcode-select` or
   `DEVELOPER_DIR` when the command line tools alone lack XCTest.
 - `install.sh` creates the command symlink. `setup_mac.sh` builds and signs
-  `~/Applications/Meeting Archive.app`. `restart.sh` refuses to rebuild a running
-  app. Finish recording and quit from the menu before rebuilding.
+  `~/Applications/Meeting Archive.app`, and `restart.sh` rebuilds and opens it.
+  Both refuse while the app is running, however it was started; the login item
+  runs as plain `meeting-archive-app --background`, so a path match misses it.
+  Finish recording and quit from the menu before rebuilding.
 - Verify capture through the signed app bundle, not the SwiftPM executable.
   macOS permissions depend on app identity. Preserve the existing bundle,
   LaunchAgent and log identifiers unless explicitly migrating them.
@@ -63,6 +65,7 @@ swift test
 PYTHONPATH=worker python3 -W error::ResourceWarning -m unittest discover -s worker_tests
 bash verification/run-contract-roundtrip.sh
 bash verification/run-offline-regressions.sh
+bash verification/run-rebuild-guard-tests.sh
 bash diagnostics/run-tests.sh
 bash worker/launcher/run-tests.sh
 bash worker/vision/run-tests.sh
