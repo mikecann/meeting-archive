@@ -282,3 +282,51 @@ class VoiceEmbeddingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiarizationDeviceTests(unittest.TestCase):
+    def test_the_gpu_is_used_when_there_is_one_unless_the_cpu_is_asked_for(self) -> None:
+        from meeting_archive_worker.model_processor import diarization_device
+
+        self.assertEqual(diarization_device(None, True), "mps")
+        self.assertEqual(diarization_device("auto", True), "mps")
+        self.assertEqual(diarization_device("MPS", True), "mps")
+        self.assertEqual(diarization_device("cpu", True), "cpu")
+        self.assertEqual(diarization_device(None, False), "cpu")
+        self.assertEqual(diarization_device("mps", False), "cpu")
+        self.assertEqual(diarization_device("something else", True), "cpu")
+
+    def test_a_gpu_failure_retries_the_same_audio_on_the_cpu(self) -> None:
+        class Pipeline:
+            def __init__(self) -> None:
+                self.device = "mps"
+                self.calls: list[str] = []
+
+            def to(self, device) -> None:
+                self.device = str(device)
+
+            def __call__(self, audio, **options):
+                self.calls.append(self.device)
+                if self.device == "mps":
+                    raise RuntimeError("MPS backend out of memory")
+                return "diarized"
+
+        transcriber = object.__new__(WhisperPyannoteTranscriber)
+        transcriber.diarizer = Pipeline()
+        transcriber.diarizer_device = "mps"
+
+        self.assertEqual(transcriber._run_diarizer(object(), num_speakers=1), "diarized")
+        self.assertEqual(transcriber.diarizer.calls, ["mps", "cpu"])
+        self.assertEqual(transcriber.diarizer_device, "cpu")
+
+    def test_a_cpu_failure_is_not_retried(self) -> None:
+        class Pipeline:
+            def __call__(self, audio, **options):
+                raise RuntimeError("broken audio")
+
+        transcriber = object.__new__(WhisperPyannoteTranscriber)
+        transcriber.diarizer = Pipeline()
+        transcriber.diarizer_device = "cpu"
+
+        with self.assertRaises(RuntimeError):
+            transcriber._run_diarizer(object())

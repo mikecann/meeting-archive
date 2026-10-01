@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import uuid
 from importlib.metadata import PackageNotFoundError, version
@@ -88,6 +89,7 @@ class WhisperPyannoteTranscriber:
             cpu_threads=cpu_threads,
         )
         self.diarizer = None
+        self.diarizer_device = "cpu"
         self.diarization_enabled = bool(token)
         self.embeddings: dict[str, list[float]] = {}
         if token:
@@ -99,6 +101,7 @@ class WhisperPyannoteTranscriber:
                 os.environ.get("MEETING_ARCHIVE_DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1"),
                 token=token,
             )
+            self._move_diarizer(diarization_device(os.environ.get("MEETING_ARCHIVE_DIARIZATION_DEVICE"), _mps_available()))
 
     def transcribe(
         self,
@@ -194,9 +197,56 @@ class WhisperPyannoteTranscriber:
             torch.set_num_threads(max(1, min(4, int(os.environ.get("MEETING_ARCHIVE_TORCH_THREADS", "2")))))
             samples = np.memmap(raw_path, mode="c", dtype="<i2")
             waveform = torch.from_numpy(samples).to(torch.float32).div_(32768.0).unsqueeze(0)
-            return diarize_waveform(self.diarizer, waveform, 16000, **options)
+            return self._run_diarizer(waveform, **options)
         finally:
             raw_path.unlink(missing_ok=True)
+
+    def _run_diarizer(self, waveform, **options):
+        """Diarize on the chosen device, falling back to the CPU once if the GPU fails."""
+        try:
+            return diarize_waveform(self.diarizer, waveform, 16000, **options)
+        except Exception as error:
+            if self.diarizer_device == "cpu":
+                raise
+            print(f"Diarization on {self.diarizer_device} failed ({type(error).__name__}); retrying on the CPU.", file=sys.stderr)
+            self._move_diarizer("cpu")
+            return diarize_waveform(self.diarizer, waveform, 16000, **options)
+
+    def _move_diarizer(self, device: str) -> None:
+        if device == self.diarizer_device:
+            return
+        try:
+            try:
+                import torch
+
+                target = torch.device(device)
+            except ImportError:
+                target = device
+            self.diarizer.to(target)
+            self.diarizer_device = device
+        except Exception as error:
+            # The CPU always works, just slower, so a GPU problem never fails a job.
+            print(f"Diarization stays on {self.diarizer_device} ({type(error).__name__}).", file=sys.stderr)
+
+
+def diarization_device(preference: str | None, mps_available: bool) -> str:
+    """Where pyannote runs. On Bruce's M1 the GPU gave identical turns about 8x
+    faster than two CPU threads: a 20 minute track took 3.3 minutes instead of
+    23.5, which was most of a meeting's processing time.
+    """
+    choice = (preference or "auto").strip().lower()
+    if choice in ("auto", "mps") and mps_available:
+        return "mps"
+    return "cpu"
+
+
+def _mps_available() -> bool:
+    try:
+        import torch
+
+        return bool(torch.backends.mps.is_available())
+    except Exception:
+        return False
 
 
 def diarize_waveform(pipeline, waveform, sample_rate: int, **options):
