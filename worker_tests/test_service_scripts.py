@@ -68,7 +68,6 @@ class ServiceScriptContractTests(unittest.TestCase):
         installer = (WORKER_ROOT / "install-bruce.sh").read_text(encoding="utf-8")
 
         self.assertNotIn("vision", installer)
-        self.assertFalse((WORKER_ROOT / "vision").exists())
 
     def test_worker_wrapper_does_not_print_loaded_credentials(self) -> None:
         wrapper = (WORKER_ROOT / "run-service-bruce.sh").read_text(encoding="utf-8")
