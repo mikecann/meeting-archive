@@ -24,15 +24,28 @@ class AudioTranscriber(Protocol):
         """
 
 
-def microphone_is_one_speaker(incoming_turns: list[dict[str, Any]]) -> bool:
+#: Seconds of transcribed incoming speech before a recording counts as a call.
+#: A phrase from a video playing nearby, or Whisper filling silence, is not one.
+MINIMUM_INCOMING_SPEECH_SECONDS = 30.0
+
+
+def microphone_is_one_speaker(incoming_turns: list[dict[str, Any]], *, source_app: str | None = None) -> bool:
     """Whether the whole microphone track is one speaker.
 
-    Mike wears headphones on calls, so when anyone on the incoming track
-    spoke, the microphone heard only him. Diarizing it would just split his
-    voice into several speakers to review. With no incoming speech, as in an
-    in-person meeting, the microphone hears everyone and is diarized.
+    Mike wears headphones on calls, so when people on the incoming track
+    talked, the microphone heard only him. Diarizing it would just split his
+    voice into several speakers to review. A manual recording is for a meeting
+    in the room, and a recording with little incoming speech isn't a call, so
+    in those the microphone hears everyone and is diarized.
     """
-    return any(str(turn.get("text", "")).strip() for turn in incoming_turns)
+    if source_app == "manual":
+        return False
+    speech = sum(
+        max(0.0, float(turn.get("end", 0.0)) - float(turn.get("start", 0.0)))
+        for turn in incoming_turns
+        if str(turn.get("text", "")).strip()
+    )
+    return speech >= MINIMUM_INCOMING_SPEECH_SECONDS
 
 
 class TranscriptProcessor:
@@ -65,11 +78,12 @@ class TranscriptProcessor:
         ]
         turns: list[dict[str, Any]] = []
         incoming_turns: list[dict[str, Any]] = []
+        source_app = manifest.metadata.get("source_app") if isinstance(manifest.metadata, dict) else None
         # Incoming goes first, since whether anyone remote spoke decides how
         # the microphone is labelled.
         for item, channel_origin in sorted(channels, key=lambda channel: channel[1] != "incoming"):
             path = root.joinpath(*item.path.split("/"))
-            single_speaker = channel_origin == "microphone" and microphone_is_one_speaker(incoming_turns)
+            single_speaker = channel_origin == "microphone" and microphone_is_one_speaker(incoming_turns, source_app=source_app)
             for raw_turn in self.transcriber.transcribe(path, channel_origin, single_speaker=single_speaker):
                 turn = self._validated_turn(raw_turn)
                 if channel_origin == "incoming":

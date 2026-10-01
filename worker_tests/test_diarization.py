@@ -101,13 +101,21 @@ def saved_transcript(incoming: Path) -> dict:
 
 
 class MicrophoneSpeakerTests(unittest.TestCase):
-    def test_any_incoming_speech_makes_the_microphone_one_speaker(self) -> None:
+    def test_half_a_minute_of_incoming_speech_makes_the_microphone_one_speaker(self) -> None:
         self.assertFalse(microphone_is_one_speaker([]))
-        self.assertFalse(microphone_is_one_speaker([{"start": 0.0, "end": 1.0, "text": "  "}]))
+        self.assertFalse(microphone_is_one_speaker([{"start": 0.0, "end": 60.0, "text": "  "}]))
+        # A stray phrase from a video, or Whisper filling silence, isn't a call.
+        self.assertFalse(microphone_is_one_speaker([{"start": 2.0, "end": 3.0, "text": "Can you hear me?"}]))
         self.assertTrue(microphone_is_one_speaker([
             {"start": 0.0, "end": 1.0, "text": " "},
-            {"start": 2.0, "end": 3.0, "text": "Can you hear me?"},
+            {"start": 2.0, "end": 20.0, "text": "Can you hear me?"},
+            {"start": 25.0, "end": 37.0, "text": "Great, let's start."},
         ]))
+
+    def test_a_manual_recording_always_diarizes_the_microphone(self) -> None:
+        call = [{"start": 0.0, "end": 120.0, "text": "A video playing on the Mac."}]
+        self.assertTrue(microphone_is_one_speaker(call, source_app="us.zoom.xos"))
+        self.assertFalse(microphone_is_one_speaker(call, source_app="manual"))
 
     def test_incoming_is_transcribed_first_and_decides_the_microphone(self) -> None:
         # The app lists the microphone before incoming in its manifest.
@@ -124,7 +132,8 @@ class MicrophoneSpeakerTests(unittest.TestCase):
                     def transcribe(self, _path, channel_origin, *, single_speaker=False):
                         calls.append((channel_origin, single_speaker))
                         texts = incoming_speech if channel_origin == "incoming" else ["Hi."]
-                        return [{"start": 0.0, "end": 1.0, "text": text} for text in texts]
+                        end = 40.0 if channel_origin == "incoming" else 1.0
+                        return [{"start": 0.0, "end": end, "text": text} for text in texts]
 
                 result = TranscriptProcessor(RecordingTranscriber()).process(Path("archive"), manifest)
 
@@ -180,13 +189,13 @@ class MicrophoneSpeakerTests(unittest.TestCase):
             registry.confirm_observation("earlier-call", 1, "microphone:SPEAKER_00", "Mike Cann")
             transcriber, calls = stub_transcriber(
                 {
-                    "microphone": [(1.0, 3.0, "Thanks for making time."), (8.0, 9.0, "Sure.")],
-                    "incoming": [(3.5, 6.0, "No worries."), (6.5, 7.5, "Hello!")],
+                    "microphone": [(1.0, 3.0, "Thanks for making time."), (41.0, 42.0, "Sure.")],
+                    "incoming": [(3.5, 26.0, "No worries."), (26.5, 40.0, "Hello!")],
                 },
                 {
-                    "microphone": diarization([(1.0, 3.0, "SPEAKER_00"), (8.0, 9.0, "SPEAKER_00")], [MIKE]),
+                    "microphone": diarization([(1.0, 3.0, "SPEAKER_00"), (41.0, 42.0, "SPEAKER_00")], [MIKE]),
                     "incoming": diarization(
-                        [(3.5, 6.0, "SPEAKER_00"), (6.5, 7.5, "SPEAKER_01")],
+                        [(3.5, 26.0, "SPEAKER_00"), (26.5, 40.0, "SPEAKER_01")],
                         [[0.8, -0.6], [-0.8, 0.6]],
                     ),
                 },

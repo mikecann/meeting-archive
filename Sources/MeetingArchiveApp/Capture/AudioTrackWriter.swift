@@ -32,6 +32,8 @@ final class AudioTrackWriter: @unchecked Sendable {
     struct Summary: Sendable {
         var progress: TrackProgress?
         var activitySeconds: Double
+        /// The loudest 100 ms window's RMS, 0 for pure silence.
+        var peakLevel: Double = 0
         var error: Error?
     }
 
@@ -464,7 +466,7 @@ final class AudioTrackWriter: @unchecked Sendable {
     }
 
     private func complete() {
-        let summary = Summary(progress: timeline.tracks[track], activitySeconds: meter.activeSeconds, error: failure)
+        let summary = Summary(progress: timeline.tracks[track], activitySeconds: meter.activeSeconds, peakLevel: meter.peak, error: failure)
         finalSummary = summary
         let waiters = finishWaiters
         finishWaiters = []

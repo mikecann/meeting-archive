@@ -4,9 +4,9 @@ import XCTest
 import MeetingArchiveCore
 
 final class RecordingNoticeTests: XCTestCase {
-    func testOnlyTheFirstPartOfACallAnnouncesItself() {
-        XCTAssertEqual(CaptureNotice.started(source: "Google Chrome", part: 1)?.title, "Recording Google Chrome")
-        XCTAssertNil(CaptureNotice.started(source: "Google Chrome", part: 2))
+    func testAResumedCallSaysItIsRecordingAgain() {
+        XCTAssertEqual(CaptureNotice.started(source: "Google Chrome", resumed: false).title, "Recording Google Chrome")
+        XCTAssertEqual(CaptureNotice.started(source: "Google Chrome", resumed: true).title, "Recording Google Chrome again")
     }
 
     func testLaterPartsSayWhichPartTheyAre() {
@@ -23,12 +23,15 @@ final class RecordingNoticeTests: XCTestCase {
         XCTAssertEqual(CaptureNotice.sourceName(.microphone(MicUser(bundleIdentifier: "com.hnc.Discord", displayName: "Discord"))), "Discord")
     }
 
-    func testNotificationButtonsMapToActions() {
-        XCTAssertEqual(NotificationRouter.action(identifier: "stop", userInfo: [:]), .stopRecording)
-        XCTAssertEqual(NotificationRouter.action(identifier: "discard", userInfo: [:]), .discardRecording)
+    func testNotificationButtonsMapToActionsForTheirOwnCall() {
+        let series = UUID()
+        XCTAssertEqual(NotificationRouter.action(identifier: "stop", userInfo: ["seriesID": series.uuidString]), .stopRecording(seriesID: series))
+        XCTAssertEqual(NotificationRouter.action(identifier: "discard", userInfo: ["seriesID": series.uuidString]), .discardRecording(seriesID: series))
         let id = UUID()
         XCTAssertEqual(NotificationRouter.action(identifier: "discard-saved", userInfo: ["meetingID": id.uuidString]), .discardSaved(id))
-        // Without a meeting there is nothing safe to discard.
+        // Without knowing which call, there is nothing safe to stop or discard.
+        XCTAssertNil(NotificationRouter.action(identifier: "stop", userInfo: [:]))
+        XCTAssertNil(NotificationRouter.action(identifier: "discard", userInfo: [:]))
         XCTAssertNil(NotificationRouter.action(identifier: "discard-saved", userInfo: [:]))
         // Clicking the banner itself is not a decision.
         XCTAssertNil(NotificationRouter.action(identifier: UNNotificationDefaultActionIdentifier, userInfo: [:]))

@@ -837,8 +837,11 @@ final class RecordingPolicyTests: XCTestCase {
             ("short call the user stopped", mic, .userStopped, 1, 30, 0, 20, .keep),
             ("silent call the user stopped", mic, .userStopped, 1, 30, 0, 0, .discard(reason: "nothing recorded")),
             ("short pause", mic, .paused, 1, 20, 10, 10, .discard(reason: "under a minute")),
-            ("voice memo", mic, .micReleased, 1, 600, 0, 300, .discard(reason: "nobody else spoke")),
-            ("just under the incoming bar", mic, .micReleased, 1, 600, 4.9, 300, .discard(reason: "nobody else spoke")),
+            // Missing call audio (no System Audio permission) must not lose a call.
+            ("call with only my side heard", mic, .micReleased, 1, 600, 0, 300, .keep),
+            ("listening in silence", mic, .micReleased, 1, 600, 120, 0, .keep),
+            ("mic held but quiet", mic, .micReleased, 1, 600, 0, 0, .discard(reason: "nobody spoke")),
+            ("just under both bars", mic, .micReleased, 1, 600, 4.9, 29.9, .discard(reason: "nobody spoke")),
         ]
 
         for item in cases {
@@ -866,8 +869,8 @@ final class RecordingPolicyTests: XCTestCase {
             .discard(reason: "under 2 minutes")
         )
         XCTAssertEqual(
-            strict.decide(trigger: mic, stopReason: .micReleased, part: 1, duration: 150, incomingActivity: 20, microphoneActivity: 60),
-            .discard(reason: "nobody else spoke")
+            strict.decide(trigger: mic, stopReason: .micReleased, part: 1, duration: 150, incomingActivity: 20, microphoneActivity: 20),
+            .discard(reason: "nobody spoke")
         )
         XCTAssertEqual(
             KeepPolicy(minimumDuration: 45).decide(trigger: mic, stopReason: .micReleased, part: 1, duration: 30, incomingActivity: 20, microphoneActivity: 20),

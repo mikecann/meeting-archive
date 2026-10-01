@@ -460,16 +460,22 @@ public enum KeepDecision: Equatable, Sendable {
 }
 
 /// Whether a finished part is worth keeping. Recording starts as soon as an
-/// app takes the mic, so this is where voice memos and dictation-like
-/// one-sided recordings are dropped.
+/// app takes the mic, so this is where brief or silent mic grabs are dropped.
+///
+/// A call only has to be heard on one side. Without the System Audio
+/// Recording permission the incoming track is pure silence, and deleting
+/// every call then would lose exactly what this app exists to keep.
 public struct KeepPolicy: Equatable, Sendable {
     public var minimumDuration: TimeInterval = 60
     /// Seconds of audio from the other end of the call.
     public var minimumIncomingActivity: TimeInterval = 5
+    /// Seconds of the user talking that keep a call on their side alone.
+    public var minimumMicrophoneActivity: TimeInterval = 30
 
-    public init(minimumDuration: TimeInterval = 60, minimumIncomingActivity: TimeInterval = 5) {
+    public init(minimumDuration: TimeInterval = 60, minimumIncomingActivity: TimeInterval = 5, minimumMicrophoneActivity: TimeInterval = 30) {
         self.minimumDuration = minimumDuration
         self.minimumIncomingActivity = minimumIncomingActivity
+        self.minimumMicrophoneActivity = minimumMicrophoneActivity
     }
 
     /// Activity is seconds of sound on each track.
@@ -495,7 +501,9 @@ public struct KeepPolicy: Equatable, Sendable {
         }
 
         if duration < minimumDuration { return .discard(reason: underMinimumDuration) }
-        if incomingActivity < minimumIncomingActivity { return .discard(reason: "nobody else spoke") }
+        if incomingActivity < minimumIncomingActivity, microphoneActivity < minimumMicrophoneActivity {
+            return .discard(reason: "nobody spoke")
+        }
         return .keep
     }
 

@@ -32,10 +32,20 @@ enum CaptureNotice {
         let body: String
     }
 
-    /// Later parts of the same call carry on quietly; the menu still shows them.
-    static func started(source: String, part: Int) -> Message? {
-        guard part == 1 else { return nil }
-        return Message(title: "Recording \(source)", body: "Stop or discard it here or from the menu bar.")
+    /// `resumed` is a later part starting after a relaunch or a long wait,
+    /// which would otherwise begin without the user knowing.
+    static func started(source: String, resumed: Bool) -> Message {
+        Message(title: resumed ? "Recording \(source) again" : "Recording \(source)", body: "Stop or discard it here or from the menu bar.")
+    }
+
+    static func recovered(title: String) -> Message {
+        Message(title: "Recovered \(title)", body: "Meeting Archive stopped while this was recording. It goes to Bruce in about a minute and a half unless you discard it.")
+    }
+
+    /// A real call is never perfect digital silence, but a tap without the
+    /// System Audio Recording permission always is.
+    static func silentCallAudio(source: String) -> Message {
+        Message(title: "The other side of your \(source) call wasn't recorded", body: "Only your mic was heard. Allow Meeting Archive under System Settings, Privacy & Security, Screen & System Audio Recording, in the System Audio Recording Only list.")
     }
 
     static func saved(title: String) -> Message {
@@ -72,6 +82,8 @@ final class ArchiveController: ObservableObject {
     @Published var status = "Starting…"
     @Published var failure: String?
     @Published var isRecording = false
+    /// A recording broke and is waiting to start its next part.
+    @Published private(set) var isRetrying = false
     @Published var isPaused = false
     /// What is being recorded right now, for the menu.
     @Published private(set) var recordingSource: String?
@@ -100,6 +112,14 @@ final class ArchiveController: ObservableObject {
     private var lastSnapshot = MicUsageSnapshot(users: [], ignored: [], error: nil)
     private var notKeptNote: (text: String, at: Date)?
     private var announcedFailures = Set<UUID>()
+    /// Series announced since launch. A later part of one of these is a
+    /// restart the user has already been told about.
+    private var announcedSeries = Set<UUID>()
+    private var warnedAboutSilentCallAudio = false
+    private var isShuttingDown = false
+    /// Parts saved from each series, so discarding a call also discards the
+    /// parts it already saved after a hiccup, while they are still pending.
+    private var savedParts: [UUID: [UUID]] = [:]
     private var uploading = false
     private var lastQueuePoll = Date.distantPast
     private var lastWorkerStatusPoll = Date.distantPast
@@ -117,6 +137,8 @@ final class ArchiveController: ObservableObject {
     private let transfer = ArchiveTransfer()
     private let workerStatusClient = WorkerStatusClient(cacheDuration: 10)
     private let keepPolicy = KeepPolicy()
+    /// The live controller, for the app delegate to finish recordings on quit.
+    static weak var running: ArchiveController?
 
     init(startServices: Bool = true) {
         do {
@@ -150,6 +172,7 @@ final class ArchiveController: ObservableObject {
             hasPolledMicrophone = true
             return
         }
+        Self.running = self
         monitor = MicActivityMonitor(ignoredBundleIDs: { [weak self] in
             self?.settings.ignoredBundleIDs ?? MicAppResolver.defaultIgnoredBundleIDs
         })
@@ -258,6 +281,8 @@ final class ArchiveController: ObservableObject {
     private func updateStatus(now: Date) {
         if let source = recordingSource {
             status = "Recording \(source)"
+        } else if isRetrying, let trigger = policy.state.pendingRestart?.trigger {
+            status = "Trying to record \(CaptureNotice.sourceName(trigger)) again"
         } else if failure != nil {
             status = "Needs attention"
         } else if let note = notKeptNote, now.timeIntervalSince(note.at) < 120 {
@@ -288,13 +313,17 @@ final class ArchiveController: ObservableObject {
         }
         do { try store?.saveState(policy.state, key: SQLiteMeetingStore.recordingPolicyStateKey) } catch { fail(error.localizedDescription) }
         isPaused = policy.state.isPaused
+        isRetrying = policy.state.active == nil && policy.state.pendingRestart != nil
         for effect in effects {
             switch effect {
             case .startCapture(let meetingID, let trigger, let seriesID, let part):
+                // Once quitting, a part left unstarted resumes on the next
+                // launch if its call is still going.
+                guard !isShuttingDown else { continue }
                 enqueueCapture { await self.start(meetingID: meetingID, trigger: trigger, seriesID: seriesID, part: part) }
             case .stopCapture(let meetingID, let reason):
-                let trigger = before?.meetingID == meetingID ? before?.trigger : nil
-                enqueueCapture { await self.finish(meetingID: meetingID, reason: reason, finalTrigger: trigger) }
+                let stopped = before?.meetingID == meetingID ? before : nil
+                enqueueCapture { await self.finish(meetingID: meetingID, reason: reason, finalTrigger: stopped?.trigger, lastHeldAt: stopped?.lastHeldAt) }
             }
         }
     }
@@ -313,25 +342,36 @@ final class ArchiveController: ObservableObject {
     func togglePause() { dispatch(.setPaused(!isPaused, at: Date())) }
 
     func toggleRecording() {
-        if policy.state.active != nil { stopRecording() } else { recordNow() }
-    }
-
-    /// Discards what is being recorded and keeps that app from starting one again.
-    func neverRecord(_ user: MicUser) {
-        settings.ignore(user.bundleIdentifier)
-        if recordingApp == user { discardCurrentRecording() }
+        if policy.state.active != nil || policy.state.pendingRestart != nil { stopRecording() } else { recordNow() }
     }
 
     // A menu item is one slip away from a real meeting, so these ask first.
+    // The app keeps ticking while a dialog is up, so they act on the part that
+    // was showing when the user clicked, not whatever is recording by then.
 
     func confirmDiscardCurrentRecording() {
+        guard let entry = journal else { return }
         guard confirm("Discard this recording?", detail: "What has been recorded so far is deleted from this Mac and never sent to Bruce.", button: "Discard") else { return }
-        discardCurrentRecording()
+        discard(seriesID: entry.seriesID, savedPart: entry.id)
     }
 
     func confirmNeverRecord(_ user: MicUser) {
+        let entry = journal
         guard confirm("Never record \(user.displayName)?", detail: "This recording is discarded, and \(user.displayName) using the mic won't start one again. You can change this in Settings.", button: "Never record") else { return }
-        neverRecord(user)
+        settings.ignore(user.bundleIdentifier)
+        if let entry { discard(seriesID: entry.seriesID, savedPart: entry.id) }
+    }
+
+    /// Discards the series if it is still recording, plus any of its parts
+    /// that were saved in the meantime and haven't gone to Bruce yet.
+    private func discard(seriesID: UUID, savedPart meetingID: UUID?) {
+        if journal?.seriesID == seriesID || policy.state.pendingRestart?.seriesID == seriesID {
+            discardCurrentRecording()
+        }
+        for id in Set((savedParts[seriesID] ?? []) + [meetingID].compactMap { $0 })
+        where meetings.first(where: { $0.id == id })?.acceptance.isPending == true {
+            resolve(id, resolution: .discard)
+        }
     }
 
     func confirmDiscardSaved(_ id: UUID) {
@@ -396,9 +436,18 @@ final class ArchiveController: ObservableObject {
         recordingStartedAt = entry.startedAt
         if case .microphone(let user) = trigger { recordingApp = user } else { recordingApp = nil }
         dispatch(.captureStarted(meetingID: meetingID, at: Date()))
-        if let message = CaptureNotice.started(source: source.displayName, part: part) {
-            notify(message.title, body: message.body, id: meetingID.uuidString + "-start", category: NotificationRouter.recordingCategory)
+        // A part restarted mid-call was already announced by its failure. One
+        // that begins after a relaunch would otherwise start unannounced.
+        if !announcedSeries.contains(seriesID) {
+            announcedSeries.insert(seriesID)
+            let message = CaptureNotice.started(source: source.displayName, resumed: part > 1)
+            notify(message.title, body: message.body, id: Self.startNotificationID(seriesID), category: NotificationRouter.recordingCategory,
+                   userInfo: [NotificationRouter.seriesKey: seriesID.uuidString])
         }
+    }
+
+    private static func startNotificationID(_ seriesID: UUID) -> String {
+        seriesID.uuidString + "-start"
     }
 
     private func captureFailed(meetingID: UUID, message: String) {
@@ -412,10 +461,14 @@ final class ArchiveController: ObservableObject {
         dispatch(.captureFailed(meetingID: meetingID, at: Date()))
     }
 
-    private func finish(meetingID: UUID, reason: RecordingStopReason, finalTrigger: RecordingTrigger?) async {
+    private func finish(meetingID: UUID, reason: RecordingStopReason, finalTrigger: RecordingTrigger?, lastHeldAt: Date?) async {
         guard let audio = recording, let entry = journal, entry.id == meetingID else { return }
         let ended = Date()
         let result = await audio.stop()
+        if reason != .captureFailed {
+            // The call is over, so its Stop and Discard buttons must not act on a later one.
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [Self.startNotificationID(entry.seriesID)])
+        }
         recording = nil
         journal = nil
         isRecording = false
@@ -424,14 +477,24 @@ final class ArchiveController: ObservableObject {
         recordingApp = nil
         let directory = AppPaths.meeting(entry.id)
         if let error = result.error { Log.capture.error("Recording ended with: \(error.localizedDescription, privacy: .public)") }
+        // After the app lets go, the part runs on through the release grace.
+        // That tail isn't the call, so it doesn't count towards keeping it.
+        let callEnded = reason == .micReleased ? min(ended, max(entry.startedAt, lastHeldAt ?? ended)) : ended
+        let trigger = finalTrigger ?? entry.trigger
+        let incomingActivity = result.activitySeconds["incoming"] ?? 0
+        let microphoneActivity = result.activitySeconds["microphone"] ?? 0
         let decision = keepPolicy.decide(
-            trigger: finalTrigger ?? entry.trigger,
+            trigger: trigger,
             stopReason: reason,
             part: entry.part,
-            duration: ended.timeIntervalSince(entry.startedAt),
-            incomingActivity: result.activitySeconds["incoming"] ?? 0,
-            microphoneActivity: result.activitySeconds["microphone"] ?? 0
+            duration: callEnded.timeIntervalSince(entry.startedAt),
+            incomingActivity: incomingActivity,
+            microphoneActivity: microphoneActivity
         )
+        if case .microphone = trigger, decision == .keep, (result.peakLevels["incoming"] ?? 0) == 0,
+           callEnded.timeIntervalSince(entry.startedAt) >= keepPolicy.minimumDuration, microphoneActivity >= 10 {
+            warnAboutSilentCallAudio(source: entry.sourceApplication.displayName)
+        }
         if case .discard(let why) = decision {
             try? FileManager.default.removeItem(at: directory)
             Log.controller.notice("Not keeping \(entry.id.uuidString, privacy: .public): \(why, privacy: .public)")
@@ -445,12 +508,13 @@ final class ArchiveController: ObservableObject {
             try ModelCodec.encoder.encode(result.tracks).write(to: directory.appendingPathComponent("tracks.json"), options: .atomic)
             var meeting = makeRecord(entry, ended: ended, microphone: result.microphone)
             adoptDefaultCalendarsIfNeeded()
-            let events = calendar.suggestions(start: entry.startedAt, end: ended, selectedCalendarIDs: settings.selectedCalendarIDs)
-            if let match = CalendarRanking.best(events, start: entry.startedAt, end: ended) {
+            let events = calendar.suggestions(start: entry.startedAt, end: callEnded, selectedCalendarIDs: settings.selectedCalendarIDs)
+            if let match = CalendarRanking.best(events, start: entry.startedAt, end: callEnded) {
                 meeting.title = entry.part > 1 ? "\(match.title) (part \(entry.part))" : match.title
             }
             try ModelCodec.encoder.encode(events).write(to: directory.appendingPathComponent("calendar.json"), options: .atomic)
             try store?.insertMeeting(meeting)
+            savedParts[entry.seriesID, default: []].append(entry.id)
             try? FileManager.default.removeItem(at: directory.appendingPathComponent("capture-journal.json"))
             if reason != .appQuit {
                 let notice = CaptureNotice.saved(title: meeting.title)
@@ -458,6 +522,17 @@ final class ArchiveController: ObservableObject {
             }
         } catch { fail(error.localizedDescription) }
         refresh()
+    }
+
+    /// Once per launch, loudly: without this permission every call keeps only
+    /// Mike's side, and nothing else would say so.
+    private func warnAboutSilentCallAudio(source: String) {
+        Log.capture.error("Call audio was pure silence for a whole \(source, privacy: .public) recording")
+        guard !warnedAboutSilentCallAudio else { return }
+        warnedAboutSilentCallAudio = true
+        let message = CaptureNotice.silentCallAudio(source: source)
+        notify(message.title, body: message.body, id: "silent-call-audio")
+        fail(message.title + ". " + message.body)
     }
 
     private func sourceDescriptor(for trigger: RecordingTrigger) -> SourceApplicationDescriptor {
@@ -526,10 +601,17 @@ final class ArchiveController: ObservableObject {
                         }
                         continue
                     }
+                    if duration < Self.minimumRecoveredDuration {
+                        // A few seconds cut off by a crash or logout is a stray mic grab, not a call.
+                        try FileManager.default.removeItem(at: directory)
+                        continue
+                    }
+                    // Saved like any other part, so it gets the same window to be discarded.
                     let record = makeRecord(entry, ended: entry.startedAt.addingTimeInterval(duration), microphone: nil)
                     try store?.insertMeeting(record)
-                    resolve(record.id, resolution: .accept(trigger: .restartRecovery))
                     try FileManager.default.removeItem(at: path)
+                    let notice = CaptureNotice.recovered(title: record.title)
+                    notify(notice.title, body: notice.body, id: record.id.uuidString + "-finish", category: NotificationRouter.savedCategory, meetingID: record.id)
                 } catch {
                     // One damaged recording must never hold up the others.
                     issues.append("\(directory.lastPathComponent): \(error.localizedDescription)")
@@ -539,6 +621,8 @@ final class ArchiveController: ObservableObject {
         } catch { issues.append(error.localizedDescription) }
         if !issues.isEmpty { fail("Interrupted recordings were kept for recovery: " + issues.prefix(3).joined(separator: "; ")) }
     }
+
+    static let minimumRecoveredDuration: TimeInterval = 5
 
     private static func decodeJournal(_ data: Data) throws -> CaptureJournal {
         if let entry = try? ModelCodec.decoder.decode(CaptureJournal.self, from: data) { return entry }
@@ -865,21 +949,24 @@ final class ArchiveController: ObservableObject {
         _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
     }
 
-    private func notify(_ title: String, body: String, id: String, category: String? = nil, meetingID: UUID? = nil) {
+    private func notify(_ title: String, body: String, id: String, category: String? = nil, meetingID: UUID? = nil, userInfo: [String: String] = [:]) {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
         if let category { content.categoryIdentifier = category }
-        if let meetingID { content.userInfo = ["meetingID": meetingID.uuidString] }
+        var info = userInfo
+        if let meetingID { info[NotificationRouter.meetingKey] = meetingID.uuidString }
+        content.userInfo = info
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: id, content: content, trigger: nil))
     }
 
+    /// Buttons on an old banner must only ever act on the call it was about.
     private func handleNotificationAction(_ action: NotificationRouter.Action) {
         switch action {
-        case .stopRecording:
-            if isRecording { stopRecording() }
-        case .discardRecording:
-            if isRecording { discardCurrentRecording() }
+        case .stopRecording(let seriesID):
+            if journal?.seriesID == seriesID || policy.state.pendingRestart?.seriesID == seriesID { stopRecording() }
+        case .discardRecording(let seriesID):
+            discard(seriesID: seriesID, savedPart: nil)
         case .discardSaved(let meetingID):
             resolve(meetingID, resolution: .discard)
         }
@@ -896,18 +983,29 @@ final class ArchiveController: ObservableObject {
         status = "Needs attention"
     }
 
-    func quit() async {
+    /// Quit goes through the app delegate, so logout and shutdown save the
+    /// current part the same way.
+    func quit() {
+        NSApp.terminate(nil)
+    }
+
+    /// Saves whatever is recording before the app goes. A call still running
+    /// after the next launch carries on as its next part. A manual recording
+    /// ends for good on an orderly quit, logout or shutdown; only a crash
+    /// brings it back, since nobody is there to stop it on the next login.
+    func shutDown() async {
+        guard !isShuttingDown else { return }
+        isShuttingDown = true
         timer?.cancel()
+        if (policy.state.active?.trigger ?? policy.state.pendingRestart?.trigger) == .manual {
+            dispatch(.manualStop(at: Date()))
+        }
+        await captureChain?.value
         if let meetingID = journal?.id {
-            // Saved as is. If the call is still going when the app comes
-            // back, the next part starts on its own.
-            let trigger = policy.state.active?.trigger
-            await captureChain?.value
-            await finish(meetingID: meetingID, reason: .appQuit, finalTrigger: trigger)
+            await finish(meetingID: meetingID, reason: .appQuit, finalTrigger: policy.state.active?.trigger, lastHeldAt: nil)
         }
         pathMonitor?.cancel()
         try? store?.checkpoint()
-        NSApp.terminate(nil)
     }
 }
 

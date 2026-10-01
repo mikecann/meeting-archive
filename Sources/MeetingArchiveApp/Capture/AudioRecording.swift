@@ -15,6 +15,8 @@ struct AudioRecordingResult: Sendable {
     var tracks: [String: TrackProgress]
     /// Per track, the seconds of 100 ms windows louder than -50 dBFS.
     var activitySeconds: [String: Double]
+    /// Per track, the loudest 100 ms window's RMS. 0 is pure digital silence.
+    var peakLevels: [String: Double] = [:]
     /// The last input device used.
     var microphone: CapturedMicrophone?
     /// The first error that stopped a file, if any.
@@ -143,13 +145,15 @@ final class AudioRecording: @unchecked Sendable {
         }
         var tracks: [String: TrackProgress] = [:]
         var activity: [String: Double] = [:]
+        var peaks: [String: Double] = [:]
         for (track, summary) in summaries {
             activity[track.rawValue] = summary.activitySeconds
+            peaks[track.rawValue] = summary.peakLevel
             if let progress = summary.progress { tracks[track.rawValue] = progress }
         }
         let finishError = [MediaTrack.microphone, .incoming].lazy.compactMap { summaries[$0]?.error }.first
         let error = lock.withLock { failure } ?? finishError
-        let result = AudioRecordingResult(tracks: tracks, activitySeconds: activity, microphone: microphone?.device, error: error)
+        let result = AudioRecordingResult(tracks: tracks, activitySeconds: activity, peakLevels: peaks, microphone: microphone?.device, error: error)
         Log.capture.notice("Audio recording stopped; tracks: \(tracks.keys.sorted().joined(separator: ","), privacy: .public); activity: \(activity.sorted { $0.key < $1.key }.map { "\($0.key) \(Int($0.value))s" }.joined(separator: ", "), privacy: .public); error: \(error?.localizedDescription ?? "none", privacy: .public)")
         return result
     }

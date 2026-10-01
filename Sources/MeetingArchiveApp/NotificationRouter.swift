@@ -4,15 +4,19 @@ import UserNotifications
 /// Lets the "Recording" and "Saved" notifications carry Stop and Discard
 /// buttons, so an unexpected recording can be dealt with where it appears.
 final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+    /// Recording buttons name their call's series, so a banner left in
+    /// Notification Center can never stop or discard a later call.
     enum Action: Equatable {
-        case stopRecording
-        case discardRecording
+        case stopRecording(seriesID: UUID)
+        case discardRecording(seriesID: UUID)
         case discardSaved(UUID)
     }
 
     static let shared = NotificationRouter()
     static let recordingCategory = "recording"
     static let savedCategory = "saved"
+    static let seriesKey = "seriesID"
+    static let meetingKey = "meetingID"
     private static let stopAction = "stop"
     private static let discardAction = "discard"
     private static let discardSavedAction = "discard-saved"
@@ -42,12 +46,11 @@ final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate, @unc
     }
 
     static func action(identifier: String, userInfo: [AnyHashable: Any]) -> Action? {
+        func id(_ key: String) -> UUID? { (userInfo[key] as? String).flatMap(UUID.init(uuidString:)) }
         switch identifier {
-        case stopAction: return .stopRecording
-        case discardAction: return .discardRecording
-        case discardSavedAction:
-            guard let raw = userInfo["meetingID"] as? String, let id = UUID(uuidString: raw) else { return nil }
-            return .discardSaved(id)
+        case stopAction: return id(seriesKey).map { .stopRecording(seriesID: $0) }
+        case discardAction: return id(seriesKey).map { .discardRecording(seriesID: $0) }
+        case discardSavedAction: return id(meetingKey).map { .discardSaved($0) }
         default: return nil
         }
     }

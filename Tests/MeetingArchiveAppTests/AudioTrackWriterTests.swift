@@ -84,6 +84,26 @@ final class AudioTrackWriterTests: XCTestCase {
 
         XCTAssertEqual(summary.activitySeconds, 2, accuracy: 0.11)
         XCTAssertEqual(try ReadBack(writer.url).duration, 4, accuracy: 0.05)
+        XCTAssertEqual(summary.peakLevel, 0.1 / 2.squareRoot(), accuracy: 0.01)
+    }
+
+    /// A tap without the System Audio permission hands over pure zeros, which
+    /// the controller tells apart from a quiet call by the peak level.
+    func testPureDigitalSilenceHasAZeroPeakButQuietNoiseDoesNot() async throws {
+        let input = try format(.pcmFormatFloat32, rate: 48_000, channels: 2)
+        let silent = AudioTrackWriter.incoming(directory: directory, origin: origin)
+        feed(silent, signal(input, from: 0, seconds: 2, value: { _ in 0 }))
+        let quietDirectory = directory.appendingPathComponent("quiet", isDirectory: true)
+        try FileManager.default.createDirectory(at: quietDirectory, withIntermediateDirectories: true)
+        let quiet = AudioTrackWriter.incoming(directory: quietDirectory, origin: origin)
+        feed(quiet, signal(input, from: 0, seconds: 2, value: noise(rms: pow(10, -70.0 / 20))))
+
+        let silentSummary = await silent.finish()
+        let quietSummary = await quiet.finish()
+
+        XCTAssertEqual(silentSummary.peakLevel, 0)
+        XCTAssertGreaterThan(quietSummary.peakLevel, 0)
+        XCTAssertEqual(quietSummary.activitySeconds, 0)
     }
 
     func testAFormatChangeMidStreamCarriesOnInTheSameFile() async throws {

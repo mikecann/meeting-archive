@@ -4,6 +4,7 @@ import ServiceManagement
 import SwiftUI
 
 struct MeetingArchiveApplication: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var controller = ArchiveController()
     var body: some Scene {
         MenuBarExtra {
@@ -21,6 +22,8 @@ struct MeetingArchiveApplication: App {
                 if let app = controller.recordingApp {
                     Button("Never record \(app.displayName)…") { controller.confirmNeverRecord(app) }
                 }
+            } else if controller.isRetrying {
+                Button("Stop trying to record") { controller.stopRecording() }
             } else {
                 Button("Record now (\(GlobalHotKey.recordToggleDescription))") { controller.recordNow() }
             }
@@ -45,7 +48,7 @@ struct MeetingArchiveApplication: App {
             WindowButton()
             SettingsLink { Text("Settings…") }
             Divider()
-            Button("Quit Meeting Archive") { Task { await controller.quit() } }.keyboardShortcut("q")
+            Button("Quit Meeting Archive") { controller.quit() }.keyboardShortcut("q")
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: controller.isRecording ? "record.circle.fill" : controller.speakersNeedingNames > 0 ? "person.crop.circle.badge.exclamationmark" : controller.failure != nil ? "exclamationmark.circle" : controller.isPaused ? "pause.circle" : "waveform.circle")
@@ -76,6 +79,19 @@ enum AppNames {
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else { return bundleIdentifier }
         let name = FileManager.default.displayName(atPath: url.path)
         return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
+    }
+}
+
+/// Quitting, logging out and shutting down all come through here, so the part
+/// being recorded is always saved properly before the app goes.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let controller = ArchiveController.running else { return .terminateNow }
+        Task { @MainActor in
+            await controller.shutDown()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 }
 

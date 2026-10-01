@@ -16,6 +16,9 @@ struct ActivityMeter: Sendable {
     private var sums: [Double]
     private var framesInWindow = 0
     private(set) var activeFrames: Int64 = 0
+    /// The loudest window's RMS. Exactly 0 means pure digital silence, which a
+    /// real call never is, but a tap without permission always is.
+    private(set) var peak: Double = 0
 
     init(sampleRate: Double = 48_000, channels: Int) {
         self.sampleRate = sampleRate
@@ -64,6 +67,7 @@ struct ActivityMeter: Sendable {
     private mutating func closeWindow() {
         let loudest = sums.map { ($0 / Double(framesInWindow)).squareRoot() }.max() ?? 0
         if loudest > Self.threshold { activeFrames += Int64(framesInWindow) }
+        peak = max(peak, loudest)
         framesInWindow = 0
         for index in sums.indices { sums[index] = 0 }
     }
