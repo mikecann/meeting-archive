@@ -138,9 +138,14 @@ extension AVAudioFormat {
     /// from one device can carry equal data with differently built formats,
     /// and treating that as a device change would restart the resampler.
     func hasSameLayout(as other: AVAudioFormat) -> Bool {
-        let a = streamDescription.pointee, b = other.streamDescription.pointee
-        return a.mSampleRate == b.mSampleRate && a.mFormatID == b.mFormatID && a.mFormatFlags == b.mFormatFlags
-            && a.mBytesPerFrame == b.mBytesPerFrame && a.mChannelsPerFrame == b.mChannelsPerFrame
-            && a.mBitsPerChannel == b.mBitsPerChannel
+        streamDescription.pointee.hasSameLayout(as: other.streamDescription.pointee)
+    }
+}
+
+extension AudioStreamBasicDescription {
+    func hasSameLayout(as other: AudioStreamBasicDescription) -> Bool {
+        mSampleRate == other.mSampleRate && mFormatID == other.mFormatID && mFormatFlags == other.mFormatFlags
+            && mBytesPerFrame == other.mBytesPerFrame && mChannelsPerFrame == other.mChannelsPerFrame
+            && mBitsPerChannel == other.mBitsPerChannel
     }
 }

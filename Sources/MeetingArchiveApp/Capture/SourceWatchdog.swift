@@ -52,6 +52,47 @@ struct SourceWatchdog: Equatable {
     }
 }
 
+/// Turns a burst of device notifications into one rebuild. A rebuild waits
+/// until notifications have been quiet for `settleDelay` (connecting AirPods
+/// changes the default input, output and rate one after another), and
+/// rebuilds stay `minimumSpacing` apart, so a device that keeps changing, or
+/// a rebuild that itself sets off a notification, cannot loop. Use it only
+/// on its queue.
+final class RebuildScheduler: @unchecked Sendable {
+    private let queue: DispatchQueue
+    private let settleDelay: TimeInterval
+    private let minimumSpacing: TimeInterval
+    private var generation = 0
+    private var reason: String?
+    private var lastRebuild = -TimeInterval.infinity
+
+    init(queue: DispatchQueue, settleDelay: TimeInterval = 0.3, minimumSpacing: TimeInterval = 2) {
+        self.queue = queue
+        self.settleDelay = settleDelay
+        self.minimumSpacing = minimumSpacing
+    }
+
+    /// `rebuild` runs on the queue with the burst's first reason, which
+    /// explains it best.
+    func request(_ reason: String, rebuild: @escaping @Sendable (String) -> Void) {
+        generation += 1
+        let request = generation
+        self.reason = self.reason ?? reason
+        let delay = max(settleDelay, lastRebuild + minimumSpacing - DeliveryClock.now)
+        queue.asyncAfter(deadline: .now() + delay) {
+            guard request == self.generation, let reason = self.reason else { return }
+            self.reason = nil
+            self.lastRebuild = DeliveryClock.now
+            rebuild(reason)
+        }
+    }
+
+    /// Restarts for other reasons, such as the watchdog's, count too.
+    func rebuilt(at now: TimeInterval) {
+        lastRebuild = now
+    }
+}
+
 /// When a source last delivered audio. Audio callbacks stamp it without
 /// taking a lock, since the tap's callback runs on Core Audio's IO thread.
 final class DeliveryClock: Sendable {
