@@ -1,4 +1,5 @@
 import CoreMedia
+import Darwin
 import Foundation
 
 /// macOS asks for System Audio Recording the first time a tap is read, and
@@ -23,5 +24,26 @@ enum SystemAudioPermission {
         try? await Task.sleep(for: .seconds(1))
         await source.stop()
         _ = await writer.finish()
+    }
+}
+
+extension SystemAudioPermission {
+    /// macOS has no public way to read this permission. TCC's own preflight
+    /// call answers it, the same way AudioCap does. It is private, so it is
+    /// looked up at runtime, and nil means the answer isn't available.
+    static func status() -> AppSystemAuthorizationStatus? {
+        guard let handle = dlopen("/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC", RTLD_NOW),
+              let symbol = dlsym(handle, "TCCAccessPreflight") else { return nil }
+        typealias Preflight = @convention(c) (CFString, CFDictionary?) -> Int32
+        let preflight = unsafeBitCast(symbol, to: Preflight.self)
+        return status(preflightResult: preflight("kTCCServiceAudioCapture" as CFString, nil))
+    }
+
+    static func status(preflightResult: Int32) -> AppSystemAuthorizationStatus {
+        switch preflightResult {
+        case 0: .granted
+        case 1: .denied
+        default: .notDetermined
+        }
     }
 }

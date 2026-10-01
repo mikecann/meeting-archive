@@ -72,11 +72,11 @@ struct MeetingArchiveApplication: App {
     }
 }
 
-/// Names for bundle IDs in Settings, from the installed app when there is one.
+/// Names for bundle IDs in Settings, from the installed app.
 enum AppNames {
     @MainActor
-    static func name(for bundleIdentifier: String) -> String {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else { return bundleIdentifier }
+    static func installedName(for bundleIdentifier: String) -> String? {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else { return nil }
         let name = FileManager.default.displayName(atPath: url.path)
         return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
     }
@@ -367,14 +367,19 @@ struct ArchiveSettingsView: View {
                 }
             }
             Section("Never record these apps") {
-                ForEach(settings.ignoredBundleIDs.sorted { AppNames.name(for: $0).localizedCaseInsensitiveCompare(AppNames.name(for: $1)) == .orderedAscending }, id: \.self) { bundleID in
+                let ignored = settings.ignoredBundleIDs.filter { $0 != Bundle.main.bundleIdentifier }
+                let named = ignored.compactMap { id in AppNames.installedName(for: id).map { (id: id, name: $0) } }
+                    .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                ForEach(named, id: \.id) { app in
                     HStack {
-                        Text(AppNames.name(for: bundleID))
+                        Text(app.name)
                         Spacer()
-                        if bundleID != Bundle.main.bundleIdentifier {
-                            Button("Record it") { settings.stopIgnoring(bundleID) }
-                        }
+                        Button("Record it") { settings.stopIgnoring(app.id) }
                     }
+                }
+                if ignored.count > named.count {
+                    Text("Also ignored: Siri, dictation and other system listeners, plus dictation and recording apps you don't have installed.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 let seen = controller.recentMicUsers.filter { !settings.ignoredBundleIDs.contains($0.bundleIdentifier) }
                 if !seen.isEmpty {

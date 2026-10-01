@@ -106,7 +106,8 @@ final class AppPermissions: ObservableObject {
     func refresh() async {
         let notificationSettings = await UNUserNotificationCenter.current().notificationSettings()
         statuses = [
-            .systemAudio: defaults.bool(forKey: AppPermissionKind.systemAudio.requestAttemptedKey) ? .cannotCheck : .notRequested,
+            .systemAudio: SystemAudioPermission.status().map(AppPermissionStatusMapper.system)
+                ?? (defaults.bool(forKey: AppPermissionKind.systemAudio.requestAttemptedKey) ? .cannotCheck : .notRequested),
             .microphone: AppPermissionStatusMapper.system(Self.microphoneStatus()),
             .notifications: AppPermissionStatusMapper.system(Self.notificationStatus(notificationSettings.authorizationStatus)),
             .calendar: AppPermissionStatusMapper.system(Self.calendarStatus()),
