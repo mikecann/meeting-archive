@@ -32,7 +32,7 @@ exit 3
 STUB
 cat >"$ROOT/bin/open" <<'STUB'
 #!/bin/sh
-echo open >>"$CALLS"
+echo "open $*" >>"$CALLS"
 STUB
 chmod +x "$ROOT/bin/ps" "$ROOT/bin/launchctl" "$ROOT/bin/swift" "$ROOT/bin/open"
 
@@ -87,5 +87,17 @@ run restart.sh "$login_item" "running"
 expect_refused "restart.sh"
 run setup_mac.sh "$login_item" "running"
 expect_refused "setup_mac.sh"
+
+# restart.sh opens the app once a build succeeds. A copy runs against a
+# stand-in build-app.sh, since the real build always stops at the swift stub.
+mkdir -p "$ROOT/restart"
+cp "$TOOL_DIR/restart.sh" "$ROOT/restart/restart.sh"
+printf '#!/bin/sh\necho build >>"$CALLS"\n' >"$ROOT/restart/build-app.sh"
+chmod +x "$ROOT/restart/build-app.sh"
+: >"$ROOT/calls"
+PATH="$ROOT/bin:$PATH" CALLS="$ROOT/calls" MEETING_ARCHIVE_APP_DIR="$ROOT/Meeting Archive.app" \
+  bash "$ROOT/restart/restart.sh" >"$ROOT/output" 2>&1 || fail "restart.sh: failed after a successful build"
+[[ "$(cat "$ROOT/calls")" == "build"$'\n'"open $ROOT/Meeting Archive.app" ]] \
+  || fail "restart.sh: expected a build, then the app to open"
 
 echo "Rebuild guard tests passed"
