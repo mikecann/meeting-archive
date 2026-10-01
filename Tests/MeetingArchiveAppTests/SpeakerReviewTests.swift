@@ -75,7 +75,7 @@ final class SpeakerReviewTests: XCTestCase {
             "embedding_available": true,
             "excerpts": [],
             "automatic_name": "Mike Cann",
-            "suggestion_kind": "strong",
+            "suggestion_kind": "own_microphone",
             "confirmation_count": 4,
             "evidence_labels": [{
               "name": "Michael Cann",
@@ -91,64 +91,45 @@ final class SpeakerReviewTests: XCTestCase {
         let speaker = try XCTUnwrap(response.speakers.first)
 
         XCTAssertEqual(speaker.automaticName, "Mike Cann")
-        XCTAssertEqual(speaker.suggestionKind, "strong")
+        XCTAssertEqual(speaker.suggestionKind, "own_microphone")
         XCTAssertEqual(speaker.confirmationCount, 4)
     }
 
-    func testDraftsAutofillExistingNameThenPredictionAndMarkOnlyPrediction() {
-        let speakers = [
-            SpeakerReviewSpeaker(
-                speakerID: "known",
-                name: "Michael",
-                suggestedName: "Mike",
-                suggestionScore: 0.9,
-                suggestionMargin: 0.2,
-                embeddingAvailable: true,
-                excerpts: [],
-                automaticName: "Wrong automatic fallback"
-            ),
-            SpeakerReviewSpeaker(
-                speakerID: "predicted",
-                name: nil,
-                suggestedName: "Alex",
-                suggestionScore: 0.8,
-                suggestionMargin: 0.1,
-                embeddingAvailable: true,
-                excerpts: []
-            ),
-            SpeakerReviewSpeaker(
-                speakerID: "unknown",
-                name: nil,
-                suggestedName: nil,
-                suggestionScore: nil,
-                suggestionMargin: nil,
-                embeddingAvailable: false,
-                excerpts: []
-            ),
-            SpeakerReviewSpeaker(
-                speakerID: "automatic",
-                name: nil,
-                suggestedName: "Tentative fallback",
-                suggestionScore: nil,
-                suggestionMargin: nil,
-                embeddingAvailable: true,
-                excerpts: [],
-                automaticName: "Known voice",
-                suggestionKind: "strong",
-                confirmationCount: 3
-            ),
-        ]
+    func testVoicesAreLabelledByTrackAndNumberFromOne() {
+        XCTAssertEqual(makeSpeaker(id: "incoming:SPEAKER_01").voiceLabel, "Call audio, voice 2")
+        XCTAssertEqual(makeSpeaker(id: "microphone:SPEAKER_00").voiceLabel, "Your mic, voice 1")
+        XCTAssertEqual(makeSpeaker(id: "SPEAKER_00").voiceLabel, "SPEAKER_00")
+    }
 
-        let drafts = SpeakerReviewDraft.make(speakers: speakers)
+    func testStartingNamePrefersSavedThenRecognizedThenSuggested() {
+        XCTAssertEqual(SpeakerReviewCard.startingName(for: makeSpeaker(
+            id: "a", name: " Michael ", suggestion: "Mike", automaticName: "Wrong automatic fallback"
+        )), "Michael")
+        XCTAssertEqual(SpeakerReviewCard.startingName(for: makeSpeaker(
+            id: "b", suggestion: "Tentative fallback", automaticName: "Known voice", suggestionKind: "strong"
+        )), "Known voice")
+        XCTAssertEqual(SpeakerReviewCard.startingName(for: makeSpeaker(id: "c", suggestion: "Alex")), "Alex")
+        XCTAssertEqual(SpeakerReviewCard.startingName(for: makeSpeaker(id: "d", name: "  ")), "")
+    }
 
-        XCTAssertEqual(drafts["known"]?.name, "Michael")
-        XCTAssertEqual(drafts["known"]?.isPredicted, false)
-        XCTAssertEqual(drafts["predicted"]?.name, "Alex")
-        XCTAssertEqual(drafts["predicted"]?.isPredicted, true)
-        XCTAssertEqual(drafts["unknown"]?.name, "")
-        XCTAssertEqual(drafts["unknown"]?.isPredicted, false)
-        XCTAssertEqual(drafts["automatic"]?.name, "Known voice")
-        XCTAssertEqual(drafts["automatic"]?.isPredicted, false)
+    /// Mike's screenshot: pyannote split Micah in two, and each half needed
+    /// its own Confirm. Voices with the same name are now one card.
+    func testVoicesWithTheSameNameShareOneCardWhateverTheNameCameFrom() {
+        let cards = SpeakerReviewCard.make(speakers: [
+            makeSpeaker(id: "incoming:SPEAKER_00", name: "Micah"),
+            makeSpeaker(id: "incoming:SPEAKER_01", suggestion: "micah ", suggestionKind: "tentative"),
+            makeSpeaker(id: "incoming:SPEAKER_02"),
+            makeSpeaker(id: "incoming:SPEAKER_03"),
+            makeSpeaker(id: "microphone:SPEAKER_00", automaticName: "Mike Cann", suggestionKind: "own_microphone"),
+        ])
+
+        XCTAssertEqual(cards.map(\.speakerIDs), [
+            ["incoming:SPEAKER_00", "incoming:SPEAKER_01"],
+            ["incoming:SPEAKER_02"],
+            ["incoming:SPEAKER_03"],
+            ["microphone:SPEAKER_00"],
+        ])
+        XCTAssertEqual(cards.map(\.name), ["Micah", "", "", "Mike Cann"])
     }
 
     func testRemoteShellQuotesArbitraryNamesAsOneLiteralArgument() {
@@ -159,25 +140,74 @@ final class SpeakerReviewTests: XCTestCase {
         XCTAssertEqual(quoted, "'D'\"'\"'Angelo $(touch /tmp/nope); `whoami`\nSecond line'")
     }
 
-    func testIdentifyRequestQuotesEveryRemoteArgument() throws {
+    func testSaveNamesSendsEveryNameAsOneQuotedJSONArgument() throws {
         let meetingID = UUID()
         var configuration = ArchiveTransferConfiguration.bruce
         configuration.host = "test-host"
-        let request = try SpeakerReviewCommandBuilder.identify(
+        let request = try SpeakerReviewCommandBuilder.saveNames(
             meetingID: meetingID,
             revision: 4,
-            speakerID: "SPEAKER_00",
-            name: "D'Angelo; echo bad",
+            names: ["incoming:SPEAKER_01": " D'Angelo; echo bad ", "incoming:SPEAKER_00": "Micah"],
             configuration: configuration
         )
 
         XCTAssertEqual(request.executable.path, "/usr/bin/ssh")
         XCTAssertEqual(request.arguments.dropLast().suffix(1), ["test-host"])
         let command = try XCTUnwrap(request.arguments.last)
-        XCTAssertTrue(command.contains("'identify'"))
-        XCTAssertTrue(command.contains("'--name' 'D'\"'\"'Angelo; echo bad'"))
-        XCTAssertFalse(command.contains("--name D'Angelo"))
-        XCTAssertEqual(request.timeout, configuration.commandTimeout)
+        XCTAssertTrue(command.contains("'identify-speakers'"))
+        XCTAssertTrue(command.contains("'--meeting-id' '\(meetingID.uuidString.lowercased())'"))
+        XCTAssertTrue(command.contains(
+            "'--names' '{\"incoming:SPEAKER_00\":\"Micah\",\"incoming:SPEAKER_01\":\"D'\"'\"'Angelo; echo bad\"}'"
+        ))
+        XCTAssertEqual(request.timeout, configuration.workerTimeout)
+    }
+
+    func testSaveNamesRefusesAnEmptyRequestOrName() {
+        XCTAssertThrowsError(try SpeakerReviewCommandBuilder.saveNames(
+            meetingID: UUID(), revision: 1, names: [:], configuration: .bruce
+        ))
+        XCTAssertThrowsError(try SpeakerReviewCommandBuilder.saveNames(
+            meetingID: UUID(), revision: 1, names: ["incoming:SPEAKER_00": "  "], configuration: .bruce
+        ))
+    }
+
+    func testSavedNamesMustBeExactlyTheNamesSent() throws {
+        let meetingID = UUID()
+        let names = ["a": "Micah", "b": "Micah"]
+        func response(_ speakers: [(String, String)], revision: Int = 3) -> SavedSpeakerNamesResponse {
+            SavedSpeakerNamesResponse(
+                schemaVersion: 1, meetingID: meetingID, manifestRevision: revision,
+                speakers: speakers.map { .init(speakerID: $0.0, name: $0.1, voiceProfileEnrolled: true) }
+            )
+        }
+
+        XCTAssertNoThrow(try response([("a", "Micah"), ("b", "Micah")]).validate(meetingID: meetingID, revision: 3, names: names))
+        XCTAssertThrowsError(try response([("a", "Micah")]).validate(meetingID: meetingID, revision: 3, names: names))
+        XCTAssertThrowsError(try response([("a", "Micah"), ("b", "Sean")]).validate(meetingID: meetingID, revision: 3, names: names))
+        XCTAssertThrowsError(try response([("a", "Micah"), ("a", "Micah")]).validate(meetingID: meetingID, revision: 3, names: names))
+        XCTAssertThrowsError(try response([("a", "Micah"), ("b", "Micah")], revision: 2).validate(meetingID: meetingID, revision: 3, names: names))
+    }
+
+    func testSaveNamesClientChecksWhatBruceSaved() async throws {
+        let meetingID = UUID()
+        let saved = """
+        {"schema_version":1,"meeting_id":"\(meetingID.uuidString.lowercased())","manifest_revision":3,
+         "speakers":[{"speaker_id":"incoming:SPEAKER_00","name":"Micah","voice_profile_enrolled":true}]}
+        """
+        let runner = RecordingProcessRunner(stdout: Data(saved.utf8))
+        let client = SpeakerReviewClient(processRunner: runner)
+
+        let response = try await client.saveNames(
+            meetingID: meetingID, revision: 3, names: ["incoming:SPEAKER_00": " Micah "], configuration: .bruce
+        )
+        XCTAssertEqual(response.speakers.map(\.name), ["Micah"])
+
+        do {
+            _ = try await client.saveNames(
+                meetingID: meetingID, revision: 3, names: ["incoming:SPEAKER_00": "Sean"], configuration: .bruce
+            )
+            XCTFail("A different name back must not count as saved")
+        } catch {}
     }
 
     func testReviewRequestUsesResolvedArchiveDirectoryAndWorkerTimeout() throws {
@@ -258,174 +288,233 @@ final class SpeakerReviewTests: XCTestCase {
     }
 
     @MainActor
-    func testLoadedSavedNamesRemainConfirmedOnReopen() async {
+    func testLoadPutsVoicesThatNeedMikeFirstAndRestoresSavedNames() async {
         let meetingID = UUID()
-        let response = makeResponse(
+        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: makeResponse(
             meetingID: meetingID,
-            speakers: [makeSpeaker(id: "saved", name: "Michael"), makeSpeaker(id: "pending")]
-        )
-        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: response))
+            speakers: [
+                makeSpeaker(id: "saved", name: "Michael"),
+                makeSpeaker(id: "recognized", automaticName: "Mike Cann", suggestionKind: "strong", confirmationCount: 3),
+                makeSpeaker(id: "suggested", suggestion: "Alex", suggestionKind: "tentative"),
+                makeSpeaker(id: "unknown"),
+            ]
+        )))
 
         await model.load()
 
-        XCTAssertEqual(model.confirmedSpeakerIDs, Set(["saved"]))
-        XCTAssertEqual(model.remainingUnconfirmedCount, 1)
-        XCTAssertFalse(model.canComplete)
+        XCTAssertEqual(model.cards.map(\.speakerIDs), [["suggested"], ["unknown"], ["recognized"], ["saved"]])
+        XCTAssertEqual(model.cards.map { model.status(of: $0) }, [.suggested, .unknown, .recognized, .saved])
+        XCTAssertEqual(model.savedNames, ["saved": "Michael"])
+        XCTAssertEqual(model.namesToSave, ["recognized": "Mike Cann", "suggested": "Alex"])
+    }
+
+    /// One click: everything filled in is saved, whoever filled it in.
+    @MainActor
+    func testOneSaveSendsEveryFilledInNameAndLeavesBlanksUnknown() async throws {
+        let meetingID = UUID()
+        let client = StubSpeakerReviewClient(response: makeResponse(
+            meetingID: meetingID,
+            speakers: [
+                makeSpeaker(id: "saved", name: "Michael"),
+                makeSpeaker(id: "recognized", automaticName: "Mike Cann", suggestionKind: "own_microphone"),
+                makeSpeaker(id: "suggested", suggestion: "Alex", suggestionKind: "tentative"),
+                makeSpeaker(id: "split-a"),
+                makeSpeaker(id: "split-b"),
+                makeSpeaker(id: "unknown"),
+            ]
+        ))
+        var changes = 0
+        let model = makeModel(meetingID: meetingID, client: client, onReviewChanged: { changes += 1 })
+        await model.load()
+        let first = try XCTUnwrap(model.card(containing: "split-a"))
+        let second = try XCTUnwrap(model.card(containing: "split-b"))
+        model.setName("Micah", forCard: first.id)
+        model.setName("Micah", forCard: second.id)
+
+        let finished = await model.save()
+
+        XCTAssertTrue(finished)
+        let calls = await client.savedNameCalls()
+        XCTAssertEqual(calls, [[
+            "recognized": "Mike Cann", "suggested": "Alex", "split-a": "Micah", "split-b": "Micah",
+        ]])
+        XCTAssertEqual(model.card(containing: "split-a")?.speakerIDs, ["split-a", "split-b"])
+        XCTAssertEqual(model.cards.filter { model.status(of: $0) == .saved }.count, 4)
+        XCTAssertNil(model.savedNames["unknown"])
+        XCTAssertEqual(model.status(of: try XCTUnwrap(model.card(containing: "unknown"))), .unknown)
+        XCTAssertEqual(changes, 1)
+        XCTAssertNil(model.failure)
     }
 
     @MainActor
-    func testStrongAutomaticNameLoadsConfirmedWithoutIdentifyCall() async {
+    func testTypingAnotherCardsNameMergesThemOnlyOnceTheNameIsFinished() async throws {
         let meetingID = UUID()
-        let response = makeResponse(
+        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: makeResponse(
             meetingID: meetingID,
-            speakers: [makeSpeaker(id: "automatic", automaticName: "Mike Cann", suggestionKind: "strong")]
-        )
-        let client = StubSpeakerReviewClient(response: response)
+            speakers: [makeSpeaker(id: "a", name: "Micah"), makeSpeaker(id: "b"), makeSpeaker(id: "c")]
+        )))
+        await model.load()
+        let typed = try XCTUnwrap(model.card(containing: "b"))
+
+        model.setName("MICAH", forCard: typed.id)
+        XCTAssertEqual(model.cards.count, 3, "cards must not jump about while Mike types")
+
+        model.commitName(forCard: typed.id)
+
+        XCTAssertEqual(model.cards.count, 2)
+        let merged = try XCTUnwrap(model.card(containing: "a"))
+        XCTAssertEqual(merged.speakerIDs, ["b", "a"])
+        XCTAssertEqual(merged.name, "Micah", "the name already there keeps its spelling")
+        XCTAssertEqual(model.cards.first?.id, merged.id, "the merged card takes the earlier place")
+        XCTAssertEqual(model.namesToSave, ["b": "Micah"])
+    }
+
+    @MainActor
+    func testChoosingACalendarAttendeeMergesStraightAway() async throws {
+        let meetingID = UUID()
+        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: makeResponse(
+            meetingID: meetingID,
+            speakers: [makeSpeaker(id: "a", suggestion: "Priya Shah", suggestionKind: "tentative"), makeSpeaker(id: "b")]
+        )))
+        await model.load()
+
+        model.chooseName("Priya Shah", forCard: try XCTUnwrap(model.card(containing: "b")).id)
+
+        XCTAssertEqual(model.cards.map(\.speakerIDs), [["a", "b"]])
+    }
+
+    @MainActor
+    func testSeparatingAVoiceGivesItABlankCardThatSaveLeavesAlone() async throws {
+        let meetingID = UUID()
+        let client = StubSpeakerReviewClient(response: makeResponse(
+            meetingID: meetingID,
+            speakers: [
+                makeSpeaker(id: "a", suggestion: "Sean", suggestionKind: "tentative"),
+                makeSpeaker(id: "b", suggestion: "Sean", suggestionKind: "tentative"),
+            ]
+        ))
         let model = makeModel(meetingID: meetingID, client: client)
-
         await model.load()
+        XCTAssertEqual(model.cards.count, 1)
 
-        XCTAssertEqual(model.drafts["automatic"]?.name, "Mike Cann")
-        XCTAssertTrue(model.confirmedSpeakerIDs.contains("automatic"))
-        XCTAssertEqual(model.remainingUnconfirmedCount, 0)
-        XCTAssertTrue(model.canComplete)
-        let saved = await model.confirm("automatic")
-        let identifyCalls = await client.identifyCallCount()
-        XCTAssertFalse(saved)
-        XCTAssertEqual(identifyCalls, 0)
+        model.separate("b")
+
+        XCTAssertEqual(model.cards.map(\.speakerIDs), [["a"], ["b"]])
+        XCTAssertEqual(model.card(containing: "b")?.name, "")
+        _ = await model.save()
+        let calls = await client.savedNameCalls()
+        XCTAssertEqual(calls, [["a": "Sean"]])
     }
 
     @MainActor
-    func testTentativeSuggestionPrefillsButRemainsUnconfirmed() async {
+    func testFailedSaveMarksNothingSavedAndTheSameClickRetries() async throws {
         let meetingID = UUID()
-        let response = makeResponse(
-            meetingID: meetingID,
-            speakers: [makeSpeaker(id: "tentative", suggestion: "Mike Cann", suggestionKind: "tentative")]
+        let client = StubSpeakerReviewClient(
+            response: makeResponse(meetingID: meetingID, speakers: [makeSpeaker(id: "pending", suggestion: "Alex")]),
+            failures: 1
         )
-        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: response))
-
+        var changes = 0
+        let model = makeModel(meetingID: meetingID, client: client, onReviewChanged: { changes += 1 })
         await model.load()
 
-        XCTAssertEqual(model.drafts["tentative"], SpeakerReviewDraft(name: "Mike Cann", isPredicted: true))
-        XCTAssertFalse(model.confirmedSpeakerIDs.contains("tentative"))
-        XCTAssertEqual(model.remainingUnconfirmedCount, 1)
-        XCTAssertFalse(model.canComplete)
+        let failed = await model.save()
+
+        XCTAssertFalse(failed)
+        XCTAssertNotNil(model.failure)
+        XCTAssertEqual(model.savedNames, [:])
+        XCTAssertEqual(model.namesToSave, ["pending": "Alex"])
+        XCTAssertEqual(changes, 0)
+
+        let retried = await model.save()
+
+        XCTAssertTrue(retried)
+        XCTAssertNil(model.failure)
+        XCTAssertEqual(model.savedNames, ["pending": "Alex"])
+        XCTAssertEqual(changes, 1)
     }
 
     @MainActor
-    func testEditingAutomaticNameInvalidatesCompletionUntilConfirmed() async {
+    func testANameEditedWhileSavingStaysToBeSaved() async throws {
         let meetingID = UUID()
-        let response = makeResponse(
-            meetingID: meetingID,
-            speakers: [makeSpeaker(id: "automatic", automaticName: "Mike Cann", suggestionKind: "strong")]
+        let client = ControlledSpeakerReviewClient(
+            response: makeResponse(meetingID: meetingID, speakers: [makeSpeaker(id: "pending", suggestion: "Alex")])
         )
-        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: response))
+        let model = makeModel(meetingID: meetingID, client: client)
         await model.load()
+        let card = try XCTUnwrap(model.cards.first)
 
-        model.setName("Michael Cann", for: "automatic")
+        let saving = Task { await model.save() }
+        await client.waitUntilSaveStarted()
+        XCTAssertFalse(model.canSave)
+        model.setName("Alicia", forCard: card.id)
+        await client.finishSave()
+        let finished = await saving.value
 
-        XCTAssertFalse(model.confirmedSpeakerIDs.contains("automatic"))
-        XCTAssertFalse(model.canComplete)
-        let saved = await model.confirm("automatic")
-        XCTAssertTrue(saved)
-        XCTAssertTrue(model.canComplete)
-        XCTAssertEqual(model.response?.speakers.first?.name, "Michael Cann")
+        XCTAssertFalse(finished)
+        XCTAssertEqual(model.savedNames, ["pending": "Alex"])
+        XCTAssertEqual(model.namesToSave, ["pending": "Alicia"])
+        XCTAssertEqual(model.status(of: try XCTUnwrap(model.cards.first)), .typed)
+        XCTAssertTrue(model.canSave)
     }
 
     @MainActor
-    func testEditingSavedNameInvalidatesConfirmationUntilSuccessfulSave() async {
+    func testNothingToSaveClosesWithoutAskingBruce() async {
         let meetingID = UUID()
-        let response = makeResponse(meetingID: meetingID, speakers: [makeSpeaker(id: "saved", name: "Michael")])
-        var changedCount = 0
+        let client = StubSpeakerReviewClient(response: makeResponse(
+            meetingID: meetingID,
+            speakers: [makeSpeaker(id: "saved", name: "Michael"), makeSpeaker(id: "unknown")]
+        ))
+        let model = makeModel(meetingID: meetingID, client: client)
+        await model.load()
+
+        let finished = await model.save()
+
+        XCTAssertTrue(finished)
+        let calls = await client.savedNameCalls()
+        XCTAssertEqual(calls, [])
+    }
+
+    @MainActor
+    func testClearingASavedNameDoesNotUnsaveItAndRenamingSavesTheNewName() async throws {
+        let meetingID = UUID()
+        let client = StubSpeakerReviewClient(
+            response: makeResponse(meetingID: meetingID, speakers: [makeSpeaker(id: "saved", name: "Michael")])
+        )
+        let model = makeModel(meetingID: meetingID, client: client)
+        await model.load()
+        let card = try XCTUnwrap(model.cards.first)
+
+        model.setName("", forCard: card.id)
+        XCTAssertEqual(model.namesToSave, [:])
+        XCTAssertEqual(model.status(of: try XCTUnwrap(model.cards.first)), .unknown)
+
+        model.setName("Mike", forCard: card.id)
+        XCTAssertEqual(model.status(of: try XCTUnwrap(model.cards.first)), .typed)
+        let finished = await model.save()
+
+        XCTAssertTrue(finished)
+        let calls = await client.savedNameCalls()
+        XCTAssertEqual(calls, [["saved": "Mike"]])
+        XCTAssertEqual(model.savedNames, ["saved": "Mike"])
+    }
+
+    @MainActor
+    func testZeroSpeakerReviewCanBeSavedOnlyOnceItLoads() async {
+        let meetingID = UUID()
         let model = makeModel(
             meetingID: meetingID,
-            client: StubSpeakerReviewClient(response: response),
-            onReviewChanged: { changedCount += 1 }
+            client: StubSpeakerReviewClient(response: makeResponse(meetingID: meetingID, speakers: []))
         )
-        await model.load()
-        XCTAssertTrue(model.canComplete)
 
-        model.setName("Mike", for: "saved")
-
-        XCTAssertFalse(model.confirmedSpeakerIDs.contains("saved"))
-        XCTAssertEqual(model.remainingUnconfirmedCount, 1)
-        XCTAssertFalse(model.canComplete)
-        let saved = await model.confirm("saved")
-        XCTAssertTrue(saved)
-        XCTAssertEqual(model.remainingUnconfirmedCount, 0)
-        XCTAssertTrue(model.canComplete)
-        XCTAssertEqual(changedCount, 1)
-    }
-
-    @MainActor
-    func testFailedConfirmationNeverClearsPendingReviewOrCallsChangeCallback() async {
-        let meetingID = UUID()
-        let response = makeResponse(meetingID: meetingID, speakers: [makeSpeaker(id: "pending", suggestion: "Alex")])
-        var changedCount = 0
-        let client = StubSpeakerReviewClient(response: response, identifyFails: true)
-        let model = makeModel(meetingID: meetingID, client: client, onReviewChanged: { changedCount += 1 })
-        await model.load()
-
-        let saved = await model.confirm("pending")
-        XCTAssertFalse(saved)
-
-        XCTAssertEqual(model.remainingUnconfirmedCount, 1)
-        XCTAssertFalse(model.confirmedSpeakerIDs.contains("pending"))
-        XCTAssertFalse(model.canComplete)
-        XCTAssertNotNil(model.failure)
-        XCTAssertEqual(changedCount, 0)
-    }
-
-    @MainActor
-    func testZeroSpeakerResponseCanCompleteOnlyAfterItLoads() async {
-        let meetingID = UUID()
-        let response = makeResponse(meetingID: meetingID, speakers: [])
-        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: response))
-
-        XCTAssertEqual(model.remainingUnconfirmedCount, 0)
-        XCTAssertFalse(model.canComplete)
+        XCTAssertFalse(model.canSave)
+        let early = await model.save()
+        XCTAssertFalse(early)
 
         await model.load()
 
-        XCTAssertEqual(model.remainingUnconfirmedCount, 0)
-        XCTAssertTrue(model.canComplete)
-    }
-
-    @MainActor
-    func testPendingSpeakerBlocksCompletionUntilSuccessfulConfirmation() async {
-        let meetingID = UUID()
-        let response = makeResponse(meetingID: meetingID, speakers: [makeSpeaker(id: "pending", suggestion: "Alex")])
-        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: response))
-        await model.load()
-
-        XCTAssertFalse(model.canComplete)
-        let saved = await model.confirm("pending")
-        XCTAssertTrue(saved)
-        XCTAssertTrue(model.canComplete)
-    }
-
-    @MainActor
-    func testEditDuringConfirmationPreservesNewDraftAndKeepsCompletionPending() async {
-        let meetingID = UUID()
-        let response = makeResponse(meetingID: meetingID, speakers: [makeSpeaker(id: "pending", suggestion: "Alex")])
-        let client = ControlledSpeakerReviewClient(response: response)
-        var changedCount = 0
-        let model = makeModel(meetingID: meetingID, client: client, onReviewChanged: { changedCount += 1 })
-        await model.load()
-
-        let confirmation = Task { await model.confirm("pending") }
-        await client.waitUntilIdentifyStarted()
-        XCTAssertFalse(model.canComplete)
-        model.setName("Alicia", for: "pending")
-        await client.finishIdentify()
-        let savedCurrentDraft = await confirmation.value
-
-        XCTAssertFalse(savedCurrentDraft)
-        XCTAssertEqual(model.drafts["pending"]?.name, "Alicia")
-        XCTAssertFalse(model.confirmedSpeakerIDs.contains("pending"))
-        XCTAssertEqual(model.remainingUnconfirmedCount, 1)
-        XCTAssertFalse(model.canComplete)
-        XCTAssertEqual(changedCount, 1)
+        XCTAssertTrue(model.canSave)
+        let finished = await model.save()
+        XCTAssertTrue(finished)
     }
 
     @MainActor
@@ -479,14 +568,35 @@ final class SpeakerReviewTests: XCTestCase {
     }
 }
 
+private func savedResponse(meetingID: UUID, revision: Int, names: [String: String]) -> SavedSpeakerNamesResponse {
+    SavedSpeakerNamesResponse(
+        schemaVersion: 1,
+        meetingID: meetingID,
+        manifestRevision: revision,
+        speakers: names.sorted { $0.key < $1.key }.map {
+            .init(speakerID: $0.key, name: $0.value.trimmingCharacters(in: .whitespacesAndNewlines), voiceProfileEnrolled: true)
+        }
+    )
+}
+
+private actor RecordingProcessRunner: ArchiveProcessRunning {
+    let stdout: Data
+
+    init(stdout: Data) { self.stdout = stdout }
+
+    func run(_ request: ArchiveProcessRequest) async throws -> ArchiveProcessResult {
+        ArchiveProcessResult(exitCode: 0, stdout: stdout, stderr: "")
+    }
+}
+
 private actor StubSpeakerReviewClient: SpeakerReviewServing {
     let response: SpeakerReviewResponse
-    let identifyFails: Bool
-    private var identifyCalls = 0
+    private var failures: Int
+    private var calls: [[String: String]] = []
 
-    init(response: SpeakerReviewResponse, identifyFails: Bool = false) {
+    init(response: SpeakerReviewResponse, failures: Int = 0) {
         self.response = response
-        self.identifyFails = identifyFails
+        self.failures = failures
     }
 
     func load(
@@ -497,29 +607,21 @@ private actor StubSpeakerReviewClient: SpeakerReviewServing {
         response
     }
 
-    func identify(
+    func saveNames(
         meetingID: UUID,
         revision: Int,
-        speakerID: String,
-        name: String,
+        names: [String: String],
         configuration: ArchiveTransferConfiguration
-    ) async throws -> SpeakerIdentificationResponse {
-        identifyCalls += 1
-        if identifyFails {
-            throw SpeakerReviewError.invalidResponse("confirmation failed")
+    ) async throws -> SavedSpeakerNamesResponse {
+        calls.append(names)
+        if failures > 0 {
+            failures -= 1
+            throw SpeakerReviewError.invalidResponse("Bruce is unavailable")
         }
-        return SpeakerIdentificationResponse(
-            schemaVersion: 1,
-            confirmed: true,
-            meetingID: meetingID,
-            manifestRevision: revision,
-            speakerID: speakerID,
-            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-            voiceProfileEnrolled: false
-        )
+        return savedResponse(meetingID: meetingID, revision: revision, names: names)
     }
 
-    func identifyCallCount() -> Int { identifyCalls }
+    func savedNameCalls() -> [[String: String]] { calls }
 
     func fetchPlayback(
         meetingID: UUID,
@@ -532,7 +634,7 @@ private actor StubSpeakerReviewClient: SpeakerReviewServing {
 
 private actor ControlledSpeakerReviewClient: SpeakerReviewServing {
     let response: SpeakerReviewResponse
-    private var identifyStarted = false
+    private var saveStarted = false
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
     private var finishContinuation: CheckedContinuation<Void, Never>?
 
@@ -548,35 +650,26 @@ private actor ControlledSpeakerReviewClient: SpeakerReviewServing {
         response
     }
 
-    func identify(
+    func saveNames(
         meetingID: UUID,
         revision: Int,
-        speakerID: String,
-        name: String,
+        names: [String: String],
         configuration: ArchiveTransferConfiguration
-    ) async throws -> SpeakerIdentificationResponse {
-        identifyStarted = true
+    ) async throws -> SavedSpeakerNamesResponse {
+        saveStarted = true
         let waiters = startWaiters
         startWaiters.removeAll()
         waiters.forEach { $0.resume() }
         await withCheckedContinuation { finishContinuation = $0 }
-        return SpeakerIdentificationResponse(
-            schemaVersion: 1,
-            confirmed: true,
-            meetingID: meetingID,
-            manifestRevision: revision,
-            speakerID: speakerID,
-            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-            voiceProfileEnrolled: false
-        )
+        return savedResponse(meetingID: meetingID, revision: revision, names: names)
     }
 
-    func waitUntilIdentifyStarted() async {
-        if identifyStarted { return }
+    func waitUntilSaveStarted() async {
+        if saveStarted { return }
         await withCheckedContinuation { startWaiters.append($0) }
     }
 
-    func finishIdentify() {
+    func finishSave() {
         finishContinuation?.resume()
         finishContinuation = nil
     }
@@ -612,14 +705,13 @@ private actor ControlledPlaybackReviewClient: SpeakerReviewServing {
         )
     }
 
-    func identify(
+    func saveNames(
         meetingID: UUID,
         revision: Int,
-        speakerID: String,
-        name: String,
+        names: [String: String],
         configuration: ArchiveTransferConfiguration
-    ) async throws -> SpeakerIdentificationResponse {
-        throw SpeakerReviewError.invalidResponse("identify is not part of this fixture")
+    ) async throws -> SavedSpeakerNamesResponse {
+        throw SpeakerReviewError.invalidResponse("saving is not part of this fixture")
     }
 
     func fetchPlayback(

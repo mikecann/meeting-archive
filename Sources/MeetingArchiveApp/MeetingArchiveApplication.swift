@@ -295,7 +295,8 @@ struct MeetingFollowUpView: View {
                         meetingID: meetingID,
                         revision: record.metadataRevision,
                         configuration: controller.transferConfiguration,
-                        onComplete: { controller.closeFollowUp(); controller.speakerReviewChanged() },
+                        // A save that changed anything already refreshed Bruce's status.
+                        onComplete: { controller.closeFollowUp() },
                         onReviewChanged: { controller.speakerReviewChanged() },
                         onLater: { controller.closeFollowUp() }
                     )
