@@ -53,13 +53,17 @@ final class AudioRecording: @unchecked Sendable {
 
     /// Creates the directory and starts both sources. Throws only when
     /// neither can start; otherwise a source that could not start is a warning.
+    /// A `stop` while this is still starting wins, and this returns quietly.
     func start(directory: URL) async throws {
-        let claimed = lock.withLock {
-            guard phase == .idle else { return false }
-            phase = .starting
-            return true
+        let previous = lock.withLock {
+            defer { if phase == .idle { phase = .starting } }
+            return phase
         }
-        guard claimed else { throw CaptureFailure.message("This recording has already been started.") }
+        switch previous {
+        case .idle: break
+        case .stopped: return
+        case .starting, .running: throw CaptureFailure.message("This recording has already been started.")
+        }
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
@@ -80,15 +84,22 @@ final class AudioRecording: @unchecked Sendable {
         let systemAudio = SystemAudioSource(writer: incomingWriter)
         microphone.onWarning = { [weak self] in self?.warn($0) }
         systemAudio.onWarning = { [weak self] in self?.warn($0) }
-        lock.withLock {
+        // Stored before starting, so a stop from here on finds and stops them.
+        let stillStarting = lock.withLock {
+            guard phase == .starting else { return false }
             writers = [microphoneWriter, incomingWriter]
             self.microphone = microphone
             self.systemAudio = systemAudio
+            return true
         }
+        guard stillStarting else { return }
         Log.capture.notice("Starting audio recording in \(directory.lastPathComponent, privacy: .public)")
         async let microphoneError = microphone.start()
         async let systemAudioError = systemAudio.start()
-        switch await (microphoneError, systemAudioError) {
+        let errors = await (microphoneError, systemAudioError)
+        // A stop during start wins, and what the sources said is moot.
+        guard lock.withLock({ phase == .starting }) else { return }
+        switch errors {
         case (nil, nil):
             break
         case let (microphoneFailure?, systemAudioFailure?):

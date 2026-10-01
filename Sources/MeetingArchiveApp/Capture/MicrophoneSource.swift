@@ -48,6 +48,11 @@ final class MicrophoneSource: NSObject, AVCaptureAudioDataOutputSampleBufferDele
         }
         return await withCheckedContinuation { continuation in
             control.async {
+                // A stop that overtook a slow start must not be undone by it.
+                guard !self.stopped else {
+                    continuation.resume(returning: CaptureFailure.message("The recording stopped before the microphone started."))
+                    return
+                }
                 self.clock.mark()
                 self.followDefaultInput()
                 let error = self.open()
