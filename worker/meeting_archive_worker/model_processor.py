@@ -292,6 +292,19 @@ def _write_transcript_artifacts(output: Path, result: dict[str, Any]) -> None:
         atomic_write_bytes(json_path, encoded)
 
 
+def usable_embedding(values: list[float]) -> bool:
+    """Whether a speaker embedding is a real voice sample.
+
+    pyannote gives a speaker heard too briefly to keep any chunk embedding a
+    NaN centroid, and pads a speaker it could not cluster with zeros. That
+    speaker then has no embedding, as with very short speech, rather than
+    failing the whole job.
+    """
+    return bool(values) and all(math.isfinite(value) for value in values) and any(
+        value != 0 for value in values
+    )
+
+
 def extract_speaker_embeddings(raw_embeddings, annotation, channel_origin: str) -> dict[str, list[float]]:
     labels = annotation.labels() if hasattr(annotation, "labels") else []
     items = raw_embeddings.items() if isinstance(raw_embeddings, dict) else zip(
@@ -303,7 +316,9 @@ def extract_speaker_embeddings(raw_embeddings, annotation, channel_origin: str) 
         values = raw.tolist() if hasattr(raw, "tolist") else list(raw)
         while values and isinstance(values[0], list):
             values = values[0]
-        result[f"{channel_origin}:{speaker}"] = [float(value) for value in values]
+        embedding = [float(value) for value in values]
+        if usable_embedding(embedding):
+            result[f"{channel_origin}:{speaker}"] = embedding
     return result
 
 

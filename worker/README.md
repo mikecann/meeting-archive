@@ -119,7 +119,9 @@ fresh idempotent Notion publication without retranscribing media.
 cosine similarity and separation values, whether an embedding exists, three timestamped excerpts
 per diarized speaker, an optional absolute playback path, and normalized
 calendar candidate objects. `identify` uses the saved observation automatically
-and enrolls it only after that explicit confirmation.
+and enrolls it only after that explicit confirmation. A speaker whose pyannote
+embedding is empty, non-finite or all zeros has no embedding: it is still
+reviewed, but never matched or enrolled, and the rest of the job carries on.
 
 Strong matches retain the 0.82 cosine / 0.08 runner-up margin gate and require
 an explicitly confirmed source meeting. Review-only tentative suggestions use
