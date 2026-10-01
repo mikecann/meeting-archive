@@ -50,7 +50,8 @@ signs the app, and `--with-launcher` can also create the default launcher.
 Neither script downloads models or enables the Bruce worker.
 
 Quit Meeting Archive from its menu before updating or rebuilding it so an
-active recording can finish cleanly. Use `bash restart.sh` to rebuild and open
+active recording can finish cleanly. `setup_mac.sh` and `restart.sh` won't
+replace it while it's still running. Use `bash restart.sh` to rebuild and open
 the staged app after a change.
 
 The capture app needs no API keys. For local worker commands, copy

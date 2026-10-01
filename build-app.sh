@@ -2,6 +2,14 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${MEETING_ARCHIVE_APP_DIR:-$HOME/Applications/Meeting Archive.app}"
+# Replacing the bundle under a running app would cut off a live recording. The
+# login item runs as plain "meeting-archive-app --background" with no bundle
+# path, so match the executable however it was started, and ask launchd too.
+LOGIN_ITEM="$(launchctl print "gui/$(id -u)/com.mikerosoft.meeting-archive" 2>/dev/null || true)"
+if pgrep -f '(^|/)meeting-archive-app( |$)' >/dev/null || [[ "$LOGIN_ITEM" == *"state = running"* ]]; then
+  echo "Quit Meeting Archive from its menu before rebuilding, so any live writer can finish." >&2
+  exit 1
+fi
 CONFIGURATION="${MEETING_ARCHIVE_BUILD_CONFIGURATION:-release}"
 export CLANG_MODULE_CACHE_PATH="$SCRIPT_DIR/.build/module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$CLANG_MODULE_CACHE_PATH"

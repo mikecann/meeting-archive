@@ -36,6 +36,7 @@ jobs:
           bash verification/run-meeting-follow-up-scenarios.sh
           bash verification/run-contract-roundtrip.sh
           bash verification/run-offline-regressions.sh
+          bash verification/run-rebuild-guard-tests.sh
           bash verification/run-speaker-review-scenarios.sh
           bash diagnostics/run-tests.sh
           bash diagnostics/build.sh
