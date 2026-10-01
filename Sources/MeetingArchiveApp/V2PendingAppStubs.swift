@@ -1,5 +1,5 @@
-// TEMPORARY: compile-only stand-ins for the capture and mic monitor being
-// built on other branches. Delete before merging those branches.
+// TEMPORARY: compile-only stand-ins for the audio capture being built on
+// another branch. Delete before merging that branch.
 import Foundation
 import MeetingArchiveCore
 
@@ -20,15 +20,4 @@ final class AudioRecording: @unchecked Sendable {
     func start(directory: URL) async throws {}
     func checkHealth() {}
     func stop() async -> AudioRecordingResult { AudioRecordingResult(tracks: [:], activitySeconds: [:], microphone: nil, error: nil) }
-}
-
-struct MicUsageSnapshot: Equatable, Sendable { var users: [MicUser]; var ignored: [MicUser]; var error: String? }
-
-struct MicAppResolver {
-    static let defaultIgnoredBundleIDs: Set<String> = ["com.mikerosoft.meeting-archive"]
-}
-
-@MainActor final class MicActivityMonitor {
-    init(ignoredBundleIDs: @escaping @MainActor () -> Set<String> = { MicAppResolver.defaultIgnoredBundleIDs }, ownPID: pid_t = getpid()) {}
-    func snapshot() -> MicUsageSnapshot { MicUsageSnapshot(users: [], ignored: [], error: nil) }
 }
