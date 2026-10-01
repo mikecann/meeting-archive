@@ -81,18 +81,19 @@ PORT_GEO_CANDIDATES = [
 ]
 
 
-def transcript():
+def transcript(speaker="microphone:SPEAKER_00"):
     return {
         "schema_version": 1, "meeting_id": "current", "manifest_revision": 2,
         "processing": {"manifest_sha256": "a" * 64},
-        "turns": [{"speaker": "microphone:SPEAKER_00", "start": 1.0,
-                   "end": 9.0, "text": "A different recording", "channel_origin": "microphone"}],
+        "turns": [{"speaker": speaker, "start": 1.0, "end": 9.0,
+                   "text": "A different recording", "channel_origin": speaker.split(":")[0]}],
     }
 
 
 def match(kind="tentative"):
-    return {"suggested_name": "Mike Cann", "automatic_name": "Mike Cann" if kind == "strong" else None,
-            "suggestion_kind": kind, "suggestion_score": .9 if kind == "strong" else .72,
+    automatic = kind in ("strong", "own_microphone", "same_meeting")
+    return {"suggested_name": "Mike Cann", "automatic_name": "Mike Cann" if automatic else None,
+            "suggestion_kind": kind, "suggestion_score": .9 if kind == "strong" else .70,
             "suggestion_margin": None, "confirmation_count": 2}
 
 
@@ -100,8 +101,7 @@ class SpeakerEvidenceTests(unittest.TestCase):
     def registry(self, kind="tentative"):
         registry = Mock()
         registry.assignments.return_value = {}
-        registry.observation_record.return_value = ([1.0, 0.0], "model")
-        registry.review_match.return_value = match(kind)
+        registry.meeting_matches.return_value = {"microphone:SPEAKER_00": match(kind)}
         return registry
 
     def test_tentative_match_never_writes_transcript_name_or_assignment(self):
@@ -111,9 +111,24 @@ class SpeakerEvidenceTests(unittest.TestCase):
         self.assertNotIn("name", result["turns"][0])
         self.assertEqual(result["speaker_matches"]["microphone:SPEAKER_00"]["suggested_name"], "Mike Cann")
         self.assertEqual(automatic_names(result), {})
-        registry.review_match.assert_called_once_with([1.0, 0.0], model_id="model", exclude_meeting_id="current")
+        registry.meeting_matches.assert_called_once_with("current", 2, ["microphone:SPEAKER_00"])
         registry.confirm_observation.assert_not_called()
+        registry.confirm_observations.assert_not_called()
         registry.enroll_confirmed.assert_not_called()
+
+    def test_every_kind_of_automatic_name_is_written_and_acknowledged(self):
+        for kind in ("strong", "own_microphone", "same_meeting"):
+            with self.subTest(kind=kind):
+                result = transcript()
+                refresh_speaker_matches(result, self.registry(kind))
+                self.assertEqual(result["turns"][0]["name_source"], "voice_match")
+                self.assertEqual(automatic_names(result), {"microphone:SPEAKER_00": "Mike Cann"})
+
+    def test_a_strong_match_below_its_gates_is_not_acknowledged(self):
+        result = transcript()
+        refresh_speaker_matches(result, self.registry("strong"))
+        result["speaker_matches"]["microphone:SPEAKER_00"]["suggestion_score"] = 0.7
+        self.assertEqual(automatic_names(result), {})
 
     def test_strong_match_is_named_but_not_enrolled(self):
         result = transcript()
@@ -164,17 +179,17 @@ class CalendarCandidateTests(unittest.TestCase):
 
 
 class ReviewIntegrationTests(unittest.TestCase):
-    def setup_archive(self, root, score):
+    def setup_archive(self, root, score, speaker="microphone:SPEAKER_00"):
         database = root / "worker.sqlite"
         JobQueue(database)
         registry = SpeakerRegistry(database)
         for previous in ("previous-a", "previous-b"):
-            registry.save_observation(previous, 1, "microphone:SPEAKER_00", [1.0, 0.0], "model")
-            registry.confirm_observation(previous, 1, "microphone:SPEAKER_00", "Mike Cann")
-        registry.save_observation("current", 2, "microphone:SPEAKER_00", [score, math.sqrt(1 - score * score)], "model")
+            registry.save_observation(previous, 1, speaker, [1.0, 0.0], "model")
+            registry.confirm_observation(previous, 1, speaker, "Mike Cann")
+        registry.save_observation("current", 2, speaker, [score, math.sqrt(1 - score * score)], "model")
         archive = root / "archive"
         (archive / "transcripts/v2").mkdir(parents=True)
-        (archive / "transcripts/v2/transcript.json").write_text(json.dumps(transcript()))
+        (archive / "transcripts/v2/transcript.json").write_text(json.dumps(transcript(speaker)))
         (archive / "metadata.json").write_text(json.dumps(
             app_metadata([PORT_GEO_EVENT, FAMILY_EVENT], attendees=PORT_GEO_ATTENDEES),
             sort_keys=True,
@@ -183,7 +198,7 @@ class ReviewIntegrationTests(unittest.TestCase):
 
     def test_two_confirmations_prefill_tentative_review_without_naming_or_enrolling(self):
         with tempfile.TemporaryDirectory() as temporary:
-            database, registry, archive = self.setup_archive(Path(temporary), .72)
+            database, registry, archive = self.setup_archive(Path(temporary), .70, "incoming:SPEAKER_00")
             output = io.StringIO()
             with redirect_stdout(output):
                 code = cli_main(["review-speakers", "--archive-dir", str(archive), "--revision", "2", "--db", str(database)])
@@ -221,7 +236,7 @@ class ReviewIntegrationTests(unittest.TestCase):
 
     def test_review_keeps_an_empty_evidence_list_and_ignores_old_video_labels(self):
         with tempfile.TemporaryDirectory() as temporary:
-            database, _, archive = self.setup_archive(Path(temporary), .72)
+            database, _, archive = self.setup_archive(Path(temporary), .70)
             (archive / "playback").mkdir()
             (archive / "playback/meeting.mp4").write_bytes(b"old video playback")
             # A v1 meeting can still hold the cache the removed OCR step wrote.
@@ -237,6 +252,71 @@ class ReviewIntegrationTests(unittest.TestCase):
             self.assertEqual(code, 0)
             speakers = json.loads(output.getvalue())["speakers"]
             self.assertEqual([speaker["evidence_labels"] for speaker in speakers], [[]])
+
+    def test_the_only_mic_voice_is_named_as_its_owner_and_counts_as_done(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            database, registry, archive = self.setup_archive(Path(temporary), .70)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = cli_main(["review-speakers", "--archive-dir", str(archive), "--revision", "2", "--db", str(database)])
+            self.assertEqual(code, 0)
+            speaker = json.loads(output.getvalue())["speakers"][0]
+            self.assertEqual(speaker["automatic_name"], "Mike Cann")
+            self.assertEqual(speaker["suggestion_kind"], "own_microphone")
+            saved = json.loads((archive / "transcripts/v2/transcript.json").read_text())
+            self.assertEqual(saved["turns"][0]["name_source"], "voice_match")
+            job = {"state": "succeeded", "archive_path": str(archive), "meeting_id": "current",
+                   "manifest_revision": 2, "manifest_sha256": "a" * 64}
+            self.assertEqual(_speaker_counts_for_status(job, database), (1, 0))
+            # Recognizing him never makes his voice a confirmed sample.
+            self.assertEqual(registry.assignments("current", 2), {})
+            with sqlite3.connect(database) as connection:
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM voice_profiles").fetchone()[0], 2)
+
+    def test_a_voice_split_from_a_saved_one_counts_as_done(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "worker.sqlite"
+            JobQueue(database)
+            registry = SpeakerRegistry(database)
+            registry.save_observation("current", 2, "incoming:SPEAKER_00", [1.0, 0.0], "model")
+            registry.save_observation("current", 2, "incoming:SPEAKER_01", [0.73, math.sqrt(1 - 0.73 ** 2)], "model")
+            registry.save_observation("current", 2, "incoming:SPEAKER_02", [0.0, 1.0], "model")
+            registry.confirm_observation("current", 2, "incoming:SPEAKER_00", "Micah")
+            archive = root / "archive"
+            (archive / "transcripts/v2").mkdir(parents=True)
+            document = transcript("incoming:SPEAKER_00")
+            for speaker in ("incoming:SPEAKER_01", "incoming:SPEAKER_02"):
+                document["turns"].append({"speaker": speaker, "start": 10.0, "end": 12.0,
+                                          "text": "Later", "channel_origin": "incoming"})
+            refresh_speaker_matches(document, registry)
+            (archive / "transcripts/v2/transcript.json").write_text(json.dumps(document))
+            job = {"state": "succeeded", "archive_path": str(archive), "meeting_id": "current",
+                   "manifest_revision": 2, "manifest_sha256": "a" * 64}
+
+            self.assertEqual(document["turns"][1]["name"], "Micah")
+            self.assertEqual(document["speaker_matches"]["incoming:SPEAKER_01"]["suggestion_kind"], "same_meeting")
+            self.assertEqual(_speaker_counts_for_status(job, database), (3, 1))
+
+    def test_review_samples_the_wordiest_lines_in_order(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            database, _, archive = self.setup_archive(Path(temporary), .70, "incoming:SPEAKER_00")
+            document = json.loads((archive / "transcripts/v2/transcript.json").read_text())
+            document["turns"] = [
+                {"speaker": "incoming:SPEAKER_00", "start": float(index), "end": index + 1.0,
+                 "text": text, "channel_origin": "incoming"}
+                for index, text in enumerate([
+                    "Yeah.", "We should ship the archive on Friday.", "Okay.",
+                    "Can you send me the transcript after?", "Yes.", "Thanks, that is everything from me today.",
+                ])
+            ]
+            (archive / "transcripts/v2/transcript.json").write_text(json.dumps(document))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = cli_main(["review-speakers", "--archive-dir", str(archive), "--revision", "2", "--db", str(database)])
+            self.assertEqual(code, 0)
+            excerpts = json.loads(output.getvalue())["speakers"][0]["excerpts"]
+            self.assertEqual([excerpt["start"] for excerpt in excerpts], [1.0, 3.0, 5.0])
 
     def test_status_does_not_hide_a_name_that_was_not_persisted(self):
         with tempfile.TemporaryDirectory() as temporary:

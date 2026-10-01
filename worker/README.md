@@ -14,6 +14,7 @@ PYTHONPATH=worker python3 -m meeting_archive_worker retry --db WORKER_DB --meeti
 PYTHONPATH=worker python3 -m meeting_archive_worker process-ready --archive-root ARCHIVE_ROOT --db WORKER_DB --processor package.module:function
 PYTHONPATH=worker python3 -m meeting_archive_worker review-speakers --archive-dir MEETING_DIR --revision 1 --db WORKER_DB
 PYTHONPATH=worker python3 -m meeting_archive_worker identify --meeting-id UUID --revision 1 --speaker-id incoming:SPEAKER_00 --name "Name" --db WORKER_DB
+PYTHONPATH=worker python3 -m meeting_archive_worker identify-speakers --meeting-id UUID --revision 1 --names '{"incoming:SPEAKER_00": "Name"}' --db WORKER_DB
 PYTHONPATH=worker python3 -m meeting_archive_worker.service --db WORKER_DB
 ```
 
@@ -130,35 +131,63 @@ case-insensitive substring in each accepted meeting's transcript and prints
 newest meeting first, at most 5 matches per meeting and `N` meetings (default
 20, maximum 100). Queries are trimmed and must be 2 to 200 characters.
 
-Confirming a speaker name rewrites
+Confirming speaker names rewrites
 the JSON and Markdown views with fsync plus atomic replacement, then requests a
 fresh idempotent Notion publication without retranscribing media.
 
 `review-speakers` returns nullable confirmed, automatic, and tentative names,
-cosine similarity and separation values, whether an embedding exists, three timestamped excerpts
-per diarized speaker, an optional absolute playback path, and normalized
+the kind of each automatic name (`strong`, `own_microphone` or `same_meeting`),
+cosine similarity and separation values, whether an embedding exists, the three
+wordiest timestamped lines per diarized speaker in the order they were said, an
+optional absolute playback path, and normalized
 calendar candidate objects. Candidates are the top-level `attendees` the app
 writes for the calendar event it matched, each `{name, email, response}`. A
 bundle without that list falls back to the attendees of its only event under
-`calendar`, and suggests nobody when there were several. `identify` uses the
-saved observation automatically and enrolls it only after that explicit
-confirmation. A speaker whose pyannote
-embedding is empty, non-finite or all zeros has no embedding: it is still
-reviewed, but never matched or enrolled, and the rest of the job carries on.
+`calendar`, and suggests nobody when there were several.
 
-Strong matches retain the 0.82 cosine / 0.08 runner-up margin gate and require
-an explicitly confirmed source meeting. Review-only tentative suggestions use
-0.65 / 0.08 and at least two distinct confirmed source meetings. These are
-engineering defaults, not calibrated probabilities or a completed human
-recognition accuracy benchmark. Matching excludes the current meeting across
-all revisions. Profile provenance is migrated from unambiguous existing
-assignments and observations; repeated confirmations update one source profile.
+`identify-speakers` is what the app's **Save names** runs. `--names` is a JSON
+object of speaker ID to name; every name is saved in one transaction or none
+is, and the reply lists exactly what was saved,
+`{"schema_version":1,"meeting_id","manifest_revision","speakers":[{"speaker_id","name","voice_profile_enrolled"}]}`.
+`identify` saves one name the same way. Both use each speaker's saved
+observation and enroll it only because Mike saved that name. A speaker whose
+pyannote embedding is empty, non-finite or all zeros has no embedding: it is
+still reviewed, but never matched or enrolled, and the rest of the job carries
+on.
 
-Only strong matches are written as transcript names, with `name_source` set to
-`voice_match`. Explicit corrections use `confirmed`. Tentative matches stay in
-the review evidence. The service retries durable speaker refresh requests so
-interrupted transcript or Notion updates recover without retranscribing or
-enrolling predictions. Per-meeting locks serialize review/confirmation writes.
+Matching gates come from Mike's own voices on Bruce on 2 Oct 2026: 22 confirmed
+voices from 9 meetings. Two different people scored at most 0.654 against each
+other across meetings and 0.640 within one meeting; the same person scored
+anywhere from 0.04 to 0.82, because short and split voices give noisy
+embeddings. So nothing is named below 0.72:
+
+| Rule | Gate | Result |
+| --- | --- | --- |
+| Voice matches someone confirmed in one meeting | 0.82, margin 0.08 | Named automatically |
+| Voice matches someone confirmed in two or more meetings | 0.72, margin 0.08 | Named automatically |
+| Voice is close to someone confirmed in two or more meetings | 0.65, margin 0.08 | Suggested only |
+| The only voice on the mic is its usual owner | 0.65, margin 0.08 | Named automatically |
+| Voice matches one Mike saved in the same meeting | 0.72, margin 0.08 | Named automatically |
+
+The mic's owner is whoever Mike confirmed on the microphone in the most
+meetings; other people heard through his mic scored at most 0.612 against him,
+and his own mic tracks 0.72 to 0.96. When two rules name a voice differently it
+is only a suggestion. Leaving out each confirmed voice in turn and matching it
+against the rest, these rules named 7 of the 22 automatically, all correctly,
+where the old 0.82 rule named none. These are still not calibrated
+probabilities. Matching excludes the current meeting across all revisions.
+Profile provenance is migrated from unambiguous existing assignments and
+observations; repeated confirmations update one source profile.
+
+Automatic names are written as transcript names with `name_source` set to
+`voice_match` and count as reviewed; they are recomputed on every refresh and
+never enrolled. Explicit corrections use `confirmed`. Tentative matches stay in
+the review evidence. Saving a name also queues a refresh of every other accepted
+meeting with an unnamed voice within 0.57 of it, so the service names that
+voice there in the background. The service retries durable speaker refresh
+requests so interrupted transcript or Notion updates recover without
+retranscribing or enrolling predictions. Per-meeting locks serialize
+review/confirmation writes.
 
 The worker no longer reads names off video frames. `review-speakers` still
 returns `evidence_labels` for each speaker, always as an empty list, because
