@@ -234,11 +234,20 @@ def reconcile_speaker_refresh(
             from .speaker_evidence import refresh_speaker_matches
             from .speakers import SpeakerRegistry
             from .service import PublicationQueue
+            from .summaries import SPEAKER_NAMES_SETTLE_SECONDS, SummaryQueue
 
             registry = SpeakerRegistry(database)
             refresh_speaker_matches(transcript, registry)
             _write_transcript_artifacts(transcript_path.parent, transcript)
             PublicationQueue(database).refresh(processing_job_id, str(archive))
+            # A summary written before these names can now use them. Only a
+            # meeting that already has one is asked again, after names settle.
+            SummaryQueue(database).request(
+                processing_job_id,
+                str(archive),
+                delay_seconds=SPEAKER_NAMES_SETTLE_SECONDS,
+                create=False,
+            )
             with closing_connection(lambda: _connect(database)) as connection:
                 connection.execute(
                     "DELETE FROM speaker_refreshes WHERE meeting_id=? "

@@ -55,6 +55,44 @@ class CredentialTests(unittest.TestCase):
             with self.assertRaises(CredentialError):
                 load_credentials(self.path, {})
 
+    def test_optional_anthropic_key_becomes_its_environment_variable(self):
+        self.path.write_text(json.dumps({
+            "huggingFaceToken": "private-hf",
+            "notionToken": "private-notion",
+            "anthropicApiKey": "private-anthropic",
+        }))
+        environment = {}
+
+        load_credentials(self.path, environment)
+
+        self.assertEqual(environment, {
+            "HF_TOKEN": "private-hf",
+            "MEETING_ARCHIVE_NOTION_TOKEN": "private-notion",
+            "ANTHROPIC_API_KEY": "private-anthropic",
+        })
+
+    def test_without_an_anthropic_key_summaries_stay_off(self):
+        environment = {}
+
+        load_credentials(self.path, environment)
+
+        self.assertNotIn("ANTHROPIC_API_KEY", environment)
+
+    def test_anthropic_key_must_be_nonempty_and_other_fields_stay_rejected(self):
+        for value in (
+            {"huggingFaceToken": "private-hf", "notionToken": "private-notion", "anthropicApiKey": " "},
+            {"huggingFaceToken": "private-hf", "notionToken": "private-notion", "anthropicApiKey": 7},
+            {"huggingFaceToken": "private-hf", "notionToken": "private-notion", "openaiApiKey": "private-other"},
+            {"notionToken": "private-notion", "anthropicApiKey": "private-anthropic"},
+        ):
+            with self.subTest(fields=sorted(value)):
+                self.path.write_text(json.dumps(value))
+                environment = {}
+                with self.assertRaises(CredentialError) as raised:
+                    load_credentials(self.path, environment)
+                self.assertEqual(environment, {})
+                self.assertNotIn("private", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

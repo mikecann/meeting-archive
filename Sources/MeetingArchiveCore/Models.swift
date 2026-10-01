@@ -131,12 +131,25 @@ public enum AcceptanceResolution: Equatable, Sendable {
     case discard
 }
 
+/// Where a meeting's title came from. Bruce gives a meeting an AI title from
+/// its summary only when nobody chose the one it has.
+public enum MeetingTitleSource: String, Codable, Sendable {
+    /// Made up by the app from the source and start time.
+    case `default`
+    /// The matching calendar event's title.
+    case calendar
+    /// Typed by the user. Nothing replaces it.
+    case user
+}
+
 public struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     public static let acceptanceDelay: TimeInterval = 90
 
     public var schemaVersion: Int
     public var id: UUID
     public var title: String
+    /// Nil for records saved before the source was kept.
+    public var titleSource: MeetingTitleSource?
     public var sourceApplication: SourceApplicationDescriptor
     public var startedAt: Date
     public var endedAt: Date
@@ -152,6 +165,7 @@ public struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         schemaVersion: Int = 1,
         id: UUID = UUID(),
         title: String,
+        titleSource: MeetingTitleSource? = nil,
         sourceApplication: SourceApplicationDescriptor,
         startedAt: Date,
         endedAt: Date,
@@ -164,6 +178,7 @@ public struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         self.schemaVersion = schemaVersion
         self.id = id
         self.title = title
+        self.titleSource = titleSource
         self.sourceApplication = sourceApplication
         self.startedAt = startedAt
         self.endedAt = endedAt
@@ -194,17 +209,35 @@ public struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
 
     /// Bruce keeps the new title alongside the archive (the archived metadata
     /// is hash-verified and never rewritten), so this changes only the local
-    /// copy and does not start a new upload revision.
-    public func renamingArchived(_ title: String, at date: Date) -> MeetingRecord {
+    /// copy and does not start a new upload revision. By default it is the
+    /// user's rename.
+    public func renamingArchived(
+        _ title: String,
+        at date: Date,
+        titleSource: MeetingTitleSource? = .user
+    ) -> MeetingRecord {
         var copy = self
         copy.title = title
+        copy.titleSource = titleSource
         copy.updatedAt = date
         return copy
     }
 
+    /// Takes Bruce's title for an archived meeting, such as an AI title from
+    /// its summary or a rename made on Bruce. Nil when there is nothing to
+    /// change or the user named the meeting here.
+    public func adoptingArchivedTitle(_ archivedTitle: String?, at date: Date) -> MeetingRecord? {
+        guard titleSource != .user,
+              let archivedTitle = archivedTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !archivedTitle.isEmpty, archivedTitle != title else { return nil }
+        return renamingArchived(archivedTitle, at: date, titleSource: titleSource)
+    }
+
+    /// The user's rename before upload. The new title travels with the upload.
     public func updatingTitle(_ title: String, at date: Date) -> MeetingRecord {
         var copy = self
         copy.title = title
+        copy.titleSource = .user
         copy.metadataRevision += 1
         copy.updatedAt = date
         return copy

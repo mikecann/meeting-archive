@@ -1,4 +1,4 @@
-"""Stable worker loop with independent media and Notion retry stages."""
+"""Stable worker loop with independent media, summary and Notion retry stages."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from .db import closing_connection
 from .notion import publish
 from .processor import process
 from .queue import JobQueue, QueueConflict
+from .summaries import SummaryQueue, summaries_disabled_reason, summaries_enabled, summarize_with_claude
 
 
 class PublicationQueue:
@@ -344,6 +345,24 @@ def run_publication(database: Path, publisher=publish) -> bool:
     return publications.run_one(publisher)
 
 
+def run_summary(database: Path, summarize=None) -> bool:
+    """Write one due AI title and summary, then ask Notion to show it.
+
+    Without ANTHROPIC_API_KEY nothing is queued or run. Meetings processed
+    before a key was added are summarized once it is.
+    """
+    if summarize is None:
+        if not summaries_enabled():
+            return False
+        summarize = summarize_with_claude
+    summaries = SummaryQueue(database)
+    summaries.reconcile(JobQueue(database).status()["jobs"])
+    return summaries.run_one(
+        summarize,
+        on_success=lambda job_id, archive_path: PublicationQueue(database).refresh(job_id, archive_path),
+    )
+
+
 def run_processing(database: Path, processor=process_isolated, lease_seconds: float = 900) -> bool:
     """Claim and run at most one heavy job; the queue allows only one lease."""
     queue = JobQueue(database)
@@ -369,20 +388,35 @@ def run_processing(database: Path, processor=process_isolated, lease_seconds: fl
         if heartbeat.error is not None:
             raise QueueConflict(f"Lost the job lease during processing: {heartbeat.error}")
         queue.complete(job)
-        return True
     except Exception as error:
         try:
             queue.fail(job, str(error), transient=not isinstance(error, PermanentProcessingError))
         except QueueConflict:
             pass
         return False
+    if summaries_enabled():
+        # Queued straight away, so the app keeps polling until the summary and
+        # its title land. The summary loop would also find it on its next pass.
+        try:
+            SummaryQueue(database).request(job.id, job.archive_path)
+        except Exception:
+            _log("could not queue the summary:\n" + traceback.format_exc())
+    return True
 
 
-def run_once(database: Path, processor=process_isolated, publisher=publish, lease_seconds: float = 900) -> dict:
+def run_once(
+    database: Path,
+    processor=process_isolated,
+    publisher=publish,
+    lease_seconds: float = 900,
+    summarize=None,
+) -> dict:
+    """One pass of every stage. The summary stage runs only with an explicit summarizer."""
     refresh_speakers(database)
     processed = run_processing(database, processor, lease_seconds)
+    summarized = run_summary(database, summarize) if summarize is not None else False
     published = run_publication(database, publisher)
-    return {"processed": processed, "published": published}
+    return {"processed": processed, "summarized": summarized, "published": published}
 
 
 def _publication_loop(database: Path, poll_seconds: float, stop: threading.Event, publisher=publish) -> None:
@@ -395,6 +429,17 @@ def _publication_loop(database: Path, poll_seconds: float, stop: threading.Event
                 pass
         except Exception:
             _log("publication pass failed:\n" + traceback.format_exc())
+        stop.wait(max(1, poll_seconds))
+
+
+def _summary_loop(database: Path, poll_seconds: float, stop: threading.Event, summarize=None) -> None:
+    """Summaries wait on Claude, so they get their own thread and never delay Notion."""
+    while not stop.is_set():
+        try:
+            while run_summary(database, summarize) and not stop.is_set():
+                pass
+        except Exception:
+            _log("summary pass failed:\n" + traceback.format_exc())
         stop.wait(max(1, poll_seconds))
 
 
@@ -459,6 +504,19 @@ def main() -> int:
             daemon=True,
         )
         light.start()
+        # Credentials are loaded once at start, so this is decided once too.
+        disabled = summaries_disabled_reason()
+        if disabled is None:
+            threading.Thread(
+                target=_summary_loop,
+                args=(args.db, args.poll_seconds, stop),
+                name="meeting-archive-summary",
+                daemon=True,
+            ).start()
+        elif os.environ.get("ANTHROPIC_API_KEY", "").strip():
+            # Without a key summaries are simply off. A key that can't be
+            # used is worth one line in the log.
+            _log(f"AI summaries are off: {disabled}.")
         try:
             while True:
                 try:

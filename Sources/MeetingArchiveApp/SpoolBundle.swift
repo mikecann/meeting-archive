@@ -68,6 +68,11 @@ enum SpoolBundle {
         try base.validate()
         var metadata = try JSONSerialization.jsonObject(with: base.canonicalData()) as! [String: Any]
         metadata["title"] = record.title
+        // Bruce only replaces a "default" title with an AI one. Without a
+        // source, as on older records, it goes by the app's default pattern.
+        if let titleSource = record.titleSource {
+            metadata["title_source"] = titleSource.rawValue
+        }
         metadata["capture"] = try JSONSerialization.jsonObject(with: ModelCodec.encoder.encode(record))
         // Calendar attendees remain suggestions for the voice review UI.
         for (filename, key) in [("calendar.json", "calendar"), ("tracks.json", "tracks")] {
