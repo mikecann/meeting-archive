@@ -23,6 +23,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qsl, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+from .summaries import read_summary
 from .titles import effective_title
 
 
@@ -188,13 +189,17 @@ def _owned_marker(value: Any) -> str | None:
     return None
 
 
-def _content_fingerprint(metadata: dict[str, Any], transcript: dict[str, Any], playback_base_url: str) -> str:
-    encoded = json.dumps(
-        {"metadata": metadata, "transcript": transcript, "playback_base_url": playback_base_url},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+def _content_fingerprint(
+    metadata: dict[str, Any],
+    transcript: dict[str, Any],
+    playback_base_url: str,
+    summary: dict[str, Any] | None = None,
+) -> str:
+    content: dict[str, Any] = {"metadata": metadata, "transcript": transcript, "playback_base_url": playback_base_url}
+    if summary is not None:
+        # Only what the page shows. Pages without a summary keep their fingerprint.
+        content["summary"] = {"summary": summary["summary"], "action_items": summary["action_items"]}
+    encoded = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -427,7 +432,13 @@ class NotionPublisher:
             ),
         }
 
-    def _blocks(self, metadata: dict[str, Any], transcript: dict[str, Any], meeting_id: str) -> list[tuple[str, dict[str, Any]]]:
+    def _blocks(
+        self,
+        metadata: dict[str, Any],
+        transcript: dict[str, Any],
+        meeting_id: str,
+        summary: dict[str, Any] | None = None,
+    ) -> list[tuple[str, dict[str, Any]]]:
         playback_link = f"{self.playback_base_url}/meeting/{meeting_id}"
 
         def owned_link(key: str, seconds: float | None = None) -> str:
@@ -442,8 +453,20 @@ class NotionPublisher:
                 ("Play recording", owned_link("metadata")),
             ])),
             ("description", _block("paragraph", [(str(description), owned_link("description"))])),
-            ("transcript", _block("heading_1", [("Transcript", owned_link("transcript"))])),
         ]
+        if summary is not None:
+            # The AI summary sits above the transcript. Like every owned block,
+            # each point carries its marker in a link, here on its own text.
+            blocks.append(("summary", _block("heading_2", [("Summary", owned_link("summary"))])))
+            for index, point in enumerate(summary["summary"]):
+                key = f"summary-{index}"
+                blocks.append((key, _block("bulleted_list_item", [(point, owned_link(key))])))
+            if summary["action_items"]:
+                blocks.append(("action-items", _block("heading_2", [("Action items", owned_link("action-items"))])))
+                for index, item in enumerate(summary["action_items"]):
+                    key = f"action-item-{index}"
+                    blocks.append((key, _block("bulleted_list_item", [(item, owned_link(key))])))
+        blocks.append(("transcript", _block("heading_1", [("Transcript", owned_link("transcript"))])))
         for index, turn in enumerate(transcript.get("turns", [])):
             if not isinstance(turn, dict):
                 continue
@@ -494,7 +517,7 @@ class NotionPublisher:
         }
         previous_ids = previous_ids or {}
         found: dict[str, str] = {}
-        pending: list[tuple[str, dict[str, Any]]] = []
+        pending: set[str] = set()
         desired_keys = {key for key, _ in blocks}
         for key, candidate in blocks:
             marker = _owned_marker(candidate)
@@ -502,7 +525,7 @@ class NotionPublisher:
             if current is None and marker:
                 current = by_marker.get(marker)
             if current is None or not isinstance(current.get("id"), str):
-                pending.append((key, candidate))
+                pending.add(key)
                 continue
             block_id = current["id"]
             found[key] = block_id
@@ -516,37 +539,82 @@ class NotionPublisher:
             if key not in desired_keys and block_id not in desired_ids and block_id in by_id:
                 self._archive_owned_block(block_id)
 
-        for offset in range(0, len(pending), MAX_BLOCKS):
-            batch = pending[offset : offset + MAX_BLOCKS]
-            try:
-                response = self._request("PATCH", f"/blocks/{page_id}/children", {"children": [block for _, block in batch]})
-            except Exception:
-                # PATCH may have committed before its response was lost.
-                discovered = self._children(page_id)
-                for key, candidate in batch:
-                    marker = _owned_marker(candidate)
-                    for block in discovered:
-                        if marker and _owned_marker(block) == marker and isinstance(block.get("id"), str):
-                            found[key] = block["id"]
-                            break
-                if any(key not in found for key, _ in batch):
-                    raise
+        # Missing blocks go where they belong. A run at the end is appended, as
+        # it always was. A run in the middle, such as a summary that arrived
+        # after the transcript was published, goes straight after the owned
+        # block before it, so manual notes further down stay where they are.
+        runs: list[tuple[int, list[tuple[str, dict[str, Any]]]]] = []
+        for index, (key, candidate) in enumerate(blocks):
+            if key not in pending:
                 continue
-            returned = response.get("results", []) if isinstance(response, dict) else []
-            if isinstance(returned, list):
-                for (key, _), created in zip(batch, returned):
-                    if isinstance(created, dict) and isinstance(created.get("id"), str):
-                        found[key] = created["id"]
-            if len(returned) < len(batch):
-                for block in self._children(page_id):
-                    for key, candidate in batch:
-                        marker = _owned_marker(candidate)
-                        if key not in found and marker and _owned_marker(block) == marker:
-                            if isinstance(block.get("id"), str):
-                                found[key] = block["id"]
+            if runs and runs[-1][0] + len(runs[-1][1]) == index:
+                runs[-1][1].append((key, candidate))
+            else:
+                runs.append((index, [(key, candidate)]))
+        for start, run in runs:
+            position: dict[str, Any] | None = None
+            if start + len(run) < len(blocks):
+                position = {"type": "start"} if start == 0 else {
+                    "type": "after_block", "after_block": {"id": found[blocks[start - 1][0]]},
+                }
+            for offset in range(0, len(run), MAX_BLOCKS):
+                batch = run[offset : offset + MAX_BLOCKS]
+                self._insert_owned_blocks(page_id, batch, found, position)
+                if position is not None:
+                    position = {"type": "after_block", "after_block": {"id": found[batch[-1][0]]}}
         if any(key not in found for key, _ in blocks):
             raise NotionError("Notion did not confirm all owned transcript blocks.")
         return found
+
+    def _insert_owned_blocks(
+        self,
+        page_id: str,
+        batch: list[tuple[str, dict[str, Any]]],
+        found: dict[str, str],
+        position: dict[str, Any] | None,
+    ) -> None:
+        body: dict[str, Any] = {"children": [block for _, block in batch]}
+        if position is not None:
+            body["position"] = position
+        try:
+            response = self._request("PATCH", f"/blocks/{page_id}/children", body)
+        except Exception:
+            # PATCH may have committed before its response was lost.
+            self._find_owned_blocks(page_id, batch, found)
+            if any(key not in found for key, _ in batch):
+                raise
+            return
+        # Match created blocks by their markers rather than by position.
+        returned = response.get("results", []) if isinstance(response, dict) else []
+        created: dict[str, str] = {}
+        for block in returned if isinstance(returned, list) else []:
+            marker = _owned_marker(block) if isinstance(block, dict) else None
+            if marker and isinstance(block.get("id"), str):
+                created[marker] = block["id"]
+        for key, candidate in batch:
+            marker = _owned_marker(candidate)
+            if marker in created:
+                found[key] = created[marker]
+        if any(key not in found for key, _ in batch):
+            self._find_owned_blocks(page_id, batch, found)
+        if any(key not in found for key, _ in batch):
+            raise NotionError("Notion did not confirm all owned transcript blocks.")
+
+    def _find_owned_blocks(
+        self,
+        page_id: str,
+        batch: list[tuple[str, dict[str, Any]]],
+        found: dict[str, str],
+    ) -> None:
+        wanted: dict[str, str] = {}
+        for key, candidate in batch:
+            marker = _owned_marker(candidate)
+            if marker is not None and key not in found:
+                wanted[marker] = key
+        for block in self._children(page_id):
+            marker = _owned_marker(block)
+            if marker in wanted and wanted[marker] not in found and isinstance(block.get("id"), str):
+                found[wanted[marker]] = block["id"]
 
     def publish(self, archive_directory: Path | str) -> dict[str, Any]:
         archive = Path(archive_directory)
@@ -556,10 +624,13 @@ class NotionPublisher:
         title = effective_title(archive, metadata)
         if title is not None:
             metadata = dict(metadata, title=title)
+        # The AI summary is optional and arrives separately; without a valid
+        # one the page is published as before.
+        summary = read_summary(archive, metadata)
         meeting_id = str(metadata["meeting_id"])
         marker = f"{self.playback_base_url}/meeting/{meeting_id}"
         receipt_path = archive / RECEIPT_NAME
-        fingerprint = _content_fingerprint(metadata, transcript, self.playback_base_url)
+        fingerprint = _content_fingerprint(metadata, transcript, self.playback_base_url, summary)
         if receipt_path.is_file():
             try:
                 receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -612,7 +683,7 @@ class NotionPublisher:
 
         owned = self._reconcile_owned_blocks(
             page_id,
-            self._blocks(metadata, transcript, meeting_id),
+            self._blocks(metadata, transcript, meeting_id, summary),
             old_receipt.get("owned_block_ids", {}) if old_receipt else {},
         )
         receipt: dict[str, Any] = {

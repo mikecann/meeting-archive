@@ -74,7 +74,23 @@ class ServiceScriptContractTests(unittest.TestCase):
 
         self.assertNotIn("echo \"${HF_TOKEN}", wrapper)
         self.assertNotIn("echo \"${MEETING_ARCHIVE_NOTION_TOKEN}", wrapper)
+        self.assertNotIn("ANTHROPIC_API_KEY}", wrapper)
         self.assertNotIn("set -x", wrapper)
+
+    def test_worker_wrapper_takes_secrets_only_from_the_protected_file(self) -> None:
+        wrapper = (WORKER_ROOT / "run-service-bruce.sh").read_text(encoding="utf-8")
+        unset = re.search(r"^unset ([^|\n]+)\|\| true$", wrapper, re.M)
+
+        self.assertIsNotNone(unset)
+        cleared = set(unset.group(1).split())  # type: ignore[union-attr]
+        # A key inherited from launchd or a login shell must never reach the
+        # worker, and nothing may redirect the Anthropic key to another host.
+        for variable in (
+            "HF_TOKEN", "MEETING_ARCHIVE_NOTION_TOKEN",
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+        ):
+            self.assertIn(variable, cleared)
+        self.assertLess(unset.start(), wrapper.index("meeting_archive_worker.credentials"))  # type: ignore[union-attr]
 
     def test_worker_wrapper_failures_reach_stderr_and_unified_logging(self) -> None:
         wrapper = (WORKER_ROOT / "run-service-bruce.sh").read_text(encoding="utf-8")

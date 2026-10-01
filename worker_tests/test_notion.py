@@ -63,7 +63,18 @@ class MockTransport:
                 block = dict(block)
                 block["id"] = f"block-{len(self.children.get(page_id, [])) + len(blocks) + 1}"
                 blocks.append(block)
-            self.children.setdefault(page_id, []).extend(blocks)
+            children = self.children.setdefault(page_id, [])
+            if "after" in body:
+                return 400, {}, {"message": "after was replaced by position in API 2026-03-11"}
+            position = body.get("position", {"type": "end"})
+            if position["type"] == "start":
+                children[0:0] = blocks
+            elif position["type"] == "after_block":
+                anchor = next(index for index, item in enumerate(children)
+                              if item["id"] == position["after_block"]["id"])
+                children[anchor + 1:anchor + 1] = blocks
+            else:
+                children.extend(blocks)
             if self.fail_append_once:
                 self.fail_append_once = False
                 raise OSError("connection reset after append")
@@ -517,6 +528,148 @@ class NotionPublicationTests(unittest.TestCase):
             self.assertEqual(speaker_text, "Kelsie")
             self.assertIn("Kelsie: Hello there.", block_text)
             self.assertNotIn("incoming:SPEAKER_00: Hello there.", block_text)
+
+
+def write_summary(archive: Path, summary: list[str], action_items: list[str]) -> None:
+    (archive / "transcripts" / "v1" / "summary.json").write_text(json.dumps({
+        "schema_version": 1,
+        "meeting_id": "11111111-1111-4111-8111-111111111111",
+        "manifest_revision": 1,
+        "model": "claude-opus-5-5",
+        "title": "Launch plan",
+        "summary": summary,
+        "action_items": action_items,
+    }), encoding="utf-8")
+
+
+def live(transport: MockTransport) -> list[dict]:
+    return [block for block in transport.children["page-1"] if not block.get("in_trash")]
+
+
+def text_of(block: dict) -> str:
+    return "".join(item["text"]["content"] for item in block[block["type"]]["rich_text"])
+
+
+def outline(transport: MockTransport) -> list[tuple[str, str]]:
+    return [(block["type"], text_of(block)) for block in live(transport) if block.get("type") in (
+        "heading_1", "heading_2", "paragraph", "bulleted_list_item",
+    )]
+
+
+class NotionSummaryTests(unittest.TestCase):
+    SUMMARY = ["The launch moves to March.", "Marketing needs the new date."]
+    ACTIONS = ["Alice to tell marketing."]
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.archive = write_archive(Path(self.temporary.name))
+        self.transport = MockTransport()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def publish(self) -> dict:
+        return publish(self.archive, token="token", data_source="source", transport=self.transport)
+
+    def expected_outline(self, summary: list[str], actions: list[str]) -> list[tuple[str, str]]:
+        result = [("heading_1", "Planning · Play recording"), ("paragraph", "Discuss the launch plan.")]
+        result += [("heading_2", "Summary")] + [("bulleted_list_item", point) for point in summary]
+        if actions:
+            result += [("heading_2", "Action items")] + [("bulleted_list_item", item) for item in actions]
+        return result + [("heading_1", "Transcript"), ("paragraph", "00:00:01  Alice: Hello there.")]
+
+    def test_summary_is_published_under_the_description_once(self) -> None:
+        write_summary(self.archive, self.SUMMARY, self.ACTIONS)
+
+        first = self.publish()
+        calls = len(self.transport.calls)
+        second = self.publish()
+
+        self.assertEqual(outline(self.transport), self.expected_outline(self.SUMMARY, self.ACTIONS))
+        self.assertEqual(first, second)
+        self.assertEqual(len(self.transport.calls), calls, "an unchanged summary is not sent again")
+        for key in ("summary", "summary-0", "summary-1", "action-items", "action-item-0"):
+            self.assertIn(key, first["owned_block_ids"])
+        bullet = next(block for block in live(self.transport) if block["type"] == "bulleted_list_item")
+        link = bullet["bulleted_list_item"]["rich_text"][0]["text"]["link"]["url"]
+        self.assertTrue(link.endswith("#meeting-archive=11111111-1111-4111-8111-111111111111:summary-0"))
+        self.assertNotIn("meeting-archive", visible_text(live(self.transport)))
+
+    def test_a_summary_arriving_later_goes_above_the_transcript_and_keeps_manual_notes(self) -> None:
+        first = self.publish()
+        self.transport.children["page-1"].append({
+            "id": "manual-1", "type": "paragraph",
+            "paragraph": {"rich_text": [{"type": "text", "text": {"content": "My notes"}}]},
+        })
+        write_summary(self.archive, self.SUMMARY, self.ACTIONS)
+        calls = len(self.transport.calls)
+
+        second = self.publish()
+
+        inserts = [body for method, path, body in self.transport.calls[calls:]
+                   if method == "PATCH" and path.endswith("/children")]
+        self.assertEqual(len(inserts), 1)
+        self.assertEqual(inserts[0]["position"], {
+            "type": "after_block", "after_block": {"id": first["owned_block_ids"]["description"]},
+        })
+        self.assertEqual(outline(self.transport), self.expected_outline(self.SUMMARY, self.ACTIONS) + [
+            ("paragraph", "My notes"),
+        ])
+        for key in ("metadata", "description", "transcript", "turn-0"):
+            self.assertEqual(second["owned_block_ids"][key], first["owned_block_ids"][key])
+        self.assertNotEqual(first["content_fingerprint"], second["content_fingerprint"])
+
+    def test_a_new_summary_updates_in_place_without_duplicates(self) -> None:
+        write_summary(self.archive, self.SUMMARY + ["Budget is unchanged."], self.ACTIONS)
+        first = self.publish()
+        changed_summary = ["The launch moves to April.", "Marketing needs the new date."]
+        changed_actions = ["Alice to tell marketing.", "Bob to update the plan."]
+        write_summary(self.archive, changed_summary, changed_actions)
+
+        second = self.publish()
+        self.publish()
+
+        self.assertEqual(outline(self.transport), self.expected_outline(changed_summary, changed_actions))
+        for key in ("summary", "summary-0", "summary-1", "action-items", "action-item-0"):
+            self.assertEqual(second["owned_block_ids"][key], first["owned_block_ids"][key])
+        removed = next(block for block in self.transport.children["page-1"]
+                       if block["id"] == first["owned_block_ids"]["summary-2"])
+        self.assertTrue(removed.get("in_trash"))
+        self.assertNotIn("summary-2", second["owned_block_ids"])
+
+    def test_an_uncertain_insert_is_recovered_without_duplicates(self) -> None:
+        self.publish()
+        write_summary(self.archive, self.SUMMARY, self.ACTIONS)
+        self.transport.fail_append_once = True
+
+        self.publish()
+        (self.archive / "notion-receipt.json").unlink()
+        self.publish()
+
+        self.assertEqual(outline(self.transport), self.expected_outline(self.SUMMARY, self.ACTIONS))
+
+    def test_a_removed_summary_takes_only_its_own_blocks(self) -> None:
+        write_summary(self.archive, self.SUMMARY, [])
+        first = self.publish()
+        (self.archive / "transcripts" / "v1" / "summary.json").unlink()
+
+        second = self.publish()
+
+        self.assertEqual(outline(self.transport), [
+            ("heading_1", "Planning · Play recording"), ("paragraph", "Discuss the launch plan."),
+            ("heading_1", "Transcript"), ("paragraph", "00:00:01  Alice: Hello there."),
+        ])
+        self.assertNotIn("action-items", first["owned_block_ids"])
+        self.assertNotIn("summary", second["owned_block_ids"])
+
+    def test_a_summary_for_another_revision_is_ignored(self) -> None:
+        write_summary(self.archive, self.SUMMARY, self.ACTIONS)
+        path = self.archive / "transcripts" / "v1" / "summary.json"
+        path.write_text(json.dumps(dict(json.loads(path.read_text()), manifest_revision=2)), encoding="utf-8")
+
+        receipt = self.publish()
+
+        self.assertNotIn("summary", receipt["owned_block_ids"])
 
 
 class RealTransportLifecycleTests(unittest.TestCase):

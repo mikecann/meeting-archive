@@ -45,8 +45,9 @@ profiles) worked: 10 of 10 transfers verified, 9 of 10 processed and published.
    this app" in the menu, plus a global hotkey for in-person meetings that no app
    is listening to.
 7. **No naming prompt.** The title comes from the calendar when an event matches,
-   otherwise it stays generic and can be renamed later. A notification says what
-   was saved, and the menu offers Discard for the 90 seconds before upload.
+   otherwise it stays generic until Bruce gives it an AI title from the
+   transcript, and it can be renamed any time. A notification says what was
+   saved, and the menu offers Discard for the 90 seconds before upload.
 
 Ignored by default: Meeting Archive, Voice Type, Record It, Record Meeting,
 Telemprompit, Tandem, Apple dictation and Siri, AI voice apps (Claude, ChatGPT),
@@ -108,4 +109,10 @@ Each with headphones and once on speakers:
 
 - The calendar only ever matched one family event, so the Convex Google account
   is probably missing from macOS Internet Accounts. Mike to check.
-- AI titles and summaries need an Anthropic API key on Bruce. Not in v2 yet.
+- AI titles and summaries are built: Claude writes a title, three to five
+  summary points and action items for each meeting, shown in Notion and
+  synced to the app's library. They stay off until Mike adds `anthropicApiKey`
+  to Bruce's protected credentials file, reruns `install-bruce.sh` for the
+  `anthropic` package and restarts the worker. The first start then summarizes
+  earlier meetings too, at roughly 5 to 15 cents each. Only titles nobody
+  chose are replaced; calendar titles and renames stay.

@@ -187,6 +187,17 @@ def _add_speaker_counts_to_status(status: dict[str, Any], database: Path) -> Non
             job["total_speaker_count"], job["unconfirmed_speaker_count"] = counts
 
 
+def _add_titles_to_status(status: dict[str, Any]) -> None:
+    """The title Notion and search show, so the app can follow AI titles and renames."""
+    from .titles import display_title
+
+    for job in status["jobs"]:
+        archive = Path(job["archive_path"])
+        title = display_title(archive) if archive.is_absolute() else None
+        if title is not None:
+            job["title"] = title
+
+
 class _Heartbeat:
     def __init__(self, queue: JobQueue, job: Job, lease_seconds: float):
         self.queue = queue
@@ -413,30 +424,36 @@ def main(argv: list[str] | None = None) -> int:
             } if args.meeting_id else None
             status = JobQueue(args.db).status(meeting_ids)
             _add_speaker_counts_to_status(status, Path(args.db))
+            _add_titles_to_status(status)
             from .service import PublicationQueue
+            from .summaries import SummaryQueue
 
             processing_job_ids = {int(job["id"]) for job in status["jobs"]}
-            status["publication"] = PublicationQueue(args.db).status(
-                processing_job_ids if meeting_ids is not None else None,
-            )
+            scope = processing_job_ids if meeting_ids is not None else None
+            status["publication"] = PublicationQueue(args.db).status(scope)
+            status["summary"] = SummaryQueue(args.db).status(scope)
             _print_json(status)
             return 0
         if args.command == "retry":
             meeting_id = str(uuid.UUID(args.meeting_id)).lower()
             processing = JobQueue(args.db).retry_failed(meeting_id)
             publication = None
+            summary = None
             if processing["state"] == "succeeded":
                 from .service import PublicationQueue
+                from .summaries import SummaryQueue
 
                 publication = PublicationQueue(args.db).retry_failed(processing["job_id"])
+                summary = SummaryQueue(args.db).retry_failed(processing["job_id"])
             _print_json({
                 "schema_version": 1,
                 "meeting_id": meeting_id,
-                "retried": processing["retried"] or bool(
-                    publication and publication["retried"],
-                ),
+                "retried": processing["retried"]
+                or bool(publication and publication["retried"])
+                or bool(summary and summary["retried"]),
                 "processing": processing,
                 "publication": publication,
+                "summary": summary,
             })
             return 0
         if args.command == "process-ready":

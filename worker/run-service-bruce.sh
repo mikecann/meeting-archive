@@ -58,7 +58,9 @@ fi
 # The Python entry point loads the owner-only credential file into memory.
 # Bruce's locked login Keychain cannot serve an unattended SSH/login worker.
 # No token is passed in argv, echoed, or placed in the LaunchAgent plist.
-unset HF_TOKEN MEETING_ARCHIVE_NOTION_TOKEN || true
+# The Anthropic variables are cleared too, so only the protected file supplies
+# that key and nothing inherited can send it to another host.
+unset HF_TOKEN MEETING_ARCHIVE_NOTION_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL || true
 
 export MEETING_ARCHIVE_NOTION_DATA_SOURCE="fe4b72d1-b303-42ba-a812-3349655746c5"
 export MEETING_ARCHIVE_PLAYBACK_BASE_URL="https://bruce.tail9ef766.ts.net:10443"

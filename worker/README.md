@@ -68,11 +68,12 @@ reuses it. Both audio tracks are mixed on the transcript's capture clock. A
 bundle with video, from before v2, also gets H.264 video. An audio-only
 bundle gets an AAC-only MP4.
 
-The service keeps media processing and Notion publication in separate durable
-SQLite states. A Notion outage retries publication with backoff and does not
-run transcription or playback generation again. Credentials are read only from
-`MEETING_ARCHIVE_NOTION_TOKEN`, `MEETING_ARCHIVE_NOTION_DATA_SOURCE`, and
-`HF_TOKEN`; the worker never includes them in status or result JSON.
+The service keeps media processing, AI summaries and Notion publication in
+separate durable SQLite states. A Notion outage retries publication with
+backoff and does not run transcription or playback generation again.
+Credentials are read only from `MEETING_ARCHIVE_NOTION_TOKEN`,
+`MEETING_ARCHIVE_NOTION_DATA_SOURCE`, `HF_TOKEN` and, for summaries,
+`ANTHROPIC_API_KEY`; the worker never includes them in status or result JSON.
 The service accepts `--db WORKER_DB` and optional `--poll-seconds SECONDS`. It
 holds one process lock for that database, while both media processing and
 publication also use durable leases for crash recovery. Heavy processing runs
@@ -93,22 +94,27 @@ required before unusually long recordings can run inside a smaller budget.
 `status` accepts up to 100 repeated `--meeting-id` filters. Its processing jobs,
 counts, and nested publication jobs are scoped to those meetings, which keeps
 the app response bounded as the archive grows. Omitting the filter retains the
-operator-facing full queue response. The `publication` object includes its
-scoped aggregate `phase`, `last_error`, counts, and durable job details.
+operator-facing full queue response. The `publication` and `summary` objects
+include their scoped aggregate `phase`, `last_error`, counts, and durable job
+details. Each processing job also carries the meeting's current display
+`title`, the one Notion and search show, so the app can follow AI titles and
+renames made on Bruce.
 
 `retry --meeting-id UUID` is an idempotent operator action. It releases only a
 processing job in `retry_wait` or `permanent_failure`, or an errored publication
-job in `retry_wait`. It never takes a live lease and never moves succeeded
-processing back to ready, so a Notion retry cannot retranscribe the meeting.
-The JSON response identifies the processing and optional publication stage and
-whether this call changed either queue.
+job in `retry_wait`, or a summary in `retry_wait` or `permanent_failure` (with
+a fresh attempt budget). It never takes a live lease and never moves succeeded
+processing back to ready, so a Notion or summary retry cannot retranscribe the
+meeting. The JSON response identifies the processing, optional publication and
+optional summary stage and whether this call changed any queue.
 
 `rename --meeting-id UUID --title TEXT --archive-root ROOT --db WORKER_DB` sets
 a meeting's display title without touching the manifest-hashed `metadata.json`.
-It atomically writes `title.json` beside it, which Notion and the viewer prefer
-over the captured title, and queues a Notion republish once processing has
-succeeded. Titles are trimmed, at most 200 characters, with no control
-characters. It is idempotent and prints
+It atomically writes `title.json` beside it, with `"source": "user"`, which
+Notion, search and the viewer prefer over the captured title, and queues a
+Notion republish once processing has succeeded. A rename always wins: an AI
+title never replaces it, then or later. Titles are trimmed, at most 200
+characters, with no control characters. It is idempotent and prints
 `{"schema_version":1,"meeting_id":...,"title":...}`.
 
 After `accept` commits a receipt it removes the staged copy at
@@ -158,6 +164,51 @@ The worker no longer reads names off video frames. `review-speakers` still
 returns `evidence_labels` for each speaker, always as an empty list, because
 the app decodes it. A `visual-labels.json` left in an older meeting is ignored.
 
+## AI titles and summaries
+
+With an Anthropic API key, each meeting gets a short title, three to five
+summary points and any action items, written by Claude from its transcript.
+Without a key the stage is skipped quietly and nothing else changes. To turn
+it on, rerun `install-bruce.sh` so the environment has the pinned `anthropic`
+package, add `anthropicApiKey` to the protected credentials file (see below),
+then restart with `install-service-bruce.sh --enable`. A key without the
+package is reported once in the service log.
+
+It is its own durable stage on its own service thread. When a transcript is
+written, a summary job is queued. The first start with a key also queues every
+meeting processed earlier. The job sends the transcript, with speaker names or
+labels like "Remote speaker 1", rough timestamps, the source app, date, length
+and calendar attendees, to `claude-opus-5-5` at low effort with a structured
+output schema, opting in to Anthropic's recommended fallback model if a safety
+classifier declines. The whole transcript is always sent; one too long for a
+single request fails visibly rather than being cut short.
+
+The answer is written atomically to `transcripts/vN/summary.json` with its
+`schema_version`, `model`, `served_by` model and an `input_sha256` of
+everything sent. A retry with the same transcript reuses it without calling
+Claude. Confirming speaker names asks for a fresh summary five minutes after
+the last name, so it can use them.
+
+A Claude outage never holds up transcription or Notion. The page is published
+without a summary and updated in place once one arrives. The SDK retries rate
+limits and server errors itself; anything still failing retries with backoff
+from 1 minute, doubling to an hour, and becomes a `permanent_failure` after 8
+attempts. A refusal, a rejected key or an invalid request is permanent at
+once. `retry` releases it, for example after fixing the key and restarting.
+
+The AI title replaces only a title nobody chose: the app's default title
+(`title_source` `default`), or, for recordings from before the app recorded a
+source, one matching its old default pattern such as `Meeting 23 Sep 2026 at
+6:47 am`. A calendar title, a title typed in the app and any rename stay. The
+AI title is written through the same `title.json` as `rename`, marked
+`"source": "ai"`, so Notion, search, the viewer and the app pick it up. The app
+adopts Bruce's display title for any meeting the user didn't name there.
+
+Cost is roughly 5 cents for a half-hour call and 10 to 15 cents for 90
+minutes, at $4 per million input tokens and $20 per million output tokens. A
+meeting whose speakers are named after it was summarized is summarized again,
+so allow about double for those.
+
 ## Bruce background service
 
 Bruce uses the fixed external root `/Volumes/CannMedia/MeetingArchive`. The
@@ -201,11 +252,15 @@ Bruce's login Keychain is locked for unattended SSH work. The launcher instead
 loads `/Volumes/CannMedia/MeetingArchive/runtime/secrets/credentials.json`
 from the encrypted archive volume. The directory must be owned by the worker
 user with mode `0700`; the regular file must have mode `0600` and contain the
-approved `huggingFaceToken` and `notionToken` JSON fields. Symlinks, shared
-permissions, unexpected fields, and malformed data are rejected. Values only
-enter the worker's process environment; they are never printed, placed in
-command arguments, or included in the plist/source repository. Provisioning
-requires the user's authorization and occurs separately over encrypted SSH.
+approved `huggingFaceToken` and `notionToken` JSON fields, plus an optional
+`anthropicApiKey`, which becomes `ANTHROPIC_API_KEY` and turns on AI titles
+and summaries. Symlinks, shared permissions, unexpected fields, empty values
+and malformed data are rejected. Values only enter the worker's process
+environment; the wrapper clears any inherited `ANTHROPIC_API_KEY`,
+`ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_BASE_URL` first. They are never printed,
+placed in command arguments, or included in the plist/source repository.
+Provisioning requires the user's authorization and occurs separately over
+encrypted SSH.
 
 The scripts never create or copy credentials. If credentials are unavailable,
 the service still starts; affected jobs remain in durable retry state and
