@@ -7,9 +7,13 @@ APP_DIR="${MEETING_ARCHIVE_APP_DIR:-$HOME/Applications/Meeting Archive.app}"
 # path, so match each of this user's executables by name, never by arguments,
 # and ask launchd too.
 refuse_while_running() {
-  local login_item
+  local login_item executables
   login_item="$(launchctl print "gui/$(id -u)/com.mikerosoft.meeting-archive" 2>/dev/null || true)"
-  if ps -x -U "$(id -u)" -o comm= | awk -F/ '$NF == "meeting-archive-app" { found = 1 } END { exit !found }' \
+  if ! executables="$(ps -x -U "$(id -u)" -o comm=)"; then
+    echo "Could not list running processes, so Meeting Archive might still be running. Not rebuilding." >&2
+    exit 1
+  fi
+  if printf '%s\n' "$executables" | awk -F/ '$NF == "meeting-archive-app" { found = 1 } END { exit !found }' \
     || [[ "$login_item" == *"state = running"* ]]; then
     echo "Quit Meeting Archive from its menu before rebuilding, so any live writer can finish." >&2
     exit 1

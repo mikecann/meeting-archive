@@ -12,9 +12,11 @@ mkdir -p "$ROOT/bin"
 
 # ps lists this user's FAKE_PROCESSES, one executable per line, as
 # `ps -x -U uid -o comm=` does, plus the app once it was opened mid-build.
+# With PS_FAILS set it can't list anything.
 cat >"$ROOT/bin/ps" <<'STUB'
 #!/bin/sh
 [ "$*" = "-x -U $(id -u) -o comm=" ] || exit 2
+[ -z "${PS_FAILS:-}" ] || exit 1
 printf '%s\n' "${FAKE_PROCESSES:-}"
 [ ! -e "$ROOT/opened-mid-build" ] || echo meeting-archive-app
 STUB
@@ -40,13 +42,15 @@ echo "open $*" >>"$CALLS"
 STUB
 chmod +x "$ROOT/bin/ps" "$ROOT/bin/launchctl" "$ROOT/bin/swift" "$ROOT/bin/open"
 
+PS_FAILS=
+
 # run SCRIPT PROCESSES LOGIN_ITEM_STATE [OPEN_DURING_BUILD]
 run() {
   : >"$ROOT/calls"
   rm -f "$ROOT/opened-mid-build"
   set +e
   PATH="$ROOT/bin:$PATH" ROOT="$ROOT" CALLS="$ROOT/calls" FAKE_PROCESSES="$2" FAKE_LOGIN_ITEM="$3" \
-    OPEN_DURING_BUILD="${4:-}" MEETING_ARCHIVE_APP_DIR="$ROOT/Meeting Archive.app" \
+    OPEN_DURING_BUILD="${4:-}" PS_FAILS="$PS_FAILS" MEETING_ARCHIVE_APP_DIR="$ROOT/Meeting Archive.app" \
     bash "$TOOL_DIR/$1" >"$ROOT/output" 2>&1
   status=$?
   set -e
@@ -94,6 +98,12 @@ run build-app.sh "" "" yes
   || fail "app opened during the build: expected a refusal right after building, got exit $status after $(tr '\n' ' ' <"$ROOT/calls")"
 grep -q "Quit Meeting Archive from its menu" "$ROOT/output" || fail "app opened during the build: no quit message"
 [[ ! -e "$ROOT/Meeting Archive.app.staging" ]] || fail "app opened during the build: left a staging bundle"
+# If the processes can't be listed, the app might be running, so don't build.
+PS_FAILS=yes
+run build-app.sh "" ""
+PS_FAILS=
+[[ "$status" -eq 1 && ! -s "$ROOT/calls" ]] || fail "process list unavailable: expected a refusal, got exit $status"
+grep -q "Could not list running processes" "$ROOT/output" || fail "process list unavailable: no explanation"
 run restart.sh "$login_item" "running"
 expect_refused "restart.sh"
 run setup_mac.sh "$login_item" "running"
