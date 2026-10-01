@@ -13,6 +13,55 @@ struct CaptureJournal: Codable {
     let microphoneName: String
 }
 
+/// What the user is told when a capture stops or cannot start. Kept apart
+/// from the controller so what is said, and when, can be tested.
+enum CaptureNotice {
+    struct Message: Equatable {
+        let title: String
+        let body: String
+    }
+
+    /// For the naming panel and its notification. Only a stop that the
+    /// meeting or the user chose says the recording finished.
+    static func saved(reason: CaptureStopReason, meetingTitle: String, detail: String?) -> Message {
+        let saving = "Saving \(meetingTitle). You can rename or discard it in the brief window."
+        switch reason {
+        case .cameraOff, .skipped, .paused:
+            return Message(title: "Recording finished", body: saving)
+        case .interrupted, .startFailed:
+            return Message(title: "Recording stopped early", body: [detail, saving].compactMap { $0 }.joined(separator: " "))
+        }
+    }
+
+    /// A failed start notifies when it first happens and again if the camera
+    /// session runs out of tries. The retries between only update the menu.
+    static func startFailed(failedStarts: Int, retryIn seconds: Int?, detail: String?) -> Message? {
+        let why = detail.map { "\($0) " } ?? ""
+        guard let seconds else {
+            return Message(
+                title: "Couldn't record this meeting",
+                body: "\(why)Gave up after \(tries(failedStarts)). To try again, turn your camera off for about 30 seconds, then back on."
+            )
+        }
+        guard failedStarts == 1 else { return nil }
+        return Message(title: "Recording didn't start", body: "\(why)Trying again in \(seconds) seconds.")
+    }
+
+    /// Left in the menu and library once a camera session gives up.
+    static func gaveUpWarning(failedStarts: Int, detail: String?) -> String {
+        ["Couldn't record this meeting after \(tries(failedStarts)).", detail].compactMap { $0 }.joined(separator: " ")
+    }
+
+    static func retryStatus(until retryAt: Date, now: Date) -> String {
+        let seconds = Int(retryAt.timeIntervalSince(now).rounded(.up))
+        return seconds > 0 ? "Recording didn't start • trying again in \(seconds)s" : "Recording didn't start • trying again"
+    }
+
+    private static func tries(_ count: Int) -> String {
+        count == 1 ? "1 try" : "\(count) tries"
+    }
+}
+
 @MainActor
 final class ArchiveController: ObservableObject {
     @Published var status = "Starting…"
@@ -43,6 +92,9 @@ final class ArchiveController: ObservableObject {
     private var retargeting = false
     private var failedRetargetWindowID: CGWindowID?
     private var journal: CaptureJournal?
+    /// Why the current capture stopped or could not start, for whatever the
+    /// user is told next. Each new capture clears it.
+    private var captureStopDetail: String?
     private var captureLifecycle = CaptureLifecycleCoordinator()
     private var sourcesReady = false
     private var startupCompleted = false
@@ -124,7 +176,9 @@ final class ArchiveController: ObservableObject {
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.recorder != nil else { return }
-                self.fail("Capture stopped because the Mac is going to sleep. The partial meeting will be saved.")
+                let message = "Capture stopped because the Mac is going to sleep. The partial meeting will be saved."
+                self.captureStopDetail = message
+                self.fail(message)
                 if let entry = self.journal { self.dispatch(.captureInterrupted(sessionID: entry.session.id, at: Date())) }
             }
         }
@@ -272,7 +326,9 @@ final class ArchiveController: ObservableObject {
         }
         retryDeferredCapture(using: snapshot)
         if !isRecording, recorder == nil {
-            if failure != nil { status = "Needs attention" }
+            if case .retryScheduled(let retryAt) = machine.state.currentSession?.phase {
+                status = CaptureNotice.retryStatus(until: retryAt, now: Date())
+            } else if failure != nil { status = "Needs attention" }
             else if isPaused { status = "Paused" }
             else {
                 switch snapshot.status {
@@ -343,8 +399,28 @@ final class ArchiveController: ObservableObject {
                     Task { await finish(request) }
                 }
             case .sessionSkipped: status = "Skipping this camera session"
+            case .retryScheduled(let sessionID, let retryAt):
+                announceStartFailure(sessionID: sessionID, retryAt: retryAt)
+            case .retriesExhausted(let sessionID):
+                announceStartFailure(sessionID: sessionID, retryAt: nil)
             }
         }
+    }
+
+    /// The menu counts down to each retry. Notifications come only from the
+    /// first failure and from giving up, so a stubborn failure cannot post
+    /// one every 15 seconds.
+    private func announceStartFailure(sessionID: String, retryAt: Date?) {
+        let failedStarts = machine.state.currentSession?.failedStarts ?? 1
+        if let retryAt {
+            status = CaptureNotice.retryStatus(until: retryAt, now: Date())
+        } else {
+            fail(CaptureNotice.gaveUpWarning(failedStarts: failedStarts, detail: captureStopDetail))
+        }
+        let seconds = retryAt.map { max(1, Int($0.timeIntervalSinceNow.rounded())) }
+        guard let message = CaptureNotice.startFailed(failedStarts: failedStarts, retryIn: seconds, detail: captureStopDetail) else { return }
+        // Giving up replaces the first notice rather than stacking under it.
+        notify(message.title, body: message.body, id: sessionID + "-start-failed")
     }
 
     private func cancelExactStartupIfNeeded(for event: CaptureEvent) {
@@ -357,7 +433,7 @@ final class ArchiveController: ObservableObject {
         else { return }
 
         let makesStartIneligible: Bool = switch event {
-        case .cameraOff(let sessionID, _), .captureInterrupted(let sessionID, _):
+        case .cameraOff(let sessionID, _), .captureInterrupted(let sessionID, _), .captureStartFailed(let sessionID, _):
             sessionID == current.descriptor.id
         case .skipCurrent:
             true
@@ -385,6 +461,7 @@ final class ArchiveController: ObservableObject {
             return
         }
         guard recorder == nil, journal == nil else { return }
+        captureStopDetail = nil
         let session = request.session
         let recording = NativeRecording()
         let mic = AVCaptureDevice.default(for: .audio)
@@ -417,8 +494,7 @@ final class ArchiveController: ObservableObject {
             recording.onFailure = { [weak self] message in
                 Task { @MainActor in
                     guard let self, self.journal?.id == entry.id else { return }
-                    self.fail(message)
-                    self.dispatch(.captureInterrupted(sessionID: entry.session.id, at: Date()))
+                    self.captureFailed(entry.session, message: message, started: self.sourcesReady)
                 }
             }
             recordingWindowID = request.windowID
@@ -440,10 +516,10 @@ final class ArchiveController: ObservableObject {
             startupCompleted = true
             announceCaptureStart(entry)
         } catch {
-            fail(error.localizedDescription)
+            let message = error.localizedDescription
             if recorder === recording, journal?.id == entry.id {
                 if !recording.hasCapturedSamples {
-                    dispatch(.captureInterrupted(sessionID: session.id, at: Date()))
+                    captureFailed(session, message: message, started: false)
                     recorder = nil
                     journal = nil
                     sourcesReady = false
@@ -457,15 +533,29 @@ final class ArchiveController: ObservableObject {
                 // Route their cleanup through this meeting ID so a late
                 // callback can never finalize a replacement meeting.
                 dispatch(.captureStarted(sessionID: session.id, meetingID: entry.id, at: Date()))
-                dispatch(.captureInterrupted(sessionID: session.id, at: Date()))
+                captureFailed(session, message: message, started: false)
                 if captureLifecycle.ownsActiveStart(meetingID: entry.id),
-                   case .finalize(let finalization) = captureLifecycle.requestStop(meetingID: entry.id, reason: .interrupted) {
+                   case .finalize(let finalization) = captureLifecycle.requestStop(meetingID: entry.id, reason: .startFailed) {
                     await finish(finalization)
                 }
             } else {
-                dispatch(.captureInterrupted(sessionID: session.id, at: Date()))
+                captureFailed(session, message: message, started: false)
                 resumeAfterAbortedStart(meetingID: entry.id)
             }
+        }
+    }
+
+    /// Until capture has produced both meeting video and microphone audio it
+    /// never really started, so a failure lets the state machine try again.
+    /// After that, a failure interrupts a real recording.
+    private func captureFailed(_ session: MeetingSessionDescriptor, message: String, started: Bool) {
+        captureStopDetail = message
+        if started {
+            fail(message)
+            dispatch(.captureInterrupted(sessionID: session.id, at: Date()))
+        } else {
+            Log.controller.error("Capture did not start: \(message, privacy: .public)")
+            dispatch(.captureStartFailed(sessionID: session.id, at: Date()))
         }
     }
 
@@ -507,14 +597,25 @@ final class ArchiveController: ObservableObject {
         let ended = Date()
         let directory = AppPaths.meeting(entry.id)
         let stopped = await recording.stop()
-        do {
-            try ModelCodec.encoder.encode(stopped.tracks).write(to: directory.appendingPathComponent("tracks.json"), options: .atomic)
-        } catch { fail(error.localizedDescription) }
-        if let error = stopped.error { fail(error.localizedDescription) }
         recorder = nil
         journal = nil
         recordingWindowID = nil
         isRecording = false
+        if !request.asksForTitle, !recording.hasCapturedSamples {
+            // A failed start that captured nothing leaves no fragment to keep.
+            removeJournalOnlyCaptureDirectory(directory)
+            resumeAfterFinalization(meetingID: request.meetingID)
+            return
+        }
+        do {
+            try ModelCodec.encoder.encode(stopped.tracks).write(to: directory.appendingPathComponent("tracks.json"), options: .atomic)
+        } catch { fail(error.localizedDescription) }
+        if let error = stopped.error {
+            // A failed start's error is already in its retry or give-up notice.
+            if request.asksForTitle { fail(error.localizedDescription) }
+            else { Log.controller.error("Failed start finalized with: \(error.localizedDescription, privacy: .public)") }
+        }
+        let detail = captureStopDetail ?? stopped.error?.localizedDescription
         var meeting = makeRecord(entry, ended: ended, microphoneChannels: stopped.microphoneChannels ?? 1)
         if request.discardAfterFinalization {
             meeting = meeting.resolvingAcceptance(.discard, at: Date())
@@ -531,10 +632,15 @@ final class ArchiveController: ObservableObject {
                 try ModelCodec.encoder.encode(events).write(to: directory.appendingPathComponent("calendar.json"), options: .atomic)
                 try store?.insertMeeting(meeting)
                 try? FileManager.default.removeItem(at: directory.appendingPathComponent("capture-journal.json"))
-                calendarChoices = events
-                showPrompt(meeting)
-                status = "Recording finished • preparing to save"
-                notify("Recording finished", body: "Saving \(meeting.title). You can rename or discard it in the brief window.", id: entry.id.uuidString + "-finish")
+                // A failed start is saved at its deadline like any unnamed
+                // recording, without a panel.
+                if request.asksForTitle {
+                    let notice = CaptureNotice.saved(reason: request.reason, meetingTitle: meeting.title, detail: detail)
+                    calendarChoices = events
+                    showPrompt(meeting, title: notice.title)
+                    status = "\(notice.title) • preparing to save"
+                    notify(notice.title, body: notice.body, id: entry.id.uuidString + "-finish")
+                }
             } catch { fail(error.localizedDescription) }
         }
         refresh()
@@ -696,7 +802,7 @@ final class ArchiveController: ObservableObject {
         } catch { fail("Could not save speaker prompt state: \(error.localizedDescription)") }
     }
 
-    private func showPrompt(_ record: MeetingRecord) {
+    private func showPrompt(_ record: MeetingRecord, title: String) {
         if let old = pending { resolve(old.id, resolution: .accept(trigger: .promptClosed)) }
         pending = record
         titleDraft = record.title
@@ -705,7 +811,7 @@ final class ArchiveController: ObservableObject {
         // focus away from the call, and stays above Zoom (including full
         // screen) instead of vanishing behind it on the next click.
         let panel = NamingPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 230), styleMask: [.titled, .closable, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.title = "Recording finished"
+        panel.title = title
         panel.isReleasedWhenClosed = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
@@ -877,6 +983,7 @@ final class ArchiveController: ObservableObject {
         timer?.cancel()
         if let meetingID = journal?.id,
            case .finalize(let request) = captureLifecycle.requestStop(meetingID: meetingID, reason: .interrupted) {
+            captureStopDetail = "Meeting Archive quit while recording."
             await finish(request)
         }
         if let pending { resolve(pending.id, resolution: .accept(trigger: .promptClosed)) }

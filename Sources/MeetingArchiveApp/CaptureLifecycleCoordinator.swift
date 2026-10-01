@@ -20,6 +20,11 @@ struct CaptureFinalizationRequest: Equatable, Sendable {
     // captured still follows the normal naming and auto-save path. Deletion is
     // reserved for the explicit Discard action in the prompt.
     var discardAfterFinalization: Bool { false }
+
+    /// A failed start holds a few seconds at most, and its retry or give-up
+    /// notice already tells the user what happened. It saves at its deadline
+    /// without a naming panel, so repeated failures cannot stack up panels.
+    var asksForTitle: Bool { reason != .startFailed }
 }
 
 enum CaptureStartDecision: Equatable, Sendable {
