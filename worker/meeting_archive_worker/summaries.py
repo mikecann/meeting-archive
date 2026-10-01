@@ -525,6 +525,9 @@ class OpenRouterSummarizer:
                 "type": "json_schema",
                 "json_schema": {"name": "meeting_summary", "strict": True, "schema": OUTPUT_SCHEMA},
             },
+            # Only route to providers that honour every field above. Some of
+            # this model's endpoints don't enforce strict JSON.
+            "provider": {"require_parameters": True},
         }
         request = urllib.request.Request(
             ENDPOINT,

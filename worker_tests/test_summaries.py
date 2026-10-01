@@ -272,6 +272,8 @@ class OpenRouterRequestTests(SummarizerTestCase):
             "type": "json_schema",
             "json_schema": {"name": "meeting_summary", "strict": True, "schema": OUTPUT_SCHEMA},
         })
+        # Endpoints that don't enforce strict JSON are skipped.
+        self.assertEqual(body["provider"], {"require_parameters": True})
         self.assertEqual(set(OUTPUT_SCHEMA["required"]), {"title", "summary", "action_items"})
         self.assertFalse(OUTPUT_SCHEMA["additionalProperties"])
         # The system prompt, then the meeting. No assistant prefill.
