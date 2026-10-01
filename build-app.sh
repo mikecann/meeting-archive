@@ -4,19 +4,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${MEETING_ARCHIVE_APP_DIR:-$HOME/Applications/Meeting Archive.app}"
 # Replacing the bundle under a running app would cut off a live recording. The
 # login item runs as plain "meeting-archive-app --background" with no bundle
-# path, so match each process's executable name, never its arguments, and ask
-# launchd too.
-LOGIN_ITEM="$(launchctl print "gui/$(id -u)/com.mikerosoft.meeting-archive" 2>/dev/null || true)"
-if ps -axo comm= | awk -F/ '$NF == "meeting-archive-app" { found = 1 } END { exit !found }' \
-  || [[ "$LOGIN_ITEM" == *"state = running"* ]]; then
-  echo "Quit Meeting Archive from its menu before rebuilding, so any live writer can finish." >&2
-  exit 1
-fi
+# path, so match each of this user's executables by name, never by arguments,
+# and ask launchd too.
+refuse_while_running() {
+  local login_item
+  login_item="$(launchctl print "gui/$(id -u)/com.mikerosoft.meeting-archive" 2>/dev/null || true)"
+  if ps -x -U "$(id -u)" -o comm= | awk -F/ '$NF == "meeting-archive-app" { found = 1 } END { exit !found }' \
+    || [[ "$login_item" == *"state = running"* ]]; then
+    echo "Quit Meeting Archive from its menu before rebuilding, so any live writer can finish." >&2
+    exit 1
+  fi
+}
+refuse_while_running
 CONFIGURATION="${MEETING_ARCHIVE_BUILD_CONFIGURATION:-release}"
 export CLANG_MODULE_CACHE_PATH="$SCRIPT_DIR/.build/module-cache"
 export SWIFTPM_MODULECACHE_OVERRIDE="$CLANG_MODULE_CACHE_PATH"
 mkdir -p "$CLANG_MODULE_CACHE_PATH"
 swift build --package-path "$SCRIPT_DIR" --disable-sandbox -c "$CONFIGURATION"
+# The build can take minutes, so check again before anything is staged.
+refuse_while_running
 BIN_DIR="$(swift build --package-path "$SCRIPT_DIR" --disable-sandbox -c "$CONFIGURATION" --show-bin-path)"
 STAGING="${APP_DIR}.staging"
 if [[ -e "$STAGING" ]]; then

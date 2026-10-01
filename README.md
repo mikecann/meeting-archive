@@ -126,6 +126,7 @@ swift test
 PYTHONPATH=worker python3 -W error::ResourceWarning -m unittest discover -s worker_tests
 bash verification/run-contract-roundtrip.sh
 bash verification/run-offline-regressions.sh
+bash verification/run-rebuild-guard-tests.sh
 bash diagnostics/run-tests.sh
 bash worker/launcher/run-tests.sh
 bash worker/vision/run-tests.sh
