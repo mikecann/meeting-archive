@@ -33,6 +33,10 @@ enum MeetingFollowUpScenarios {
         precondition(!MeetingFollowUpPhase.complete.isBusy)
         precondition(MeetingFollowUpPhase.needsNames(1).detail == "1 speaker needs a name")
         precondition(MeetingFollowUpPhase.needsNames(2).detail == "2 speakers need names")
+        let notArchived = MeetingFollowUpPhase.notArchived(reason: "No audio or video was recorded.")
+        precondition(!notArchived.isBusy, "A recording that can't be archived is not waiting on anything")
+        precondition(notArchived.detail == "Not archived: No audio or video was recorded.")
+        precondition(MeetingFollowUpPhase.notArchived(reason: nil).detail == "Not archived")
         func archived(revision: Int? = 2, succeeded: Bool = true, count: Int? = nil, error: String? = nil) -> MeetingFollowUpPhase {
             MeetingFollowUpPhase.afterArchive(expectedRevision: 2, workerRevision: revision,
                 processingSucceeded: succeeded, remainingNames: count, processingError: nil, connectionError: error)

@@ -1,7 +1,7 @@
 import CSQLite
 import Foundation
 
-public enum MeetingStoreError: Error, CustomStringConvertible {
+public enum MeetingStoreError: Error, CustomStringConvertible, LocalizedError {
     case openFailed(String)
     case sqlite(code: Int32, message: String)
     case missingMeeting(UUID)
@@ -19,6 +19,9 @@ public enum MeetingStoreError: Error, CustomStringConvertible {
         case .missingJob(let id): "Archive job does not exist: \(id.canonicalString)"
         }
     }
+
+    /// The app shows `localizedDescription`, so it needs this to read as written.
+    public var errorDescription: String? { description }
 }
 
 public final class SQLiteMeetingStore: @unchecked Sendable {
@@ -242,6 +245,18 @@ public final class SQLiteMeetingStore: @unchecked Sendable {
             guard var job = try fetchJobUnlocked(id: jobID) else { throw MeetingStoreError.missingJob(jobID) }
             job.status = .retryScheduled
             job.availableAt = availableAt
+            job.leaseUntil = nil
+            job.lastError = error
+            try updateJobUnlocked(job)
+        }
+    }
+
+    /// Stops a job that no retry can finish, such as a capture with no audio
+    /// or video at all. Claims and wake-ups skip it from then on.
+    public func failJob(id: UUID, error: String) throws {
+        try withLock {
+            guard var job = try fetchJobUnlocked(id: id) else { throw MeetingStoreError.missingJob(id) }
+            job.status = .failed
             job.leaseUntil = nil
             job.lastError = error
             try updateJobUnlocked(job)

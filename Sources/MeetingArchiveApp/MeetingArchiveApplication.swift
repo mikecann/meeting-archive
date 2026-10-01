@@ -218,16 +218,19 @@ struct LibraryView: View {
                             }
                         }
                         Spacer()
-                        if controller.canRename(record) {
-                            Button("Rename…") { renaming = record }
-                        }
-                        Button("Open") { controller.openInViewer(record.id) }
-                            .help("Watch with the transcript in Bruce's viewer")
-                        Button("Transcript") { controller.openTranscript(record.id) }
-                            .help("Download the transcript as Markdown")
-                        Button(currentWorkerStatus(record)?.unconfirmedSpeakerCount ?? 0 > 0 ? "Name speakers…" : "Speakers…") { controller.showFollowUp(record.id) }
-                        if currentWorkerStatus(record)?.retryStage != nil {
-                            Button("Retry") { controller.retryWorker(record.id) }
+                        // Open, Transcript and Speakers all need Bruce, so a capture that can't be archived gets none.
+                        if !controller.cannotArchive(record) {
+                            if controller.canRename(record) {
+                                Button("Rename…") { renaming = record }
+                            }
+                            Button("Open") { controller.openInViewer(record.id) }
+                                .help("Watch with the transcript in Bruce's viewer")
+                            Button("Transcript") { controller.openTranscript(record.id) }
+                                .help("Download the transcript as Markdown")
+                            Button(currentWorkerStatus(record)?.unconfirmedSpeakerCount ?? 0 > 0 ? "Name speakers…" : "Speakers…") { controller.showFollowUp(record.id) }
+                            if currentWorkerStatus(record)?.retryStage != nil {
+                                Button("Retry") { controller.retryWorker(record.id) }
+                            }
                         }
                     }.padding(.vertical, 6)
                 }
@@ -267,6 +270,7 @@ struct LibraryView: View {
     private func jobLabel(_ record: MeetingRecord) -> String {
         if record.acceptance.isPending { return "Saving shortly" }
         guard let job = controller.jobs.first(where: { $0.meetingID == record.id }) else { return "Saved locally" }
+        if job.status == .failed { return MeetingFollowUpPhase.notArchived(reason: job.lastError).detail }
         if let error = job.lastError { return "Waiting to retry: \(error)" }
         if job.status == .succeeded {
             return currentWorkerStatus(record)?.detail
@@ -302,6 +306,19 @@ struct MeetingFollowUpView: View {
                         onReviewChanged: { controller.speakerReviewChanged() },
                         onLater: { controller.closeFollowUp() }
                     )
+                } else if case .notArchived = phase {
+                    Spacer()
+                    HStack(spacing: 12) {
+                        Image(systemName: "info.circle").font(.largeTitle)
+                        Text(phase.detail).font(.headline)
+                    }
+                    Text("Nothing is sent to Bruce, so there's no transcript or speaker review for this recording.")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    HStack {
+                        Spacer()
+                        Button("Close") { controller.closeFollowUp() }
+                    }
                 } else {
                     Spacer()
                     HStack(spacing: 12) {

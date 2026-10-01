@@ -29,7 +29,7 @@ public struct ManifestFile: Codable, Equatable, Sendable {
     }
 }
 
-public enum ContractValidationError: Error, Equatable, Sendable, CustomStringConvertible {
+public enum ContractValidationError: Error, Equatable, Sendable, CustomStringConvertible, LocalizedError {
     case invalidSchemaVersion(Int)
     case invalidRevision(Int)
     case missingMetadata
@@ -59,6 +59,9 @@ public enum ContractValidationError: Error, Equatable, Sendable, CustomStringCon
         case .cleanupNotAllowed: "Archive acknowledgement did not authorize local cleanup"
         }
     }
+
+    /// The app shows `localizedDescription`, so it needs this to read as written.
+    public var errorDescription: String? { description }
 }
 
 public struct TransferManifest: Codable, Equatable, Sendable {

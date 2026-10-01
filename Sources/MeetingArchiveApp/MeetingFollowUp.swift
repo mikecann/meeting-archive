@@ -5,6 +5,8 @@ enum MeetingFollowUpPhase: Equatable {
     case processing
     case checking
     case waiting(String)
+    /// The capture can never be archived, so its folder stays on this Mac.
+    case notArchived(reason: String?)
     case needsNames(Int)
     case complete
 
@@ -27,7 +29,7 @@ enum MeetingFollowUpPhase: Equatable {
     var isBusy: Bool {
         switch self {
         case .transferring, .processing, .checking: true
-        case .waiting, .needsNames, .complete: false
+        case .waiting, .notArchived, .needsNames, .complete: false
         }
     }
 
@@ -37,6 +39,7 @@ enum MeetingFollowUpPhase: Equatable {
         case .processing: "Transcribing audio and identifying speaker voices on Bruce"
         case .checking: "Checking speaker analysis on Bruce"
         case .waiting(let reason): reason
+        case .notArchived(let reason): reason.map { "Not archived: \($0)" } ?? "Not archived"
         case .needsNames(let count): count == 1 ? "1 speaker needs a name" : "\(count) speakers need names"
         case .complete: "Speaker review complete"
         }

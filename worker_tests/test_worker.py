@@ -1045,6 +1045,58 @@ class ProcessingTests(unittest.TestCase):
             self.assertIsNotNone(output)
             self.assertGreater(output.stat().st_size, 0)  # type: ignore[union-attr]
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg or ffprobe is unavailable")
+    def test_capture_without_microphone_is_validated_archived_and_played_back(self) -> None:
+        # The Mac archives a capture whose microphone never started with the
+        # tracks it has, so the worker has to take one end to end.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            meeting_id = str(uuid.uuid4())
+            incoming = root / "incoming" / meeting_id / "r1"
+            incoming.mkdir(parents=True)
+            ffmpeg = shutil.which("ffmpeg")
+            subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "color=black:s=160x90:r=15:d=2", "-c:v", "libx264", str(incoming / "meeting-view.mov")], check=True)
+            subprocess.run([ffmpeg, "-v", "error", "-f", "lavfi", "-i", "sine=frequency=660:duration=2", "-c:a", "aac", str(incoming / "incoming.m4a")], check=True)
+            metadata = {
+                "schema_version": 1,
+                "meeting_id": meeting_id,
+                "manifest_revision": 1,
+                "started_at": "2026-10-01T09:02:00+08:00",
+                "ended_at": "2026-10-01T09:02:02+08:00",
+                "duration_seconds": 2,
+                "timezone": "Australia/Perth",
+                "source_app": "us.zoom.xos",
+            }
+            (incoming / "metadata.json").write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
+            files = []
+            for path, kind in (("metadata.json", "metadata"), ("meeting-view.mov", "video"), ("incoming.m4a", "incoming_audio")):
+                data = (incoming / path).read_bytes()
+                files.append({"path": path, "size_bytes": len(data), "sha256": sha256(data), "kind": kind})
+            manifest = {"schema_version": 1, "meeting_id": meeting_id, "revision": 1, "files": files}
+            (incoming / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+            archive = root / "archive"
+            archive.mkdir()
+
+            acknowledgement = ArchiveStore(archive, root / "worker.sqlite3", validate_media=True).accept(incoming)
+
+            self.assertTrue(acknowledgement["cleanup_allowed"])
+            validation = acknowledgement["media_validation"]
+            self.assertEqual(validation["status"], "passed")
+            self.assertEqual(sorted(item["kind"] for item in validation["files"]), ["incoming_audio", "video"])
+            archive_path = Path(acknowledgement["archive_path"])
+            destination = archive_path if archive_path.is_absolute() else archive / archive_path
+            verified = verify_incoming(destination)
+            playback = create_playback(destination, verified)
+            self.assertIsNotNone(playback)
+            self.assertGreater(playback.stat().st_size, 0)  # type: ignore[union-attr]
+
+            class FakeTranscriber:
+                def transcribe(self, path: Path, channel_origin: str):
+                    return [{"start": 0.0, "end": 1.0, "text": "can you hear me"}]
+
+            result = TranscriptProcessor(FakeTranscriber()).process(destination, verified)
+            self.assertEqual(result["sources"], [{"path": "incoming.m4a", "channel_origin": "incoming"}])
+
     def test_playback_command_rebuilds_shared_timeline_from_capture_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

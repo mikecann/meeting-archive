@@ -188,7 +188,7 @@ struct ArchiveTransferConfiguration: Equatable, Sendable {
     }
 }
 
-enum ArchiveTransferError: Error, Equatable, CustomStringConvertible {
+enum ArchiveTransferError: Error, Equatable, CustomStringConvertible, LocalizedError {
     case unsafeConfiguration(String)
     case manifestBytesChanged
     case fileMissing(String)
@@ -215,12 +215,23 @@ enum ArchiveTransferError: Error, Equatable, CustomStringConvertible {
         case .processLaunchFailed(let message): "Could not launch archive process: \(message)"
         case .processTimedOut(let executable): "Archive process timed out: \(executable)"
         case .processOutputTooLarge(let stream): "Archive process produced too much \(stream)"
-        case .commandFailed(let executable, let code, let stderr): "\(executable) failed with \(code): \(stderr)"
+        case .commandFailed(let executable, let code, let stderr): "\(executable) failed with \(code): \(Self.ending(of: stderr))"
         case .remoteVolumeMismatch(let actual): "Bruce mounted an unexpected CannMedia volume UUID: \(actual)"
         case .invalidRemoteStorage(let message): "Bruce Meeting Archive storage preflight failed: \(message)"
         case .invalidAcknowledgement(let message): "Bruce returned an invalid acknowledgement: \(message)"
         case .unsupportedArtifactPath(let path): "Unsupported archive artifact path: \(path)"
         }
+    }
+
+    /// The library and menu show `localizedDescription`. Without this they get
+    /// Foundation's "The operation couldn't be completed" instead.
+    var errorDescription: String? { description }
+
+    /// The runner keeps up to 64 KB of stderr, and the cause of a failure,
+    /// like a traceback's last line, is at the end.
+    private static func ending(of stderr: String) -> String {
+        let trimmed = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.count > 400 ? "…" + trimmed.suffix(400) : trimmed
     }
 }
 

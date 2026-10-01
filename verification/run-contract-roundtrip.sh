@@ -17,17 +17,26 @@ swiftc \
   "$SCRIPT_DIR/ContractRoundTrip.swift" \
   -o "$FIXTURE_ROOT/contract-roundtrip"
 
-MANIFEST_SHA256="$($FIXTURE_ROOT/contract-roundtrip emit "$FIXTURE_ROOT/incoming")"
-PYTHONPATH="$TOOL_DIR/worker" python3 -m meeting_archive_worker accept \
-  --incoming "$FIXTURE_ROOT/incoming" \
-  --archive-root "$FIXTURE_ROOT/archive" \
-  --db "$FIXTURE_ROOT/worker.sqlite" \
-  --manifest-sha256 "$MANIFEST_SHA256" \
-  > "$FIXTURE_ROOT/acknowledgement.json"
+round_trip() {
+  local bundle="$1"
+  shift
+  local manifest_sha256
+  manifest_sha256="$("$FIXTURE_ROOT/contract-roundtrip" emit "$bundle" "$@")"
+  PYTHONPATH="$TOOL_DIR/worker" python3 -m meeting_archive_worker accept \
+    --incoming "$bundle" \
+    --archive-root "$FIXTURE_ROOT/archive" \
+    --db "$FIXTURE_ROOT/worker.sqlite" \
+    --manifest-sha256 "$manifest_sha256" \
+    > "$bundle.acknowledgement.json"
 
-"$FIXTURE_ROOT/contract-roundtrip" validate \
-  "$FIXTURE_ROOT/incoming" \
-  "$FIXTURE_ROOT/acknowledgement.json"
+  "$FIXTURE_ROOT/contract-roundtrip" validate \
+    "$bundle" \
+    "$bundle.acknowledgement.json"
+}
+
+round_trip "$FIXTURE_ROOT/incoming"
+# A capture whose microphone never started is archived with its other tracks.
+round_trip "$FIXTURE_ROOT/without-microphone" --without-microphone
 
 PYTHONPATH="$TOOL_DIR/worker" python3 -m meeting_archive_worker status \
   --db "$FIXTURE_ROOT/worker.sqlite"

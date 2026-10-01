@@ -4,6 +4,10 @@ import XCTest
 @testable import MeetingArchiveCore
 
 final class ManifestTests: XCTestCase {
+    func testContractErrorsReadAsWrittenWhenShown() {
+        XCTAssertEqual(ContractValidationError.cleanupNotAllowed.localizedDescription, "Archive acknowledgement did not authorize local cleanup")
+    }
+
     func testManifestUsesWorkerContractAndHashesRawCanonicalBytes() throws {
         let manifest = TransferManifest(
             meetingID: UUID(uuidString: "3F679ACB-96D4-4EE0-AA4E-36E96A1FE41D")!,
