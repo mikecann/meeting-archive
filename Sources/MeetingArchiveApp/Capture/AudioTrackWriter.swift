@@ -74,6 +74,7 @@ final class AudioTrackWriter: @unchecked Sendable {
     private var pending: [Pending] = []
     private var silenceBuffer: AVAudioPCMBuffer?
     private var stalledSince: TimeInterval?
+    private var retryScheduled = false
     private var silencedFrames: Int64 = 0
     private var meter: ActivityMeter
     private var timeline: CaptureTimeline
@@ -116,12 +117,14 @@ final class AudioTrackWriter: @unchecked Sendable {
     }
 
     /// Copies the samples out, so a capture callback can reuse its buffer.
-    func append(_ sampleBuffer: CMSampleBuffer) {
+    /// `time` replaces the buffer's own timestamp when the caller has moved it
+    /// onto the host clock.
+    func append(_ sampleBuffer: CMSampleBuffer, at time: CMTime? = nil) {
         guard let copy = AVAudioPCMBuffer.copying(sampleBuffer) else {
             queue.async { self.warnOnce("unreadable", "Some \(self.name) audio could not be read and was skipped.") }
             return
         }
-        append(copy, at: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+        append(copy, at: time ?? CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
     }
 
     /// Writes what is left and closes the file. A track that never received
@@ -145,9 +148,17 @@ final class AudioTrackWriter: @unchecked Sendable {
 
     private func process(_ chunk: Chunk) {
         guard failure == nil, !finishing else { return }
-        let buffer = chunk.buffer
+        var buffer = chunk.buffer
         let frames = Int64(buffer.frameLength)
         guard frames > 0 else { return }
+        if buffer.format.channelCount > 2 {
+            guard let mono = buffer.averagedToMono() else {
+                warnOnce("mix \(Self.describe(buffer.format))",
+                         "The \(name) sent audio as \(Self.describe(buffer.format)), which could not be mixed down, so it was skipped.")
+                return
+            }
+            buffer = mono
+        }
         let rate = buffer.format.sampleRate
         let start: Double? = chunk.time.isNumeric ? chunk.time.seconds : nil
         if let converter, !converter.inputFormat.hasSameLayout(as: buffer.format) {
@@ -165,6 +176,9 @@ final class AudioTrackWriter: @unchecked Sendable {
             }
         }
         if converter == nil {
+            // A format that cannot be converted writes nothing, not even the
+            // silence before it, so it never looks like a recording started.
+            guard beginSegment(for: buffer.format) else { return }
             if let start {
                 let offset = start - seconds(at: scheduledFrames)
                 if offset > Self.tolerance {
@@ -175,13 +189,12 @@ final class AudioTrackWriter: @unchecked Sendable {
                     skip = Int64((-offset * rate).rounded())
                 }
             }
-            guard skip < frames, failure == nil, beginSegment(for: buffer.format) else { return }
             segmentStart = seconds(at: scheduledFrames)
             segmentFrames = 0
         }
         // Audio this track already has, for example replayed by a restarted
         // source, is trimmed rather than written twice.
-        guard skip < frames,
+        guard skip < frames, failure == nil,
               let input = skip > 0 ? buffer.dropping(frames: AVAudioFrameCount(skip)) : buffer else { return }
         segmentFrames += frames - skip
         convert(input)
@@ -296,6 +309,15 @@ final class AudioTrackWriter: @unchecked Sendable {
     /// audio waits; after `encoderPatience` the backlog becomes silence of the
     /// same length, so the track keeps its place and memory stays bounded.
     private func encoderBusy() {
+        if !retryScheduled {
+            // Try again shortly rather than at the next chunk, so a source
+            // that pauses meanwhile does not make a short stall look long.
+            retryScheduled = true
+            queue.asyncAfter(deadline: .now() + .milliseconds(20)) {
+                self.retryScheduled = false
+                self.drain()
+            }
+        }
         let now = uptime()
         guard let since = stalledSince else {
             stalledSince = now

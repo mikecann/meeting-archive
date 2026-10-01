@@ -1,3 +1,4 @@
+import Accelerate
 import AVFoundation
 import CoreMedia
 
@@ -45,6 +46,53 @@ extension AVAudioPCMBuffer {
             memcpy(destination, data, bytes)
         }
         return copy
+    }
+
+    /// Every channel averaged into one Float32 channel at the same rate.
+    /// AVAudioConverter's downmix has no rule for an unknown or discrete
+    /// layout of more than two channels and can return silence, so a
+    /// multichannel interface is mixed here instead.
+    func averagedToMono() -> AVAudioPCMBuffer? {
+        // Packed 24-bit or Float64 samples become Float32 first, same channels.
+        if floatChannelData == nil, int16ChannelData == nil, int32ChannelData == nil {
+            return asFloat32()?.averagedToMono()
+        }
+        let channels = Int(format.channelCount)
+        let frames = vDSP_Length(frameLength)
+        guard channels > 0,
+              let monoFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: format.sampleRate, channels: 1, interleaved: false),
+              let mono = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: frameLength),
+              let sum = mono.floatChannelData?[0] else { return nil }
+        mono.frameLength = frameLength
+        sum.update(repeating: 0, count: Int(frameLength))
+        let stride = vDSP_Stride(format.isInterleaved ? channels : 1)
+        var scratch = [Float](repeating: 0, count: Int(frameLength))
+        for channel in 0..<channels {
+            if let data = floatChannelData {
+                vDSP_vadd(sum, 1, format.isInterleaved ? data[0] + channel : data[channel], stride, sum, 1, frames)
+            } else if let data = int16ChannelData {
+                vDSP_vflt16(format.isInterleaved ? data[0] + channel : data[channel], stride, &scratch, 1, frames)
+                var scale = Float(1) / 32_768
+                vDSP_vsma(scratch, 1, &scale, sum, 1, sum, 1, frames)
+            } else if let data = int32ChannelData {
+                vDSP_vflt32(format.isInterleaved ? data[0] + channel : data[channel], stride, &scratch, 1, frames)
+                var scale = Float(1) / 2_147_483_648
+                vDSP_vsma(scratch, 1, &scale, sum, 1, sum, 1, frames)
+            }
+        }
+        var count = Float(channels)
+        vDSP_vsdiv(sum, 1, &count, sum, 1, frames)
+        return mono
+    }
+
+    private func asFloat32() -> AVAudioPCMBuffer? {
+        let floatFormat = format.channelLayout.map {
+            AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: format.sampleRate, interleaved: false, channelLayout: $0)
+        } ?? AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: format.sampleRate, channels: format.channelCount, interleaved: false)
+        guard let floatFormat, let converter = AVAudioConverter(from: format, to: floatFormat),
+              let converted = AVAudioPCMBuffer(pcmFormat: floatFormat, frameCapacity: frameLength) else { return nil }
+        do { try converter.convert(to: converted, from: self) } catch { return nil }
+        return converted.floatChannelData == nil ? nil : converted
     }
 
     /// The frames after the first `count`, as a new buffer.

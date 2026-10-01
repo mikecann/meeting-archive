@@ -121,6 +121,32 @@ final class AudioTrackWriterTests: XCTestCase {
         XCTAssertEqual(try ReadBack(writer.url).rms(from: 0.1, to: 0.9), 0.1 / 2.squareRoot(), accuracy: 0.01)
     }
 
+    func testAFourChannelInterfaceIsMixedDownRatherThanSilenced() async throws {
+        let writer = AudioTrackWriter.microphone(directory: directory, origin: origin)
+        // A discrete layout, as an audio interface reports, with the voice on
+        // its second input. AVAudioConverter's own downmix returns silence.
+        let layout = try XCTUnwrap(AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | 4))
+        let input = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, interleaved: false, channelLayout: layout)
+        var chunks: [(CMTime, AVAudioPCMBuffer)] = []
+        for index in 0..<94 {
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: input, frameCapacity: 512))
+            buffer.frameLength = 512
+            for channel in 0..<4 {
+                for frame in 0..<512 {
+                    let time = Double(index * 512 + frame) / 48_000
+                    buffer.floatChannelData![channel][frame] = channel == 1 ? 0.2 * Float(sin(2 * Double.pi * 440 * time)) : 0
+                }
+            }
+            chunks.append((CMTimeAdd(origin, CMTime(value: CMTimeValue(index * 512), timescale: 48_000)), buffer))
+        }
+        feed(writer, chunks)
+
+        _ = await writer.finish()
+
+        // Every input counts equally, so one active input of four is a quarter.
+        XCTAssertEqual(try ReadBack(writer.url).rms(from: 0.1, to: 0.9), 0.05 / 2.squareRoot(), accuracy: 0.005)
+    }
+
     func testATrackStartsAtTheSharedOriginEvenWhenItsSourceStartsLate() async throws {
         let writer = AudioTrackWriter.incoming(directory: directory, origin: origin)
         let input = try format(.pcmFormatFloat32, rate: 48_000, channels: 2)

@@ -43,6 +43,22 @@ final class AudioBuffersTests: XCTestCase {
         XCTAssertNil(buffer.dropping(frames: 4))
     }
 
+    func testInterleavedIntegerChannelsAverageIntoOneFloatChannel() throws {
+        let layout = try XCTUnwrap(AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | 3))
+        let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, interleaved: true, channelLayout: layout)
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 2))
+        buffer.frameLength = 2
+        let samples: [Int16] = [16_384, -16_384, 8_192, 0, 0, 24_576]
+        for (index, sample) in samples.enumerated() { buffer.int16ChannelData![0][index] = sample }
+
+        let mono = try XCTUnwrap(buffer.averagedToMono())
+
+        XCTAssertEqual(mono.format.channelCount, 1)
+        XCTAssertEqual(mono.format.sampleRate, 16_000)
+        XCTAssertEqual(mono.floatChannelData![0][0], 0.25 / 3, accuracy: 0.0001)
+        XCTAssertEqual(mono.floatChannelData![0][1], 0.75 / 3, accuracy: 0.0001)
+    }
+
     func testOnlyARealChangeOfLayoutCountsAsANewFormat() throws {
         var stereo = tapFormat.streamDescription.pointee
         let withLayout = AVAudioFormat(streamDescription: &stereo, channelLayout: AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_Stereo)!)
