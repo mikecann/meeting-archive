@@ -32,12 +32,23 @@ struct AudioRecordingResult: Sendable {
 /// that is only ever a warning. `onFailure` means a file cannot be written,
 /// so this part cannot continue. Each instance records once: start, then stop.
 final class AudioRecording: @unchecked Sendable {
+    // The callbacks are locked, so setting one while recording is safe.
+
     /// The first audio reached either file. Called once.
-    var onStarted: (@Sendable () -> Void)?
+    var onStarted: (@Sendable () -> Void)? {
+        get { lock.withLock { startedHandler } }
+        set { lock.withLock { startedHandler = newValue } }
+    }
     /// A file cannot continue, for example because the disk is full. Called once.
-    var onFailure: (@Sendable (String) -> Void)?
+    var onFailure: (@Sendable (String) -> Void)? {
+        get { lock.withLock { failureHandler } }
+        set { lock.withLock { failureHandler = newValue } }
+    }
     /// A source restarted, could not start, or went quiet. Informational.
-    var onWarning: (@Sendable (String) -> Void)?
+    var onWarning: (@Sendable (String) -> Void)? {
+        get { lock.withLock { warningHandler } }
+        set { lock.withLock { warningHandler = newValue } }
+    }
 
     var hasCapturedSamples: Bool {
         lock.withLock { writers }.contains { $0.hasSamples }
@@ -46,6 +57,9 @@ final class AudioRecording: @unchecked Sendable {
     private enum Phase { case idle, starting, running, stopped }
 
     private let lock = NSLock()
+    private var startedHandler: (@Sendable () -> Void)?
+    private var failureHandler: (@Sendable (String) -> Void)?
+    private var warningHandler: (@Sendable (String) -> Void)?
     private var phase = Phase.idle
     private var writers: [AudioTrackWriter] = []
     private var microphone: MicrophoneSource?
@@ -162,7 +176,7 @@ final class AudioRecording: @unchecked Sendable {
         let callback = lock.withLock { () -> (@Sendable () -> Void)? in
             guard !announcedStart else { return nil }
             announcedStart = true
-            return onStarted
+            return startedHandler
         }
         callback?()
     }
@@ -172,12 +186,12 @@ final class AudioRecording: @unchecked Sendable {
             guard failure == nil else { return nil }
             failure = error
             // A file that fails while stopping goes into the result instead.
-            return phase == .stopped ? nil : onFailure
+            return phase == .stopped ? nil : failureHandler
         }
         callback?(error.localizedDescription)
     }
 
     private func warn(_ message: String) {
-        lock.withLock { onWarning }?(message)
+        lock.withLock { warningHandler }?(message)
     }
 }

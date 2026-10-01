@@ -9,32 +9,32 @@ import Foundation
 /// hole with silence. A microphone that stops delivering (the Yeti stalls) is
 /// restarted by the watchdog.
 final class MicrophoneSource: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate, @unchecked Sendable {
-    /// Device changes arrive in bursts (connecting AirPods changes the default
-    /// input and output), so a rebuild waits for them to settle.
-    static let settleDelay: TimeInterval = 0.3
-
     var onWarning: (@Sendable (String) -> Void)?
 
     /// The device of the newest session, kept after it closes.
     var device: CapturedMicrophone? { lock.withLock { lastDevice } }
 
     private let writer: AudioTrackWriter
-    private let control = DispatchQueue(label: "com.mikerosoft.meeting-archive.microphone")
+    private let control: DispatchQueue
     private let delivery = DispatchQueue(label: "com.mikerosoft.meeting-archive.microphone.samples", qos: .userInteractive)
     private let clock = DeliveryClock()
     private let lock = NSLock()
-    // Guarded by `lock`; sample buffers from any other output are stale.
+    // Guarded by `lock`. Sample buffers from any other output are stale.
     private var liveOutput: AVCaptureAudioDataOutput?
+    private var liveClock: CMClock?
     private var lastDevice: CapturedMicrophone?
     // Everything below belongs to `control`.
+    private let rebuilds: RebuildScheduler
     private var session: AVCaptureSession?
     private var observers: [NSObjectProtocol] = []
     private var defaultInputListener: AudioPropertyListener?
     private var watchdog = SourceWatchdog()
     private var stopped = false
-    private var rebuildPending = false
 
     init(writer: AudioTrackWriter) {
+        let control = DispatchQueue(label: "com.mikerosoft.meeting-archive.microphone")
+        self.control = control
+        rebuilds = RebuildScheduler(queue: control)
         self.writer = writer
         super.init()
     }
@@ -65,12 +65,14 @@ final class MicrophoneSource: NSObject, AVCaptureAudioDataOutputSampleBufferDele
     func checkHealth() {
         control.async {
             guard !self.stopped else { return }
-            switch self.watchdog.check(now: DeliveryClock.now, lastDelivery: self.clock.seconds) {
+            let now = DeliveryClock.now
+            switch self.watchdog.check(now: now, lastDelivery: self.clock.seconds) {
             case .healthy:
                 break
             case .recovered(let after):
                 self.warn("The microphone is back after \(Int(after.rounded())) s without audio.")
             case .restart(let quietFor, let newOutage):
+                self.rebuilds.rebuilt(at: now)
                 let error = self.open()
                 if newOutage {
                     self.warn(error.map { "The microphone stopped sending audio and could not restart (\($0.localizedDescription)). Trying again every 10 s." }
@@ -95,11 +97,17 @@ final class MicrophoneSource: NSObject, AVCaptureAudioDataOutputSampleBufferDele
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard lock.withLock({ output === liveOutput }) else { return }
+        let (live, sessionClock) = lock.withLock { (output === liveOutput, liveClock) }
+        guard live else { return }
         clock.mark()
-        // AVCaptureSession stamps audio on the host clock, the same clock as
-        // the recording's origin and the tap's timestamps.
-        writer.append(sampleBuffer)
+        var time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        if let sessionClock, time.isNumeric {
+            // Buffers are stamped on the session's clock, which can be the
+            // device's own rather than the host clock. Moved onto the host
+            // clock, its drift shows up and is corrected like any other.
+            time = CMSyncConvertTime(time, from: sessionClock, to: CMClockGetHostTimeClock())
+        }
+        writer.append(sampleBuffer, at: time)
     }
 
     // MARK: - Sessions
@@ -136,13 +144,21 @@ final class MicrophoneSource: NSObject, AVCaptureAudioDataOutputSampleBufferDele
             closeSession()
             return CaptureFailure.message("\(device.localizedName) did not start.")
         }
-        lock.withLock { lastDevice = CapturedMicrophone(uid: device.uniqueID, name: device.localizedName) }
+        // The session has a clock once it runs. The first few buffers before
+        // this keep their own stamps, which are host time near enough.
+        lock.withLock {
+            liveClock = session.synchronizationClock
+            lastDevice = CapturedMicrophone(uid: device.uniqueID, name: device.localizedName)
+        }
         Log.capture.notice("Microphone capture started on \(device.localizedName, privacy: .public)")
         return nil
     }
 
     private func closeSession() {
-        lock.withLock { liveOutput = nil }
+        lock.withLock {
+            liveOutput = nil
+            liveClock = nil
+        }
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
         observers = []
         guard let session else { return }
@@ -192,20 +208,21 @@ final class MicrophoneSource: NSObject, AVCaptureAudioDataOutputSampleBufferDele
 
     private func scheduleRebuild(_ reason: String) {
         control.async {
-            guard !self.stopped, !self.rebuildPending else { return }
-            self.rebuildPending = true
-            self.control.asyncAfter(deadline: .now() + Self.settleDelay) {
-                self.rebuildPending = false
-                guard !self.stopped else { return }
-                if let error = self.open() {
-                    // Reported here, so the watchdog's retries stay quiet.
-                    self.watchdog.failedToStart(at: DeliveryClock.now)
-                    self.warn("\(reason), and the microphone could not restart (\(error.localizedDescription)). Trying again every 10 s.")
-                } else {
-                    self.watchdog.restarted(at: DeliveryClock.now)
-                    self.warn("\(reason), so recording continues from \(self.device?.name ?? "the default microphone").")
-                }
-            }
+            guard !self.stopped else { return }
+            // One-shot, so holding the source until it runs is fine.
+            self.rebuilds.request(reason) { reason in self.rebuild(because: reason) }
+        }
+    }
+
+    private func rebuild(because reason: String) {
+        guard !stopped else { return }
+        if let error = open() {
+            // Reported here, so the watchdog's retries stay quiet.
+            watchdog.failedToStart(at: DeliveryClock.now)
+            warn("\(reason), and the microphone could not restart (\(error.localizedDescription)). Trying again every 10 s.")
+        } else {
+            watchdog.restarted(at: DeliveryClock.now)
+            warn("\(reason), so recording continues from \(device?.name ?? "the default microphone").")
         }
     }
 

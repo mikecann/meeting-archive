@@ -1,5 +1,6 @@
 import CoreAudio
 import Foundation
+import Synchronization
 
 /// Typed reads of Core Audio hardware (HAL) properties.
 enum AudioHAL {
@@ -76,27 +77,42 @@ struct AudioHALError: LocalizedError {
     }
 }
 
-/// A Core Audio property listener that can be removed again. The HAL removes
-/// a listener block by identity, and Swift makes a new block each time a
-/// closure is passed, so this keeps the one block it registered.
+/// A Core Audio property listener that can be removed again. It uses the
+/// function-pointer API: removing a Swift listener block never matched the
+/// block that was added, even a stored one, so cancelled listeners kept
+/// firing (measured on macOS 26.6), and the remove call still succeeded.
 final class AudioPropertyListener: @unchecked Sendable {
+    /// What the shared C callback reaches through its context pointer.
+    fileprivate final class Target: @unchecked Sendable {
+        let queue: DispatchQueue
+        let handler: @Sendable () -> Void
+        let isLive = Atomic<Bool>(true)
+
+        init(queue: DispatchQueue, handler: @escaping @Sendable () -> Void) {
+            self.queue = queue
+            self.handler = handler
+        }
+    }
+
     private let object: AudioObjectID
     private let address: AudioObjectPropertyAddress
-    private let queue: DispatchQueue
-    private let block: AudioObjectPropertyListenerBlock
+    private let target: Target
     private let lock = NSLock()
     private var registered = false
 
     init(_ selector: AudioObjectPropertySelector, of object: AudioObjectID, queue: DispatchQueue,
          handler: @escaping @Sendable () -> Void) throws {
         self.object = object
-        self.queue = queue
-        var address = AudioHAL.address(selector)
-        self.address = address
-        let block: AudioObjectPropertyListenerBlock = { _, _ in handler() }
-        self.block = block
-        try AudioHALError.check(AudioObjectAddPropertyListenerBlock(object, &address, queue, block),
-                                "Listening for \(AudioHALError.code(selector))")
+        address = AudioHAL.address(selector)
+        target = Target(queue: queue, handler: handler)
+        var address = address
+        // The registration holds its own reference until `cancel` lets it go.
+        let context = Unmanaged.passRetained(target)
+        let status = AudioObjectAddPropertyListener(object, &address, audioPropertyChanged, context.toOpaque())
+        guard status == noErr else {
+            context.release()
+            throw AudioHALError(status: status, operation: "Listening for \(AudioHALError.code(selector))")
+        }
         registered = true
     }
 
@@ -106,9 +122,28 @@ final class AudioPropertyListener: @unchecked Sendable {
             return registered
         }
         guard wasRegistered else { return }
+        target.isLive.store(false, ordering: .relaxed)
         var address = address
-        AudioObjectRemovePropertyListenerBlock(object, &address, queue, block)
+        let context = Unmanaged.passUnretained(target)
+        AudioObjectRemovePropertyListener(object, &address, audioPropertyChanged, context.toOpaque())
+        // A notification already under way may still reach the target, so the
+        // registration's reference is dropped a little later rather than now.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { context.release() }
     }
 
     deinit { cancel() }
+}
+
+/// The one callback every listener shares. Core Audio calls it on its own
+/// thread, so it only hops to the listener's queue.
+private func audioPropertyChanged(_ object: AudioObjectID, _ count: UInt32,
+                                  _ addresses: UnsafePointer<AudioObjectPropertyAddress>,
+                                  _ context: UnsafeMutableRawPointer?) -> OSStatus {
+    guard let context else { return noErr }
+    let target = Unmanaged<AudioPropertyListener.Target>.fromOpaque(context).takeUnretainedValue()
+    guard target.isLive.load(ordering: .relaxed) else { return noErr }
+    target.queue.async {
+        if target.isLive.load(ordering: .relaxed) { target.handler() }
+    }
+    return noErr
 }

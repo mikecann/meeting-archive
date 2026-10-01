@@ -26,20 +26,25 @@ final class SystemAudioSource: @unchecked Sendable {
     var onWarning: (@Sendable (String) -> Void)?
 
     private let writer: AudioTrackWriter
-    private let control = DispatchQueue(label: "com.mikerosoft.meeting-archive.system-audio")
+    private let control: DispatchQueue
     /// Core Audio calls the IO block synchronously on this queue from its IO
     /// thread, so nothing else may ever run on it.
     private let io = DispatchQueue(label: "com.mikerosoft.meeting-archive.system-audio.io", qos: .userInteractive)
     private let clock = DeliveryClock()
     // Everything below belongs to `control`.
+    private let rebuilds: RebuildScheduler
     private var tap: ProcessTap?
     private var outputListener: AudioPropertyListener?
     private var outputRateListener: AudioPropertyListener?
+    private var output = AudioObjectID(kAudioObjectUnknown)
+    private var outputRate = 0.0
     private var watchdog = SourceWatchdog()
     private var stopped = false
-    private var rebuildPending = false
 
     init(writer: AudioTrackWriter) {
+        let control = DispatchQueue(label: "com.mikerosoft.meeting-archive.system-audio")
+        self.control = control
+        rebuilds = RebuildScheduler(queue: control)
         self.writer = writer
     }
 
@@ -65,12 +70,14 @@ final class SystemAudioSource: @unchecked Sendable {
     func checkHealth() {
         control.async {
             guard !self.stopped else { return }
-            switch self.watchdog.check(now: DeliveryClock.now, lastDelivery: self.clock.seconds) {
+            let now = DeliveryClock.now
+            switch self.watchdog.check(now: now, lastDelivery: self.clock.seconds) {
             case .healthy:
                 break
             case .recovered(let after):
                 self.warn("System audio is back after \(Int(after.rounded())) s without audio.")
             case .restart(let quietFor, let newOutage):
+                self.rebuilds.rebuilt(at: now)
                 let error = self.open()
                 if newOutage {
                     self.warn(error.map { "System audio stopped arriving and the tap could not be rebuilt (\($0.localizedDescription)). Trying again every 10 s." }
@@ -114,13 +121,18 @@ final class SystemAudioSource: @unchecked Sendable {
     private func followDefaultOutput() {
         do {
             outputListener = try AudioPropertyListener(kAudioHardwarePropertyDefaultOutputDevice, of: AudioHAL.system, queue: control) { [weak self] in
-                self?.followOutputRate()
-                self?.scheduleRebuild("The sound output changed")
+                self?.defaultOutputChanged()
             }
         } catch {
             Log.capture.error("Cannot follow the sound output: \(error.localizedDescription, privacy: .public)")
         }
         followOutputRate()
+    }
+
+    private func defaultOutputChanged() {
+        guard !stopped, (try? AudioHAL.defaultOutputDevice()) != output else { return }
+        followOutputRate()
+        scheduleRebuild("The sound output changed")
     }
 
     /// AirPods switching to call mode stay the same output device but change
@@ -129,33 +141,46 @@ final class SystemAudioSource: @unchecked Sendable {
     private func followOutputRate() {
         outputRateListener?.cancel()
         outputRateListener = nil
-        guard let device = try? AudioHAL.defaultOutputDevice(), device != kAudioObjectUnknown else { return }
+        guard !stopped, let device = try? AudioHAL.defaultOutputDevice(), device != kAudioObjectUnknown else { return }
+        output = device
+        outputRate = Self.rate(of: device)
         do {
             outputRateListener = try AudioPropertyListener(kAudioDevicePropertyNominalSampleRate, of: device, queue: control) { [weak self] in
-                self?.scheduleRebuild("The sound output changed mode")
+                self?.outputRateChanged(device)
             }
         } catch {
             Log.capture.error("Cannot follow the sound output's rate: \(error.localizedDescription, privacy: .public)")
         }
     }
 
+    private func outputRateChanged(_ device: AudioObjectID) {
+        let rate = Self.rate(of: device)
+        guard !stopped, device == output, rate != outputRate else { return }
+        outputRate = rate
+        scheduleRebuild("The sound output changed mode")
+    }
+
+    private static func rate(of device: AudioObjectID) -> Double {
+        (try? AudioHAL.value(kAudioDevicePropertyNominalSampleRate, of: device, initial: Float64(0))) ?? 0
+    }
+
     private func scheduleRebuild(_ reason: String) {
         control.async {
-            guard !self.stopped, !self.rebuildPending else { return }
-            self.rebuildPending = true
-            // Device changes arrive in bursts, so let them settle first.
-            self.control.asyncAfter(deadline: .now() + MicrophoneSource.settleDelay) {
-                self.rebuildPending = false
-                guard !self.stopped else { return }
-                if let error = self.open() {
-                    // Reported here, so the watchdog's retries stay quiet.
-                    self.watchdog.failedToStart(at: DeliveryClock.now)
-                    self.warn("\(reason), and the system audio tap could not be rebuilt (\(error.localizedDescription)). Trying again every 10 s.")
-                } else {
-                    self.watchdog.restarted(at: DeliveryClock.now)
-                    self.warn("\(reason), so the system audio tap was rebuilt.")
-                }
-            }
+            guard !self.stopped else { return }
+            // One-shot, so holding the source until it runs is fine.
+            self.rebuilds.request(reason) { reason in self.rebuild(because: reason) }
+        }
+    }
+
+    private func rebuild(because reason: String) {
+        guard !stopped else { return }
+        if let error = open() {
+            // Reported here, so the watchdog's retries stay quiet.
+            watchdog.failedToStart(at: DeliveryClock.now)
+            warn("\(reason), and the system audio tap could not be rebuilt (\(error.localizedDescription)). Trying again every 10 s.")
+        } else {
+            watchdog.restarted(at: DeliveryClock.now)
+            warn("\(reason), so the system audio tap was rebuilt.")
         }
     }
 
@@ -219,7 +244,11 @@ private final class ProcessTap {
             try AudioHALError.check(AudioDeviceStart(aggregateID, procID), "Starting system audio")
             let tap = ProcessTap(tapID: tapID, aggregateID: aggregateID, procID: procID, receiver: tapReceiver)
             do {
-                tap.formatListener = try AudioPropertyListener(kAudioTapPropertyFormat, of: tapID, queue: control, handler: onFormatChange)
+                tap.formatListener = try AudioPropertyListener(kAudioTapPropertyFormat, of: tapID, queue: control) { [tapID] in
+                    // Only a real change needs a new tap.
+                    let current = try? AudioHAL.value(kAudioTapPropertyFormat, of: tapID, initial: AudioStreamBasicDescription())
+                    if current.map({ !$0.hasSameLayout(as: tapFormat) }) ?? true { onFormatChange() }
+                }
             } catch {
                 // The watchdog still catches a tap that stops after a change.
                 Log.capture.error("Cannot follow the system audio format: \(error.localizedDescription, privacy: .public)")
