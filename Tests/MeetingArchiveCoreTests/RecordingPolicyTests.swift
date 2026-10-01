@@ -240,9 +240,19 @@ final class RecordingPolicyTests: XCTestCase {
         XCTAssertEqual(policy.handle(.tick(micUsers: [zoom], at: t(11))), [])
         XCTAssertEqual(policy.handle(.tick(micUsers: [zoom], at: t(500))), [])
         XCTAssertEqual(policy.handle(.tick(micUsers: [], at: t(501))), [])
+        XCTAssertEqual(policy.state.suppressedBundleIDs, [zoom.bundleIdentifier])
+
+        // Back on the mic within the grace, like a device switch: same call.
+        XCTAssertEqual(policy.handle(.tick(micUsers: [zoom], at: t(510))), [])
+        XCTAssertEqual(policy.handle(.tick(micUsers: [], at: t(511))), [])
+        XCTAssertEqual(policy.handle(.tick(micUsers: [], at: t(540.999))), [])
+        XCTAssertEqual(policy.state.suppressedBundleIDs, [zoom.bundleIdentifier])
+
+        XCTAssertEqual(policy.handle(.tick(micUsers: [], at: t(541))), [])
         XCTAssertEqual(policy.state.suppressedBundleIDs, [])
+        XCTAssertEqual(policy.state.suppressionReleasedAt, [:])
         XCTAssertEqual(
-            policy.handle(.tick(micUsers: [zoom], at: t(502))),
+            policy.handle(.tick(micUsers: [zoom], at: t(542))),
             [.startCapture(meetingID: id(4), trigger: .microphone(zoom), seriesID: id(3), part: 1)]
         )
     }
@@ -270,11 +280,12 @@ final class RecordingPolicyTests: XCTestCase {
         XCTAssertEqual(policy.state.suppressedBundleIDs, [zoom.bundleIdentifier, chrome.bundleIdentifier])
         XCTAssertEqual(policy.handle(.tick(micUsers: [zoom, chrome], at: t(6))), [])
 
-        // Chrome lets go, so its next session is a new one.
+        // Chrome lets go for the grace, so its next session is a new one.
         XCTAssertEqual(policy.handle(.tick(micUsers: [zoom], at: t(7))), [])
+        XCTAssertEqual(policy.handle(.tick(micUsers: [zoom], at: t(37))), [])
         XCTAssertEqual(policy.state.suppressedBundleIDs, [zoom.bundleIdentifier])
         XCTAssertEqual(
-            policy.handle(.tick(micUsers: [zoom, chrome], at: t(8))),
+            policy.handle(.tick(micUsers: [zoom, chrome], at: t(38))),
             [.startCapture(meetingID: id(4), trigger: .microphone(chrome), seriesID: id(3), part: 1)]
         )
     }
@@ -346,6 +357,8 @@ final class RecordingPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(policy.handle(.tick(micUsers: [chrome], at: t(1))), [])
+        XCTAssertEqual(policy.state.suppressedBundleIDs, [zoom.bundleIdentifier])
+        XCTAssertEqual(policy.handle(.tick(micUsers: [chrome], at: t(31))), [])
         XCTAssertEqual(policy.state.suppressedBundleIDs, [])
     }
 
@@ -821,7 +834,8 @@ final class RecordingPolicyTests: XCTestCase {
             ("call stopped by the user", mic, .userStopped, 1, 120, 10, 10, .keep),
             ("call cut by pause", mic, .paused, 1, 120, 10, 10, .keep),
             ("just under a minute", mic, .micReleased, 1, 59.9, 30, 30, .discard(reason: "under a minute")),
-            ("short and one-sided", mic, .userStopped, 1, 30, 0, 20, .discard(reason: "under a minute")),
+            ("short call the user stopped", mic, .userStopped, 1, 30, 0, 20, .keep),
+            ("silent call the user stopped", mic, .userStopped, 1, 30, 0, 0, .discard(reason: "nothing recorded")),
             ("short pause", mic, .paused, 1, 20, 10, 10, .discard(reason: "under a minute")),
             ("voice memo", mic, .micReleased, 1, 600, 0, 300, .discard(reason: "nobody else spoke")),
             ("just under the incoming bar", mic, .micReleased, 1, 600, 4.9, 300, .discard(reason: "nobody else spoke")),

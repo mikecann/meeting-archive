@@ -120,10 +120,15 @@ struct MicAppResolver {
         return String(decoding: buffer[..<Int(length)], as: UTF8.self)
     }
 
+    /// Names that read better in titles than the app's file name.
+    private static let friendlyNames: [String: String] = [
+        "us.zoom.xos": "Zoom",
+    ]
+
     private static func app(atBundlePath path: String) -> MicUser? {
         guard let bundleID = Bundle(url: URL(fileURLWithPath: path))?.bundleIdentifier, !bundleID.isEmpty else { return nil }
         var name = FileManager.default.displayName(atPath: path)
         if name.lowercased().hasSuffix(".app") { name.removeLast(4) }
-        return MicUser(bundleIdentifier: bundleID, displayName: name)
+        return MicUser(bundleIdentifier: bundleID, displayName: friendlyNames[bundleID] ?? name)
     }
 }

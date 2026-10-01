@@ -229,8 +229,13 @@ final class ArchiveController: ObservableObject {
         lastSnapshot = snapshot
         hasPolledMicrophone = true
         rememberMicUsers(snapshot.users + snapshot.ignored)
-        if let error = snapshot.error { Log.detector.error("Mic check failed: \(error, privacy: .public)") }
-        dispatch(.tick(micUsers: snapshot.users, at: now))
+        if let error = snapshot.error {
+            // An unreadable second says nothing about who holds the mic, so it
+            // must not count towards an app letting go.
+            Log.detector.error("Mic check failed: \(error, privacy: .public)")
+        } else {
+            dispatch(.tick(micUsers: snapshot.users, at: now))
+        }
         recording?.checkHealth()
         updateStatus(now: now)
         for meeting in meetings {

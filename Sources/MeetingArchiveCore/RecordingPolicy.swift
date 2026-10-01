@@ -151,21 +151,25 @@ public struct RecordingPolicyState: Codable, Equatable, Sendable {
     /// Only set while nothing is active.
     public var pendingRestart: PendingRestart?
     /// Apps the user stopped, discarded or paused. Each stays unrecorded until
-    /// it lets go of the mic.
+    /// it has let go of the mic for the release grace.
     public var suppressedBundleIDs: [String]
+    /// When each suppressed app was last seen letting go of the mic.
+    public var suppressionReleasedAt: [String: Date]
 
     public init(
         schemaVersion: Int = 2,
         isPaused: Bool = false,
         active: ActiveRecording? = nil,
         pendingRestart: PendingRestart? = nil,
-        suppressedBundleIDs: [String] = []
+        suppressedBundleIDs: [String] = [],
+        suppressionReleasedAt: [String: Date] = [:]
     ) {
         self.schemaVersion = schemaVersion
         self.isPaused = isPaused
         self.active = active
         self.pendingRestart = pendingRestart
         self.suppressedBundleIDs = suppressedBundleIDs
+        self.suppressionReleasedAt = suppressionReleasedAt
     }
 }
 
@@ -255,10 +259,27 @@ public struct RecordingPolicy: Sendable {
 
     private mutating func tick(_ users: [MicUser], at date: Date) -> [RecordingEffect] {
         micUsersAtLastTick = users
-        // Letting go of the mic ends a suppression, even if it happens while
-        // another app is being recorded.
-        state.suppressedBundleIDs.removeAll { id in !users.contains { $0.bundleIdentifier == id } }
+        endSuppressionsOnceReleased(users, at: date)
         return state.active == nil ? idleTick(users, at: date) : activeTick(users, at: date)
+    }
+
+    /// Letting go of the mic ends a suppression, even while another app is
+    /// being recorded, but only once it has stayed off for the release grace.
+    /// An app that drops the mic for a moment, say while switching devices,
+    /// is still on the same call and must not restart a recording the user
+    /// stopped.
+    private mutating func endSuppressionsOnceReleased(_ users: [MicUser], at date: Date) {
+        for id in state.suppressedBundleIDs {
+            if users.contains(where: { $0.bundleIdentifier == id }) {
+                state.suppressionReleasedAt[id] = nil
+            } else if let released = state.suppressionReleasedAt[id] {
+                guard date.timeIntervalSince(released) >= configuration.releaseGrace else { continue }
+                state.suppressedBundleIDs.removeAll { $0 == id }
+                state.suppressionReleasedAt[id] = nil
+            } else {
+                state.suppressionReleasedAt[id] = date
+            }
+        }
     }
 
     private mutating func activeTick(_ users: [MicUser], at date: Date) -> [RecordingEffect] {
@@ -427,6 +448,7 @@ public struct RecordingPolicy: Sendable {
     }
 
     private mutating func suppress(_ bundleID: String) {
+        state.suppressionReleasedAt[bundleID] = nil
         guard !state.suppressedBundleIDs.contains(bundleID) else { return }
         state.suppressedBundleIDs.append(bundleID)
     }
@@ -466,8 +488,9 @@ public struct KeepPolicy: Equatable, Sendable {
         if trigger == .manual { return .keep }
 
         // A piece of a call cut short by a failure or a quit is kept on any
-        // sound, since the call itself may well have passed the bar.
-        if part > 1 || stopReason == .captureFailed || stopReason == .appQuit {
+        // sound, since the call itself may well have passed the bar. So is a
+        // call the user stopped, because the menu says "Stop and save".
+        if part > 1 || stopReason == .captureFailed || stopReason == .appQuit || stopReason == .userStopped {
             return heardAnything ? .keep : .discard(reason: "nothing recorded")
         }
 
