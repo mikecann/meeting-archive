@@ -1,7 +1,7 @@
 import CSQLite
 import Foundation
 
-public enum MeetingStoreError: Error, CustomStringConvertible {
+public enum MeetingStoreError: Error, CustomStringConvertible, LocalizedError {
     case openFailed(String)
     case sqlite(code: Int32, message: String)
     case missingMeeting(UUID)
@@ -19,6 +19,9 @@ public enum MeetingStoreError: Error, CustomStringConvertible {
         case .missingJob(let id): "Archive job does not exist: \(id.canonicalString)"
         }
     }
+
+    /// The app shows `localizedDescription`, so it needs this to read as written.
+    public var errorDescription: String? { description }
 }
 
 public final class SQLiteMeetingStore: @unchecked Sendable {

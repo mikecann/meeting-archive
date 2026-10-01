@@ -142,6 +142,11 @@ final class SQLiteMeetingStoreTests: XCTestCase {
         XCTAssertEqual(try store.claimNextJob(now: now, leaseDuration: 30)?.id, secondJob.id)
     }
 
+    func testStoreErrorsReadAsWrittenWhenShown() {
+        let id = UUID()
+        XCTAssertEqual(MeetingStoreError.missingJob(id).localizedDescription, "Archive job does not exist: \(id.canonicalString)")
+    }
+
     func testCheckpointMovesCommittedPagesIntoTheMainDatabaseFile() throws {
         let databaseURL = temporaryDatabaseURL()
         defer { try? FileManager.default.removeItem(at: databaseURL.deletingLastPathComponent()) }

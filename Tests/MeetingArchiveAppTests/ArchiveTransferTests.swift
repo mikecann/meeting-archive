@@ -195,7 +195,21 @@ final class ArchiveTransferTests: XCTestCase {
             XCTFail("Expected command failure")
         } catch let error as ArchiveTransferError {
             XCTAssertEqual(error, .commandFailed(executable: "/usr/bin/ssh", exitCode: 255, stderr: "connection refused"))
+            // The library shows this text, not Foundation's "couldn't be completed".
+            XCTAssertEqual(error.localizedDescription, "/usr/bin/ssh failed with 255: connection refused")
         }
+    }
+
+    func testALongCommandFailureShowsTheEndOfItsOutput() {
+        let stderr = "Traceback (most recent call last):\n"
+            + String(repeating: "  File \"worker.py\", line 1, in <module>\n", count: 500)
+            + "ValueError: The incoming directory is missing.\n"
+
+        let message = ArchiveTransferError.commandFailed(executable: "/usr/bin/ssh", exitCode: 1, stderr: stderr).localizedDescription
+
+        XCTAssertTrue(message.hasPrefix("/usr/bin/ssh failed with 1: …"), message)
+        XCTAssertTrue(message.hasSuffix("ValueError: The incoming directory is missing."), message)
+        XCTAssertLessThan(message.count, 500)
     }
 
     func testFetchResolvesDatePartitionThenDownloadsValidatedArtifact() async throws {
