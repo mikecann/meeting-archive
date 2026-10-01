@@ -2,11 +2,42 @@ import CryptoKit
 import Foundation
 import MeetingArchiveCore
 
+/// A capture that can never be archived as recorded. Its job stops retrying,
+/// and its folder stays on this Mac.
+enum UnarchivableCapture: LocalizedError, Equatable {
+    /// Capture stopped before any audio or video reached a file. Bruce refuses
+    /// a bundle with no media, so a retry could never succeed.
+    case nothingRecorded
+
+    var errorDescription: String? {
+        switch self {
+        case .nothingRecorded: "No audio or video was recorded."
+        }
+    }
+}
+
+/// What a failed upload does to its job. Most failures mean Bruce is out of
+/// reach, so the job backs off and tries again.
+enum UploadFailure: Equatable {
+    case retry(after: TimeInterval)
+    case permanent(reason: String)
+
+    init(_ error: Error, attempt: Int) {
+        if let unarchivable = error as? UnarchivableCapture {
+            self = .permanent(reason: unarchivable.localizedDescription)
+        } else {
+            self = .retry(after: min(3600, 30 * pow(2, Double(min(attempt, 7)))))
+        }
+    }
+}
+
 enum SpoolBundle {
     static let sources: [(String, ManifestFileKind)] = [("meeting-view.mov", .video), ("microphone.m4a", .microphoneAudio), ("incoming.m4a", .incomingAudio)]
 
+    /// Every media file the capture left, each a real, non-empty file. Recovery
+    /// measures these even when the microphone never started.
     static func mediaFiles(in directory: URL) throws -> [(URL, ManifestFileKind)] {
-        let files = try sources.compactMap { name, kind -> (URL, ManifestFileKind)? in
+        try sources.compactMap { name, kind -> (URL, ManifestFileKind)? in
             let url = directory.appendingPathComponent(name)
             guard FileManager.default.fileExists(atPath: url.path) else { return nil }
             let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
@@ -15,10 +46,6 @@ enum SpoolBundle {
             }
             return (url, kind)
         }
-        guard files.contains(where: { $0.1 == .microphoneAudio }) else {
-            throw CaptureFailure.message("The microphone track is missing. The partial files have been retained for recovery.")
-        }
-        return files
     }
 
     /// Finalized inputs become immutable before transfer. Retries reuse the
@@ -34,6 +61,9 @@ enum SpoolBundle {
             return manifest
         }
         let media = try mediaFiles(in: directory)
+        // A capture whose microphone never started is archived with the tracks
+        // it has. One with no media at all stops here, before anything is written.
+        guard !media.isEmpty else { throw UnarchivableCapture.nothingRecorded }
         let base = WorkerMeetingMetadata(meetingID: record.id, manifestRevision: record.metadataRevision, startedAt: record.startedAt, endedAt: record.endedAt, durationSeconds: record.endedAt.timeIntervalSince(record.startedAt), timezone: record.timezoneIdentifier, sourceApp: record.sourceApplication.bundleIdentifier)
         try base.validate()
         var metadata = try JSONSerialization.jsonObject(with: base.canonicalData()) as! [String: Any]

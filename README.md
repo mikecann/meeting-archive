@@ -204,6 +204,10 @@ recorder repeats the last frame so the video stays as long as the audio. A
 microphone that drops out mid-call is restarted rather than ending the whole
 recording.
 
+If the mic never starts, the recording is still archived with the meeting video
+and audio it did catch, just without your voice. A recording that caught
+nothing at all isn't sent to Bruce, and the library shows it as **Not archived**.
+
 The app logs capture, detection and transfer events to the unified log:
 
 ```sh

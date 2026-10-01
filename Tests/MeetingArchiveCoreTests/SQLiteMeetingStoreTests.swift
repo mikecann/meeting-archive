@@ -101,6 +101,47 @@ final class SQLiteMeetingStoreTests: XCTestCase {
         XCTAssertEqual(try store.claimNextJob(now: now, leaseDuration: 30)?.id, job.id)
     }
 
+    func testAFailedJobKeepsItsReasonAndIsNeverClaimedAgain() throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: databaseURL.deletingLastPathComponent()) }
+        let store = try SQLiteMeetingStore(url: databaseURL)
+        let record = meetingRecord().resolvingAcceptance(.accept(trigger: .deadline), at: Date())
+        let job = ArchiveJob(meetingID: record.id, manifestRevision: 1, createdAt: record.endedAt)
+        try store.insertAcceptedMeeting(record, job: job)
+        _ = try XCTUnwrap(store.claimNextJob(now: record.endedAt.addingTimeInterval(1), leaseDuration: 30))
+
+        try store.failJob(id: job.id, error: "No audio or video was recorded.")
+
+        let failed = try XCTUnwrap(store.fetchJob(id: job.id))
+        XCTAssertEqual(failed.status, .failed)
+        XCTAssertEqual(failed.lastError, "No audio or video was recorded.")
+        XCTAssertNil(failed.leaseUntil)
+        // Neither an expired lease, a wake nor a relaunch picks it up again.
+        let nextWeek = record.endedAt.addingTimeInterval(7 * 24 * 3600)
+        let reopened = try SQLiteMeetingStore(url: databaseURL)
+        XCTAssertEqual(try reopened.makeRetryableJobsAvailable(now: nextWeek), 0)
+        XCTAssertNil(try reopened.claimNextJob(now: nextWeek, leaseDuration: 30))
+        XCTAssertEqual(try reopened.fetchJob(id: job.id), failed)
+    }
+
+    func testAFailedJobDoesNotHoldUpLaterMeetings() throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: databaseURL.deletingLastPathComponent()) }
+        let store = try SQLiteMeetingStore(url: databaseURL)
+        let first = meetingRecord().resolvingAcceptance(.accept(trigger: .deadline), at: Date())
+        let second = meetingRecord().resolvingAcceptance(.accept(trigger: .deadline), at: Date())
+        let firstJob = ArchiveJob(meetingID: first.id, manifestRevision: 1, createdAt: first.endedAt)
+        let secondJob = ArchiveJob(meetingID: second.id, manifestRevision: 1, createdAt: first.endedAt.addingTimeInterval(60))
+        try store.insertAcceptedMeeting(first, job: firstJob)
+        try store.insertAcceptedMeeting(second, job: secondJob)
+        let now = first.endedAt.addingTimeInterval(120)
+
+        XCTAssertEqual(try store.claimNextJob(now: now, leaseDuration: 30)?.id, firstJob.id)
+        try store.failJob(id: firstJob.id, error: "No audio or video was recorded.")
+
+        XCTAssertEqual(try store.claimNextJob(now: now, leaseDuration: 30)?.id, secondJob.id)
+    }
+
     func testCheckpointMovesCommittedPagesIntoTheMainDatabaseFile() throws {
         let databaseURL = temporaryDatabaseURL()
         defer { try? FileManager.default.removeItem(at: databaseURL.deletingLastPathComponent()) }

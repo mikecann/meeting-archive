@@ -214,6 +214,12 @@ final class ArchiveController: ObservableObject {
         jobs.contains { $0.meetingID == record.id && $0.status == .succeeded && $0.acknowledgement != nil }
     }
 
+    /// A capture that can never be archived keeps its folder in the spool, and
+    /// its job stays failed rather than retrying.
+    func cannotArchive(_ record: MeetingRecord) -> Bool {
+        jobs.contains { $0.meetingID == record.id && $0.status == .failed }
+    }
+
     func rename(_ meetingID: UUID, to rawTitle: String) async -> Bool {
         let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty, var record = meetings.first(where: { $0.id == meetingID }) else { return false }
@@ -600,6 +606,7 @@ final class ArchiveController: ObservableObject {
         guard let job = jobs.first(where: { $0.meetingID == record.id && $0.manifestRevision == record.metadataRevision }) else {
             return .checking
         }
+        if job.status == .failed { return .notArchived(reason: job.lastError) }
         if let error = job.lastError, job.status != .succeeded { return .waiting("Transfer waiting to retry: \(error)") }
         guard job.status == .succeeded else { return .transferring }
         let remote = workerStatuses[record.id]
@@ -724,6 +731,8 @@ final class ArchiveController: ObservableObject {
                 guard let data = try? Data(contentsOf: path) else { continue }
                 let entry = try ModelCodec.decoder.decode(CaptureJournal.self, from: data)
                 guard try store?.fetchMeeting(id: entry.id) == nil else { continue }
+                // A capture whose microphone never started is recovered too,
+                // and archived with the tracks it has.
                 let media = try SpoolBundle.mediaFiles(in: directory)
                 var duration = 0.0
                 for (url, _) in media {
@@ -781,8 +790,14 @@ final class ArchiveController: ObservableObject {
         } catch {
             Log.transfer.error("Upload failed: \(error.localizedDescription, privacy: .public)")
             if let claimed {
-                let delay = min(3600.0, 30.0 * pow(2, Double(min(claimed.attemptCount, 7))))
-                try? store?.scheduleRetry(jobID: claimed.id, availableAt: Date().addingTimeInterval(delay), error: error.localizedDescription)
+                switch UploadFailure(error, attempt: claimed.attemptCount) {
+                case .retry(let delay):
+                    try? store?.scheduleRetry(jobID: claimed.id, availableAt: Date().addingTimeInterval(delay), error: error.localizedDescription)
+                case .permanent(let reason):
+                    // No retry can add media the capture never recorded. Its
+                    // folder stays in the spool, and cleanup never touches it.
+                    try? store?.failJob(id: claimed.id, error: reason)
+                }
             }
         }
         refresh()

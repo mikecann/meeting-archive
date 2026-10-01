@@ -248,6 +248,18 @@ public final class SQLiteMeetingStore: @unchecked Sendable {
         }
     }
 
+    /// Stops a job that no retry can finish, such as a capture with no audio
+    /// or video at all. Claims and wake-ups skip it from then on.
+    public func failJob(id: UUID, error: String) throws {
+        try withLock {
+            guard var job = try fetchJobUnlocked(id: id) else { throw MeetingStoreError.missingJob(id) }
+            job.status = .failed
+            job.leaseUntil = nil
+            job.lastError = error
+            try updateJobUnlocked(job)
+        }
+    }
+
     /// Clears retry backoff after a wake or network change, so a job does not
     /// sit out an hour-long delay once Bruce is reachable again.
     @discardableResult

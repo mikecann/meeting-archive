@@ -8,7 +8,7 @@ private enum ContractFixtureError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .usage:
-            "Usage: ContractRoundTrip emit BUNDLE_DIR | validate BUNDLE_DIR ACKNOWLEDGEMENT_JSON"
+            "Usage: ContractRoundTrip emit BUNDLE_DIR [--without-microphone] | validate BUNDLE_DIR ACKNOWLEDGEMENT_JSON"
         case .invalidAcknowledgement(let message):
             "Invalid worker acknowledgement: \(message)"
         }
@@ -20,7 +20,9 @@ private enum ContractRoundTrip {
     static func main() throws {
         let arguments = Array(CommandLine.arguments.dropFirst())
         if arguments.count == 2, arguments[0] == "emit" {
-            try emitFixture(at: URL(fileURLWithPath: arguments[1], isDirectory: true))
+            try emitFixture(at: URL(fileURLWithPath: arguments[1], isDirectory: true), withMicrophone: true)
+        } else if arguments.count == 3, arguments[0] == "emit", arguments[2] == "--without-microphone" {
+            try emitFixture(at: URL(fileURLWithPath: arguments[1], isDirectory: true), withMicrophone: false)
         } else if arguments.count == 3, arguments[0] == "validate" {
             try validateAcknowledgement(
                 bundle: URL(fileURLWithPath: arguments[1], isDirectory: true),
@@ -31,9 +33,11 @@ private enum ContractRoundTrip {
         }
     }
 
-    private static func emitFixture(at directory: URL) throws {
+    /// A capture whose microphone never started is archived with the tracks it
+    /// has, so it gets its own meeting and no microphone file.
+    private static func emitFixture(at directory: URL, withMicrophone: Bool) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let meetingID = UUID(uuidString: "7c3f6176-b12c-4b25-8e81-0dafb231f984")!
+        let meetingID = UUID(uuidString: withMicrophone ? "7c3f6176-b12c-4b25-8e81-0dafb231f984" : "0b5e2f43-91c7-4d3a-8f61-2c4b7a9e5d10")!
         let metadata = WorkerMeetingMetadata(
             meetingID: meetingID,
             manifestRevision: 1,
@@ -54,7 +58,7 @@ private enum ContractRoundTrip {
             ("microphone.m4a", microphoneData, .microphoneAudio),
             ("incoming.m4a", incomingData, .incomingAudio),
             ("meeting-view.mov", videoData, .video),
-        ]
+        ].filter { withMicrophone || $0.2 != .microphoneAudio }
         for (name, data, _) in payloads {
             try data.write(to: directory.appendingPathComponent(name), options: .atomic)
         }
