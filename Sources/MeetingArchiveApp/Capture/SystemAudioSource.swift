@@ -34,6 +34,7 @@ final class SystemAudioSource: @unchecked Sendable {
     // Everything below belongs to `control`.
     private var tap: ProcessTap?
     private var outputListener: AudioPropertyListener?
+    private var outputRateListener: AudioPropertyListener?
     private var watchdog = SourceWatchdog()
     private var stopped = false
     private var rebuildPending = false
@@ -87,6 +88,8 @@ final class SystemAudioSource: @unchecked Sendable {
                 self.stopped = true
                 self.outputListener?.cancel()
                 self.outputListener = nil
+                self.outputRateListener?.cancel()
+                self.outputRateListener = nil
                 self.tap?.invalidate()
                 self.tap = nil
                 continuation.resume()
@@ -111,10 +114,28 @@ final class SystemAudioSource: @unchecked Sendable {
     private func followDefaultOutput() {
         do {
             outputListener = try AudioPropertyListener(kAudioHardwarePropertyDefaultOutputDevice, of: AudioHAL.system, queue: control) { [weak self] in
+                self?.followOutputRate()
                 self?.scheduleRebuild("The sound output changed")
             }
         } catch {
             Log.capture.error("Cannot follow the sound output: \(error.localizedDescription, privacy: .public)")
+        }
+        followOutputRate()
+    }
+
+    /// AirPods switching to call mode stay the same output device but change
+    /// its rate, which is known to stop a tap silently. Rebuilding on the rate
+    /// change saves waiting for the watchdog.
+    private func followOutputRate() {
+        outputRateListener?.cancel()
+        outputRateListener = nil
+        guard let device = try? AudioHAL.defaultOutputDevice(), device != kAudioObjectUnknown else { return }
+        do {
+            outputRateListener = try AudioPropertyListener(kAudioDevicePropertyNominalSampleRate, of: device, queue: control) { [weak self] in
+                self?.scheduleRebuild("The sound output changed mode")
+            }
+        } catch {
+            Log.capture.error("Cannot follow the sound output's rate: \(error.localizedDescription, privacy: .public)")
         }
     }
 

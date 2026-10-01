@@ -182,6 +182,30 @@ final class AudioTrackWriterTests: XCTestCase {
         XCTAssertEqual(warnings.all.count, 1)
     }
 
+    func testADeviceClockThatDriftsStaysWithinToleranceOfTheHostClock() async throws {
+        let input = try format(.pcmFormatFloat32, rate: 48_000, channels: 1)
+        // 0.1% either way over two minutes, far worse than a real device, so
+        // trimming (fast clock) and padding (slow clock) both happen often.
+        for drift in [0.001, -0.001] {
+            let folder = directory.appendingPathComponent("\(drift)")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let writer = AudioTrackWriter.microphone(directory: folder, origin: origin)
+            let chunkSeconds = 0.1 / (1 + drift)
+            for index in 0..<1_200 {
+                let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: input, frameCapacity: 4_800))
+                buffer.frameLength = 4_800
+                memset(buffer.floatChannelData![0], 0, 4_800 * MemoryLayout<Float>.size)
+                writer.append(buffer, at: CMTimeAdd(origin, CMTime(seconds: Double(index) * chunkSeconds, preferredTimescale: 1_000_000_000)))
+            }
+
+            let summary = await writer.finish()
+
+            let hostSeconds = 1_200 * chunkSeconds
+            XCTAssertEqual(try XCTUnwrap(summary.progress).endOffset, hostSeconds, accuracy: AudioTrackWriter.tolerance + 0.01, "drift \(drift)")
+            XCTAssertEqual(try ReadBack(writer.url).duration, hostSeconds, accuracy: AudioTrackWriter.tolerance + 0.01, "drift \(drift)")
+        }
+    }
+
     func testATrackThatNeverHearsAnythingLeavesNoFile() async throws {
         let writer = AudioTrackWriter.incoming(directory: directory, origin: origin)
 
