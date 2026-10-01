@@ -18,6 +18,23 @@ struct NativeRecordingStopResult {
     var microphoneChannels: Int?
 }
 
+/// The newest video timestamp written so far. A frame that is not strictly
+/// newer is skipped, so a held frame and a late live one never go backwards.
+/// It starts empty because CoreMedia orders `CMTime.invalid` after every real
+/// time; starting there skipped every frame of a call.
+struct VideoFrameOrder {
+    private var newest: CMTime?
+
+    func admits(_ timestamp: CMTime) -> Bool {
+        guard let newest else { return true }
+        return timestamp > newest
+    }
+
+    mutating func record(_ timestamp: CMTime) {
+        newest = timestamp
+    }
+}
+
 /// ScreenCaptureKit supplies all three sources, so one host-clock origin is used
 /// for every writer. No camera capture session is opened by this recorder.
 final class NativeRecording: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
@@ -38,7 +55,7 @@ final class NativeRecording: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
     private var consecutiveAudioDrops = 0
     private var lastVideoSample: CMSampleBuffer?
     private var lastVideoAppendUptime: TimeInterval = 0
-    private var lastVideoTimestamp = CMTime.invalid
+    private var videoOrder = VideoFrameOrder()
     private var videoStallLogged = false
     private var lastMicrophoneRestartUptime: TimeInterval = 0
     private var streamEndedBySystem = false
@@ -174,7 +191,7 @@ final class NativeRecording: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
     }
 
     private func appendRetimedVideo(_ sample: CMSampleBuffer, at time: CMTime, writer: TrackWriter) {
-        guard time > lastVideoTimestamp else { return }
+        guard videoOrder.admits(time) else { return }
         var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: time, decodeTimeStamp: .invalid)
         var copy: CMSampleBuffer?
         guard CMSampleBufferCreateCopyWithNewTiming(allocator: nil, sampleBuffer: sample, sampleTimingEntryCount: 1,
@@ -182,7 +199,7 @@ final class NativeRecording: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
               let copy else { return }
         do {
             try writer.append(copy)
-            lastVideoTimestamp = time
+            videoOrder.record(time)
             lastVideoAppendUptime = ProcessInfo.processInfo.systemUptime
             try timeline?.accept(track: .video, timestamp: time.seconds, duration: 0)
         } catch {
@@ -298,12 +315,12 @@ final class NativeRecording: NSObject, SCStreamOutput, SCStreamDelegate, @unchec
                 if consecutiveVideoDrops >= 60 { throw CaptureFailure.message("The video encoder stopped accepting frames. The partial recording has been preserved.") }
                 return // dropping video must not backlog microphone audio
             }
-            if track == .video, timestamp <= lastVideoTimestamp { return }
+            if track == .video, !videoOrder.admits(timestamp) { return }
             try writer.append(sampleBuffer)
             if track == .video {
                 consecutiveVideoDrops = 0
                 lastVideoSample = sampleBuffer
-                lastVideoTimestamp = timestamp
+                videoOrder.record(timestamp)
                 lastVideoAppendUptime = ProcessInfo.processInfo.systemUptime
                 if videoStallLogged {
                     videoStallLogged = false
