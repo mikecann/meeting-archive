@@ -46,33 +46,9 @@ enum MeetingFollowUpPhase: Equatable {
     }
 }
 
+/// A meeting whose speakers still need names, for the menu bar count. Review
+/// never opens by itself; the menu and the library open it.
 struct SpeakerAttentionCandidate: Equatable {
     var meetingID: UUID
-    var revision: Int
     var remainingCount: Int
-
-    var key: String { "\(meetingID.uuidString.lowercased()):\(revision)" }
-}
-
-/// Dismissing a prompt only suppresses its automatic presentation. The worker's
-/// confirmed speaker assignments remain the source of truth for completion.
-struct SpeakerAttentionTracker: Codable, Equatable {
-    private(set) var presentedKeys: Set<String> = []
-
-    /// A review window must never appear over a call, recorded or not.
-    static func interactionIsSafe(callInProgress: Bool) -> Bool {
-        !callInProgress
-    }
-
-    func nextPresentation(
-        from candidates: [SpeakerAttentionCandidate],
-        interactionBlocked: Bool
-    ) -> SpeakerAttentionCandidate? {
-        guard !interactionBlocked else { return nil }
-        return candidates.first { $0.remainingCount > 0 && !presentedKeys.contains($0.key) }
-    }
-
-    mutating func markPresented(_ candidate: SpeakerAttentionCandidate) {
-        presentedKeys.insert(candidate.key)
-    }
 }
