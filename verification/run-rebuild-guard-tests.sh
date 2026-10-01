@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Rebuilding must never replace the app bundle while Meeting Archive runs,
-# however it was started. Stubs stand in for pgrep, launchctl, swift and open,
+# however it was started. Stubs stand in for ps, launchctl, swift and open,
 # so nothing is built, launched or installed, and real processes are ignored.
 set -euo pipefail
 
@@ -10,12 +10,11 @@ ROOT="$(mktemp -d "${TMPDIR:-/tmp}/meeting-archive-rebuild-guard.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT
 mkdir -p "$ROOT/bin"
 
-# pgrep applies its -f pattern to FAKE_PROCESSES, one command line per line.
-cat >"$ROOT/bin/pgrep" <<'STUB'
+# ps lists FAKE_PROCESSES, one executable per line, as `ps -axo comm=` does.
+cat >"$ROOT/bin/ps" <<'STUB'
 #!/bin/sh
-[ "$1" = "-f" ] || exit 2
-printf '%s\n' "${FAKE_PROCESSES:-}" | grep -Eq -- "$2" || exit 1
-echo 4242
+[ "$*" = "-axo comm=" ] || exit 2
+printf '%s\n' "${FAKE_PROCESSES:-}"
 STUB
 # launchctl knows only the login item, in whatever state FAKE_LOGIN_ITEM says.
 cat >"$ROOT/bin/launchctl" <<'STUB'
@@ -35,7 +34,7 @@ cat >"$ROOT/bin/open" <<'STUB'
 #!/bin/sh
 echo open >>"$CALLS"
 STUB
-chmod +x "$ROOT/bin/pgrep" "$ROOT/bin/launchctl" "$ROOT/bin/swift" "$ROOT/bin/open"
+chmod +x "$ROOT/bin/ps" "$ROOT/bin/launchctl" "$ROOT/bin/swift" "$ROOT/bin/open"
 
 # run SCRIPT PROCESSES LOGIN_ITEM_STATE
 run() {
@@ -64,16 +63,20 @@ expect_build() {
   [[ "$status" -eq 3 && "$(cat "$ROOT/calls")" == "swift" ]] || fail "$1: expected the build to start, got exit $status"
 }
 
-# The login item's real command line has no bundle path in it.
-login_item="meeting-archive-app --background"
+# The login item's executable has no bundle path, and a Finder launch's has a
+# space in it. Neither can be told apart from arguments in a joined command
+# line, so the guard only looks at executables.
+login_item="meeting-archive-app"
 opened="/Users/me/Applications/Meeting Archive.app/Contents/MacOS/meeting-archive-app"
 
 run build-app.sh "" ""
 expect_build "nothing running"
 run build-app.sh "" "not running"
 expect_build "login item quit from its menu"
-run build-app.sh "/usr/bin/tail -f /tmp/meeting-archive-app.log" ""
-expect_build "an unrelated process"
+run build-app.sh "/usr/bin/tail" ""
+expect_build "tail with the app's path as its argument"
+run build-app.sh "/usr/local/bin/meeting-archive-app-helper" ""
+expect_build "a longer executable name"
 run build-app.sh "$login_item" ""
 expect_refused "login item process"
 run build-app.sh "" "running"
