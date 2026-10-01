@@ -129,7 +129,7 @@ final class SystemAudioSource: @unchecked Sendable {
     private func followOutputRate() {
         outputRateListener?.cancel()
         outputRateListener = nil
-        guard let device = try? AudioHAL.defaultOutputDevice(), device != kAudioObjectUnknown else { return }
+        guard !stopped, let device = try? AudioHAL.defaultOutputDevice(), device != kAudioObjectUnknown else { return }
         do {
             outputRateListener = try AudioPropertyListener(kAudioDevicePropertyNominalSampleRate, of: device, queue: control) { [weak self] in
                 self?.scheduleRebuild("The sound output changed mode")
