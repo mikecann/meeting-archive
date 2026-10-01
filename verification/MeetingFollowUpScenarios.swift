@@ -6,10 +6,8 @@ enum MeetingFollowUpScenarios {
         let first = SpeakerAttentionCandidate(meetingID: UUID(), revision: 2, remainingCount: 1)
         let second = SpeakerAttentionCandidate(meetingID: UUID(), revision: 1, remainingCount: 2)
         var tracker = SpeakerAttentionTracker()
-        precondition(!SpeakerAttentionTracker.interactionIsSafe(noSupportedMeeting: false, cameraActive: nil))
-        precondition(!SpeakerAttentionTracker.interactionIsSafe(noSupportedMeeting: false, cameraActive: true))
-        precondition(SpeakerAttentionTracker.interactionIsSafe(noSupportedMeeting: false, cameraActive: false))
-        precondition(SpeakerAttentionTracker.interactionIsSafe(noSupportedMeeting: true, cameraActive: nil))
+        precondition(!SpeakerAttentionTracker.interactionIsSafe(callInProgress: true))
+        precondition(SpeakerAttentionTracker.interactionIsSafe(callInProgress: false))
         precondition(tracker.nextPresentation(from: [first], interactionBlocked: true) == nil,
                      "A new meeting or naming prompt must defer attention")
         precondition(tracker.nextPresentation(from: [first], interactionBlocked: false) == first)

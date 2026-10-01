@@ -7,13 +7,13 @@
 <key>CFBundleIdentifier</key><string>com.mikerosoft.meeting-archive</string>
 <key>CFBundleName</key><string>Meeting Archive</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.2.0</string>
+<key>CFBundleVersion</key><string>2</string>
 <key>LSMinimumSystemVersion</key><string>15.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
-<key>NSMicrophoneUsageDescription</key><string>Meeting Archive includes your microphone in meeting recordings, even while you are muted in the call.</string>
-<key>NSScreenCaptureUsageDescription</key><string>Meeting Archive records your meeting window and incoming audio for your private archive.</string>
+<key>NSMicrophoneUsageDescription</key><string>Meeting Archive records your side of each call, even while you are muted in the call app.</string>
+<key>NSAudioCaptureUsageDescription</key><string>Meeting Archive records the other side of your calls from what your Mac plays, for your private archive.</string>
 <key>NSCalendarsFullAccessUsageDescription</key><string>Meeting Archive suggests meeting titles and possible speakers from your selected personal and work calendars.</string>
 <key>CFBundleURLTypes</key><array><dict><key>CFBundleURLName</key><string>Meeting Archive</string><key>CFBundleURLSchemes</key><array><string>meetingarchive</string></array></dict></array>
 </dict></plist>

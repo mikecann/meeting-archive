@@ -3,22 +3,27 @@ import XCTest
 @testable import MeetingArchiveCore
 
 final class SQLiteMeetingStoreTests: XCTestCase {
-    func testRecorderStateAndGlobalPauseSurviveReopen() throws {
+    func testSavedStateSurvivesReopenUnderItsOwnKey() throws {
         let databaseURL = temporaryDatabaseURL()
         defer { try? FileManager.default.removeItem(at: databaseURL.deletingLastPathComponent()) }
+        struct Saved: Codable, Equatable { var isPaused: Bool; var note: String }
 
-        var state = RecorderState()
-        state.isPaused = true
-        state.currentSession = ActiveMeetingSession(
-            descriptor: meetingSession(id: "persisted"),
-            phase: .suppressed(.paused),
-            firstObservedAt: Date(timeIntervalSince1970: 1_800_000_000),
-            meetingID: nil
-        )
-        try SQLiteMeetingStore(url: databaseURL).saveRecorderState(state)
+        let state = Saved(isPaused: true, note: "persisted")
+        try SQLiteMeetingStore(url: databaseURL).saveState(state, key: "example")
 
-        let restored = try SQLiteMeetingStore(url: databaseURL).loadRecorderState()
-        XCTAssertEqual(restored, state)
+        let store = try SQLiteMeetingStore(url: databaseURL)
+        XCTAssertEqual(try store.loadState(Saved.self, key: "example"), state)
+        XCTAssertNil(try store.loadState(Saved.self, key: "missing"))
+    }
+
+    func testOldRecorderRowDoesNotLeakIntoTheNewKey() throws {
+        let databaseURL = temporaryDatabaseURL()
+        defer { try? FileManager.default.removeItem(at: databaseURL.deletingLastPathComponent()) }
+        struct Saved: Codable, Equatable { var schemaVersion: Int }
+        let store = try SQLiteMeetingStore(url: databaseURL)
+        try store.saveState(Saved(schemaVersion: 1), key: "recorder")
+
+        XCTAssertNil(try store.loadState(Saved.self, key: SQLiteMeetingStore.recordingPolicyStateKey))
     }
 
     func testAcceptanceResolutionIsAtomicAndDiscardCannotBeOverwritten() throws {
@@ -194,25 +199,15 @@ final class SQLiteMeetingStoreTests: XCTestCase {
         return directory.appendingPathComponent("meeting-archive.sqlite3")
     }
 
-    private func meetingSession(id: String) -> MeetingSessionDescriptor {
-        MeetingSessionDescriptor(
-            id: id,
-            sourceApplication: .init(bundleIdentifier: "com.google.Chrome", displayName: "Chrome", kind: .googleMeet),
-            surface: .init(id: "window-1", title: "Meet", kind: .meeting),
-            attribution: .positive
-        )
-    }
-
     private func meetingRecord() -> MeetingRecord {
         let start = Date(timeIntervalSince1970: 1_800_000_000)
         return MeetingRecord(
             id: UUID(),
             title: "Meeting",
-            sourceApplication: .init(bundleIdentifier: "com.google.Chrome", displayName: "Chrome", kind: .googleMeet),
+            sourceApplication: .init(bundleIdentifier: "com.google.Chrome", displayName: "Chrome", kind: .other),
             startedAt: start,
             endedAt: start.addingTimeInterval(60),
             timezoneIdentifier: "Australia/Perth",
-            video: .init(surfaceID: "window-1", codec: "hevc", width: 1920, height: 1080),
             microphone: .init(deviceUID: "default", displayName: "Default", sampleRate: 48_000, channels: 1),
             incomingAudio: .init(sourceApplicationBundleIdentifier: "com.google.Chrome", sampleRate: 48_000, channels: 2),
             finalizedAt: start.addingTimeInterval(60)

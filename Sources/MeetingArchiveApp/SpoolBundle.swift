@@ -75,6 +75,11 @@ enum SpoolBundle {
                 metadata[key] = try JSONSerialization.jsonObject(with: data)
             }
         }
+        // The worker suggests names from top-level "attendees". v1 only wrote
+        // every nearby event under "calendar", so suggestions never arrived.
+        if let attendees = try matchedAttendees(in: directory, record: record) {
+            metadata["attendees"] = try JSONSerialization.jsonObject(with: ModelCodec.encoder.encode(attendees))
+        }
         let metadataURL = directory.appendingPathComponent("metadata.json")
         try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys, .withoutEscapingSlashes]).write(to: metadataURL, options: .atomic)
         let files = try (media + [(metadataURL, .metadata)]).map { url, kind in
@@ -85,6 +90,16 @@ enum SpoolBundle {
         try manifest.validate()
         try manifest.canonicalData().write(to: manifestURL, options: .atomic)
         return manifest
+    }
+
+    /// Only the event that clearly matches the recording counts. Attendees of
+    /// a neighbouring event are not people who might have spoken.
+    static func matchedAttendees(in directory: URL, record: MeetingRecord) throws -> [CalendarAttendee]? {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("calendar.json")) else { return nil }
+        let events = try ModelCodec.decoder.decode([CalendarSuggestion].self, from: data)
+        guard let match = CalendarRanking.best(events, start: record.startedAt, end: record.endedAt),
+              !match.attendees.isEmpty else { return nil }
+        return match.attendees
     }
 
     static func hash(_ url: URL) throws -> String {

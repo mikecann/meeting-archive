@@ -15,6 +15,65 @@ final class SpoolBundleTests: XCTestCase {
         XCTAssertEqual(metadata["duration_seconds"] as? Double, 60)
     }
 
+    func testAnAudioOnlyCaptureIsArchivedWithBothTracks() throws {
+        let directory = try bundle(with: ["microphone.m4a", "incoming.m4a"])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var audioOnly = record()
+        audioOnly.video = nil
+
+        let manifest = try SpoolBundle.prepare(record: audioOnly, directory: directory)
+
+        XCTAssertEqual(
+            Dictionary(uniqueKeysWithValues: manifest.files.map { ($0.path, $0.kind) }),
+            ["metadata.json": .metadata, "microphone.m4a": .microphoneAudio, "incoming.m4a": .incomingAudio]
+        )
+        let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("metadata.json"))) as! [String: Any]
+        let capture = try XCTUnwrap(metadata["capture"] as? [String: Any])
+        XCTAssertNil(capture["video"])
+    }
+
+    func testAttendeesOfTheMatchedEventAreWrittenWhereTheWorkerReadsThem() throws {
+        let directory = try bundle(with: ["microphone.m4a", "incoming.m4a"])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let meeting = record()
+        let matched = CalendarSuggestion(
+            id: "standup", title: "Acme catch up", start: meeting.startedAt, end: meeting.endedAt,
+            attendees: [CalendarAttendee(name: "Sam Example", email: "sam@example.com", response: "2")]
+        )
+        let elsewhere = CalendarSuggestion(
+            id: "school-run", title: "School run", start: meeting.endedAt.addingTimeInterval(3600),
+            end: meeting.endedAt.addingTimeInterval(7200),
+            attendees: [CalendarAttendee(name: "Not In The Call", email: nil, response: "1")]
+        )
+        try ModelCodec.encoder.encode([matched, elsewhere]).write(to: directory.appendingPathComponent("calendar.json"))
+
+        _ = try SpoolBundle.prepare(record: meeting, directory: directory)
+
+        let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("metadata.json"))) as! [String: Any]
+        let attendees = try XCTUnwrap(metadata["attendees"] as? [[String: Any]])
+        XCTAssertEqual(attendees.count, 1)
+        XCTAssertEqual(attendees.first?["name"] as? String, "Sam Example")
+        XCTAssertEqual(attendees.first?["email"] as? String, "sam@example.com")
+        XCTAssertEqual((metadata["calendar"] as? [Any])?.count, 2)
+    }
+
+    func testNoAttendeesAreWrittenWithoutAClearCalendarMatch() throws {
+        let directory = try bundle(with: ["microphone.m4a"])
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let meeting = record()
+        let unrelated = CalendarSuggestion(
+            id: "later", title: "Later", start: meeting.endedAt.addingTimeInterval(600),
+            end: meeting.endedAt.addingTimeInterval(1200),
+            attendees: [CalendarAttendee(name: "Someone", email: nil, response: "1")]
+        )
+        try ModelCodec.encoder.encode([unrelated]).write(to: directory.appendingPathComponent("calendar.json"))
+
+        _ = try SpoolBundle.prepare(record: meeting, directory: directory)
+
+        let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("metadata.json"))) as! [String: Any]
+        XCTAssertNil(metadata["attendees"])
+    }
+
     func testACaptureWithoutMicrophoneAudioIsArchivedWithTheTracksItHas() throws {
         let directory = try bundle(with: ["meeting-view.mov", "incoming.m4a"])
         defer { try? FileManager.default.removeItem(at: directory) }

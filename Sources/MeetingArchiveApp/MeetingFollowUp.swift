@@ -59,8 +59,9 @@ struct SpeakerAttentionCandidate: Equatable {
 struct SpeakerAttentionTracker: Codable, Equatable {
     private(set) var presentedKeys: Set<String> = []
 
-    static func interactionIsSafe(noSupportedMeeting: Bool, cameraActive: Bool?) -> Bool {
-        noSupportedMeeting || cameraActive == false
+    /// A review window must never appear over a call, recorded or not.
+    static func interactionIsSafe(callInProgress: Bool) -> Bool {
+        !callInProgress
     }
 
     func nextPresentation(

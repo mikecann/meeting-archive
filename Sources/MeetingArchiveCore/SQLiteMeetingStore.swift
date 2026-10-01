@@ -60,28 +60,34 @@ public final class SQLiteMeetingStore: @unchecked Sendable {
         sqlite3_close(database)
     }
 
-    public func saveRecorderState(_ state: RecorderState) throws {
-        let data = try ModelCodec.encoder.encode(state)
+    /// v1 kept its camera-session state under "recorder". v2 uses its own key,
+    /// so an old row is simply ignored rather than misread.
+    public static let recordingPolicyStateKey = "recording_policy"
+
+    public func saveState<Value: Encodable>(_ value: Value, key: String) throws {
+        let data = try ModelCodec.encoder.encode(value)
         try withLock {
             let statement = try prepareUnlocked(
-                "INSERT INTO app_state(key, value) VALUES('recorder', ?) "
+                "INSERT INTO app_state(key, value) VALUES(?, ?) "
                     + "ON CONFLICT(key) DO UPDATE SET value=excluded.value"
             )
             defer { sqlite3_finalize(statement) }
-            bind(data, to: 1, in: statement)
+            bind(key, to: 1, in: statement)
+            bind(data, to: 2, in: statement)
             try stepDoneUnlocked(statement)
         }
     }
 
-    public func loadRecorderState() throws -> RecorderState {
+    public func loadState<Value: Decodable>(_ type: Value.Type, key: String) throws -> Value? {
         try withLock {
-            let statement = try prepareUnlocked("SELECT value FROM app_state WHERE key='recorder'")
+            let statement = try prepareUnlocked("SELECT value FROM app_state WHERE key=?")
             defer { sqlite3_finalize(statement) }
+            bind(key, to: 1, in: statement)
             switch sqlite3_step(statement) {
             case SQLITE_ROW:
-                return try ModelCodec.decoder.decode(RecorderState.self, from: data(from: statement, column: 0))
+                return try ModelCodec.decoder.decode(Value.self, from: data(from: statement, column: 0))
             case SQLITE_DONE:
-                return RecorderState()
+                return nil
             default:
                 throw lastErrorUnlocked()
             }

@@ -1,5 +1,7 @@
 import Foundation
 
+/// v1 recorded only these apps, so its records carry one of them. v2 records
+/// whichever app takes the mic and names the few it recognises.
 public enum MeetingApplicationKind: String, Codable, Sendable {
     case googleMeet = "google_meet"
     case zoom
@@ -9,10 +11,12 @@ public enum MeetingApplicationKind: String, Codable, Sendable {
     case cameraPreview = "camera_preview"
     case other
 
-    public var isSupportedMeetingApplication: Bool {
-        switch self {
-        case .googleMeet, .zoom, .teams, .slack: true
-        case .recordIt, .cameraPreview, .other: false
+    public static func forBundleIdentifier(_ bundleIdentifier: String) -> MeetingApplicationKind {
+        switch bundleIdentifier {
+        case "us.zoom.xos": .zoom
+        case "com.microsoft.teams", "com.microsoft.teams2": .teams
+        case "com.tinyspeck.slackmacgap": .slack
+        default: .other
         }
     }
 }
@@ -29,184 +33,7 @@ public struct SourceApplicationDescriptor: Codable, Equatable, Sendable {
     }
 }
 
-public enum MeetingSurfaceKind: String, Codable, Sendable {
-    case meeting
-    case cameraPreview = "camera_preview"
-    case unknown
-}
-
-public struct MeetingSurfaceDescriptor: Codable, Equatable, Sendable {
-    public var id: String
-    public var title: String?
-    public var kind: MeetingSurfaceKind
-
-    public init(id: String, title: String?, kind: MeetingSurfaceKind) {
-        self.id = id
-        self.title = title
-        self.kind = kind
-    }
-}
-
-public enum MeetingAttribution: String, Codable, Sendable {
-    case positive
-    case unknown
-}
-
-public struct MeetingSessionDescriptor: Codable, Equatable, Sendable {
-    public var id: String
-    public var sourceApplication: SourceApplicationDescriptor
-    public var surface: MeetingSurfaceDescriptor
-    public var attribution: MeetingAttribution
-
-    public init(
-        id: String,
-        sourceApplication: SourceApplicationDescriptor,
-        surface: MeetingSurfaceDescriptor,
-        attribution: MeetingAttribution
-    ) {
-        self.id = id
-        self.sourceApplication = sourceApplication
-        self.surface = surface
-        self.attribution = attribution
-    }
-
-    public var isEligibleForCapture: Bool {
-        !id.isEmpty
-            && attribution == .positive
-            && sourceApplication.kind.isSupportedMeetingApplication
-            && surface.kind == .meeting
-    }
-}
-
-public enum SessionSuppressionReason: String, Codable, Sendable {
-    case skipped
-    case paused
-    case interrupted
-}
-
-public enum ActiveSessionPhase: Codable, Equatable, Sendable {
-    case startRequested
-    case recording
-    /// The last start failed. Capture starts again once the same camera
-    /// session is seen on at or after this time.
-    case retryScheduled(at: Date)
-    case suppressed(SessionSuppressionReason)
-
-    private enum CodingKeys: String, CodingKey { case status, reason, retryAt = "retry_at" }
-    private enum Status: String, Codable { case startRequested = "start_requested", recording, suppressed }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        switch try container.decode(Status.self, forKey: .status) {
-        case .startRequested: self = .startRequested
-        case .recording: self = .recording
-        case .suppressed:
-            let reason = try container.decode(SessionSuppressionReason.self, forKey: .reason)
-            if reason == .interrupted, let retryAt = try container.decodeIfPresent(Date.self, forKey: .retryAt) {
-                self = .retryScheduled(at: retryAt)
-            } else {
-                self = .suppressed(reason)
-            }
-        }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        switch self {
-        case .startRequested:
-            try container.encode(Status.startRequested, forKey: .status)
-        case .recording:
-            try container.encode(Status.recording, forKey: .status)
-        case .retryScheduled(let retryAt):
-            // Stored as an interrupted suppression plus the retry time, so a
-            // build without retries reads a pending retry as the suppression
-            // it already understands instead of failing to load its state.
-            try container.encode(Status.suppressed, forKey: .status)
-            try container.encode(SessionSuppressionReason.interrupted, forKey: .reason)
-            try container.encode(retryAt, forKey: .retryAt)
-        case .suppressed(let reason):
-            try container.encode(Status.suppressed, forKey: .status)
-            try container.encode(reason, forKey: .reason)
-        }
-    }
-}
-
-public struct ActiveMeetingSession: Codable, Equatable, Sendable {
-    public var descriptor: MeetingSessionDescriptor
-    public var phase: ActiveSessionPhase
-    public var firstObservedAt: Date
-    public var meetingID: UUID?
-    /// Starts of this camera session that failed before capture produced
-    /// both meeting video and microphone audio. It caps the retries and is
-    /// saved with the session, so a relaunch cannot reset it.
-    public var failedStarts: Int
-
-    public init(
-        descriptor: MeetingSessionDescriptor,
-        phase: ActiveSessionPhase,
-        firstObservedAt: Date,
-        meetingID: UUID?,
-        failedStarts: Int = 0
-    ) {
-        self.descriptor = descriptor
-        self.phase = phase
-        self.firstObservedAt = firstObservedAt
-        self.meetingID = meetingID
-        self.failedStarts = failedStarts
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case descriptor, phase, firstObservedAt, meetingID, failedStarts
-    }
-
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        descriptor = try container.decode(MeetingSessionDescriptor.self, forKey: .descriptor)
-        phase = try container.decode(ActiveSessionPhase.self, forKey: .phase)
-        firstObservedAt = try container.decode(Date.self, forKey: .firstObservedAt)
-        meetingID = try container.decodeIfPresent(UUID.self, forKey: .meetingID)
-        // Sessions saved before start retries existed have no count.
-        failedStarts = try container.decodeIfPresent(Int.self, forKey: .failedStarts) ?? 0
-    }
-}
-
-public struct RecorderState: Codable, Equatable, Sendable {
-    public var schemaVersion: Int
-    public var isPaused: Bool
-    public var currentSession: ActiveMeetingSession?
-    public var completedSessionIDs: [String]
-
-    public init(
-        schemaVersion: Int = 1,
-        isPaused: Bool = false,
-        currentSession: ActiveMeetingSession? = nil,
-        completedSessionIDs: [String] = []
-    ) {
-        self.schemaVersion = schemaVersion
-        self.isPaused = isPaused
-        self.currentSession = currentSession
-        self.completedSessionIDs = completedSessionIDs
-    }
-
-    /// A persisted writer cannot still be alive after this process starts.
-    /// Keep a session that was starting or recording suppressed until its
-    /// detector reports a real off edge, rather than starting a second
-    /// recording because the app remains open. A retry that was still waiting
-    /// had no writer, so it stays due, and its failed start count still caps it.
-    public func restoredAfterProcessRestart() -> RecorderState {
-        guard var currentSession else { return self }
-        switch currentSession.phase {
-        case .startRequested, .recording:
-            currentSession.phase = .suppressed(.interrupted)
-            var copy = self
-            copy.currentSession = currentSession
-            return copy
-        case .retryScheduled, .suppressed:
-            return self
-        }
-    }
-}
-
+/// Only v1 recordings have video. It stays decodable so their records load.
 public struct VideoSourceDescriptor: Codable, Equatable, Sendable {
     public var surfaceID: String
     public var codec: String
@@ -314,7 +141,7 @@ public struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
     public var startedAt: Date
     public var endedAt: Date
     public var timezoneIdentifier: String
-    public var video: VideoSourceDescriptor
+    public var video: VideoSourceDescriptor?
     public var microphone: MicrophoneSourceDescriptor
     public var incomingAudio: IncomingAudioSourceDescriptor
     public var acceptance: AcceptanceState
@@ -329,7 +156,7 @@ public struct MeetingRecord: Codable, Equatable, Identifiable, Sendable {
         startedAt: Date,
         endedAt: Date,
         timezoneIdentifier: String,
-        video: VideoSourceDescriptor,
+        video: VideoSourceDescriptor? = nil,
         microphone: MicrophoneSourceDescriptor,
         incomingAudio: IncomingAudioSourceDescriptor,
         finalizedAt: Date
