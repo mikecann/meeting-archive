@@ -19,9 +19,9 @@ import Synchronization
 /// A tap-only aggregate runs its callback continuously in the tap's own
 /// format, whether or not anything is playing.
 ///
-/// The tap is rebuilt when the default output changes, when its format
-/// changes, and when its callback stops for 3 s. AirPods switching to call
-/// mode is known to stop a tap silently until it is rebuilt.
+/// The tap is rebuilt when the default output changes device or rate, when
+/// its format changes, and when its callback stops for 3 s. AirPods switching
+/// to call mode is known to stop a tap silently until it is rebuilt.
 final class SystemAudioSource: @unchecked Sendable {
     var onWarning: (@Sendable (String) -> Void)?
 
