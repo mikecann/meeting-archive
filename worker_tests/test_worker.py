@@ -1045,7 +1045,7 @@ class ProcessingTests(unittest.TestCase):
             self.assertIsNotNone(output)
             self.assertGreater(output.stat().st_size, 0)  # type: ignore[union-attr]
 
-    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg is unavailable")
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg or ffprobe is unavailable")
     def test_capture_without_microphone_is_validated_archived_and_played_back(self) -> None:
         # The Mac archives a capture whose microphone never started with the
         # tracks it has, so the worker has to take one end to end.
