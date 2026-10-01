@@ -62,6 +62,12 @@ smoke test is
 `python -c 'import faster_whisper, pyannote.audio'`; real model success still
 requires a representative fixture benchmark on Bruce.
 
+After the transcript, the adapter builds `playback/meeting.mp4` for review
+excerpts and the viewer, with a `meeting-playback.json` receipt so a retry
+reuses it. Both audio tracks are mixed on the transcript's capture clock. A
+bundle with video, from before v2, also gets H.264 video. An audio-only
+bundle gets an AAC-only MP4.
+
 The service keeps media processing and Notion publication in separate durable
 SQLite states. A Notion outage retries publication with backoff and does not
 run transcription or playback generation again. Credentials are read only from

@@ -354,82 +354,87 @@ def extract_speaker_embeddings(raw_embeddings, annotation, channel_origin: str) 
 
 
 def create_playback(archive_directory: Path, manifest) -> Path | None:
-    """Build browser-compatible playback without touching preserved sources."""
+    """Build browser-compatible playback without touching preserved sources.
+
+    A bundle with video gets H.264 video. An audio-only bundle, as every v2
+    recording is, gets an AAC-only MP4, so review excerpts and the viewer can
+    still play it.
+    """
     _assert_generated_namespaces_unowned(manifest)
     video = next((item for item in manifest.files if item.kind == "video"), None)
     audio = [item for item in manifest.files if item.kind in ("microphone_audio", "incoming_audio")]
-    if video is None or not audio:
+    if not audio:
         return None
     playback_directory = _ensure_real_generated_directory(archive_directory, ("playback",))
     output = playback_directory / "meeting.mp4"
     receipt_path = playback_directory / "meeting-playback.json"
     recipe = _playback_recipe(manifest, video, audio)
-    if _is_regular_non_symlink(output) and _playback_receipt_matches(receipt_path, recipe) and _playback_is_h264(output):
+    playback_is_current = _playback_is_aac if video is None else _playback_is_h264
+    if _is_regular_non_symlink(output) and _playback_receipt_matches(receipt_path, recipe) and playback_is_current(output):
         return output
     ffmpeg = find_executable("ffmpeg")
     if ffmpeg is None:
         raise RuntimeError("ffmpeg is required to create the playback asset.")
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.parent / f".{output.name}.{uuid.uuid4().hex}.part.mp4"
-    command = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-threads", "2",
-        "-i", str(archive_directory / video.path),
-    ]
-    for item in audio:
+    inputs = audio if video is None else [video, *audio]
+    command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-threads", "2"]
+    for item in inputs:
         command.extend(["-i", str(archive_directory / item.path)])
 
     # AVAssetWriter uses a shared host-clock origin, recorded as firstOffset in
     # metadata. Decode away each file's independent AAC priming/edit list,
     # normalize that decoded track to zero, then apply the capture offset once.
-    video_offset = _playback_track_offset(manifest, "video")
-    filters = [f"[0:v:0]setpts=PTS-STARTPTS+{_ffmpeg_number(video_offset)}/TB[v]"]
-    audio_labels = []
-    for index, item in enumerate(audio, start=1):
-        origin = TranscriptProcessor.CHANNEL_KINDS[item.kind]
-        offset = _playback_track_offset(manifest, origin)
-        label = f"a{index}"
-        delay_milliseconds = _ffmpeg_number(offset * 1_000)
-        filters.append(
-            f"[{index}:a:0]asetpts=PTS-STARTPTS,adelay={delay_milliseconds}:all=1[{label}]"
-        )
-        audio_labels.append(f"[{label}]")
-    if len(audio_labels) == 1:
-        audio_map = audio_labels[0]
-    else:
-        filters.append(
-            f"{''.join(audio_labels)}amix=inputs={len(audio_labels)}:duration=longest[a]"
-        )
-        audio_map = "[a]"
-
-    base = command + [
-        "-filter_complex", ";".join(filters),
-        "-map", "[v]", "-map", audio_map,
-        "-pix_fmt", "yuv420p", "-tag:v", "avc1", "-fps_mode:v", "passthrough",
-        "-profile:v", "high", "-level:v", "4.1",
-        "-b:v", "4M", "-maxrate:v", "6M", "-bufsize:v", "8M",
-        "-threads:v", "2", "-c:a", "aac", "-movflags", "+faststart", "-y",
-    ]
-    last_error: subprocess.CalledProcessError | None = None
-    encoders = ("h264_videotoolbox",) if os.environ.get(
-        "MEETING_ARCHIVE_REQUIRE_HARDWARE_H264", ""
-    ) == "1" else ("h264_videotoolbox", "libx264")
+    filters, audio_map = _aligned_audio_filters(manifest, audio, first_input=len(inputs) - len(audio))
     try:
-        for encoder in encoders:
-            temporary.unlink(missing_ok=True)
+        if video is None:
             try:
                 subprocess.run(
-                    base + ["-c:v", encoder, str(temporary)],
+                    command + [
+                        "-filter_complex", ";".join(filters), "-map", audio_map,
+                        "-c:a", "aac", "-movflags", "+faststart", "-y", str(temporary),
+                    ],
                     check=True,
                     capture_output=True,
                     text=True,
                     timeout=_timeout("MEETING_ARCHIVE_PLAYBACK_TIMEOUT_SECONDS", 4 * 3600),
                 )
-                last_error = None
-                break
             except subprocess.CalledProcessError as error:
-                last_error = error
-        if last_error is not None:
-            raise RuntimeError("No working H.264 playback encoder is available.") from last_error
+                detail = (error.stderr or "").strip()[-500:]
+                raise RuntimeError(
+                    f"ffmpeg could not create the audio playback: {detail or 'no error output'}",
+                ) from error
+        else:
+            video_offset = _playback_track_offset(manifest, "video")
+            filters.insert(0, f"[0:v:0]setpts=PTS-STARTPTS+{_ffmpeg_number(video_offset)}/TB[v]")
+            base = command + [
+                "-filter_complex", ";".join(filters),
+                "-map", "[v]", "-map", audio_map,
+                "-pix_fmt", "yuv420p", "-tag:v", "avc1", "-fps_mode:v", "passthrough",
+                "-profile:v", "high", "-level:v", "4.1",
+                "-b:v", "4M", "-maxrate:v", "6M", "-bufsize:v", "8M",
+                "-threads:v", "2", "-c:a", "aac", "-movflags", "+faststart", "-y",
+            ]
+            last_error: subprocess.CalledProcessError | None = None
+            encoders = ("h264_videotoolbox",) if os.environ.get(
+                "MEETING_ARCHIVE_REQUIRE_HARDWARE_H264", ""
+            ) == "1" else ("h264_videotoolbox", "libx264")
+            for encoder in encoders:
+                temporary.unlink(missing_ok=True)
+                try:
+                    subprocess.run(
+                        base + ["-c:v", encoder, str(temporary)],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=_timeout("MEETING_ARCHIVE_PLAYBACK_TIMEOUT_SECONDS", 4 * 3600),
+                    )
+                    last_error = None
+                    break
+                except subprocess.CalledProcessError as error:
+                    last_error = error
+            if last_error is not None:
+                raise RuntimeError("No working H.264 playback encoder is available.") from last_error
         os.replace(temporary, output)
         atomic_write_text(
             receipt_path,
@@ -438,6 +443,25 @@ def create_playback(archive_directory: Path, manifest) -> Path | None:
     finally:
         temporary.unlink(missing_ok=True)
     return output
+
+
+def _aligned_audio_filters(manifest, audio, first_input: int) -> tuple[list[str], str]:
+    """Place each audio input on the capture clock and mix them into one track."""
+    filters = []
+    labels = []
+    for index, item in enumerate(audio, start=first_input):
+        origin = TranscriptProcessor.CHANNEL_KINDS[item.kind]
+        offset = _playback_track_offset(manifest, origin)
+        label = f"a{index}"
+        delay_milliseconds = _ffmpeg_number(offset * 1_000)
+        filters.append(
+            f"[{index}:a:0]asetpts=PTS-STARTPTS,adelay={delay_milliseconds}:all=1[{label}]"
+        )
+        labels.append(f"[{label}]")
+    if len(labels) == 1:
+        return filters, labels[0]
+    filters.append(f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest[a]")
+    return filters, "[a]"
 
 
 def _assert_generated_namespaces_unowned(manifest) -> None:
@@ -476,8 +500,8 @@ def _ensure_real_generated_directory(root: Path, components: tuple[str, ...]) ->
 
 
 def _playback_recipe(manifest, video, audio) -> dict[str, Any]:
-    sources = [video, *audio]
-    offsets = {"video": _playback_track_offset(manifest, "video")}
+    sources = audio if video is None else [video, *audio]
+    offsets = {} if video is None else {"video": _playback_track_offset(manifest, "video")}
     for item in audio:
         origin = TranscriptProcessor.CHANNEL_KINDS[item.kind]
         offsets[origin] = _playback_track_offset(manifest, origin)
@@ -520,13 +544,22 @@ def _ffmpeg_number(value: float) -> str:
 
 
 def _playback_is_h264(path: Path) -> bool:
+    return _first_stream_codec_is(path, "v:0", "h264")
+
+
+def _playback_is_aac(path: Path) -> bool:
+    """An audio-only playback is current when its audio stream is AAC."""
+    return _first_stream_codec_is(path, "a:0", "aac")
+
+
+def _first_stream_codec_is(path: Path, stream: str, codec: str) -> bool:
     ffprobe = find_executable("ffprobe")
     if ffprobe is None:
         return True
     try:
         completed = subprocess.run(
             [
-                ffprobe, "-v", "error", "-select_streams", "v:0",
+                ffprobe, "-v", "error", "-select_streams", stream,
                 "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", str(path),
             ],
             check=True,
@@ -536,7 +569,7 @@ def _playback_is_h264(path: Path) -> bool:
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
-    return completed.stdout.strip().lower() == "h264"
+    return completed.stdout.strip().lower() == codec
 
 
 def probe_start_time(path: Path) -> float | None:
