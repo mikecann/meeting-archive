@@ -135,13 +135,9 @@ the review evidence. The service retries durable speaker refresh requests so
 interrupted transcript or Notion updates recover without retranscribing or
 enrolling predictions. Per-meeting locks serialize review/confirmation writes.
 
-`vision/build.sh` builds the local Apple Vision OCR helper during Bruce setup.
-Video analysis samples at most 12 frames, three per speaker, within a shared
-20-second budget. It compares text only against previously confirmed full names
-and calendar attendee names. `video_label` and `active_speaker_label` evidence
-is cached separately with video/turn/candidate provenance, never used to lower
-voice thresholds or automatically name a speaker. Missing OCR tools and failed
-frame reads do not block transcription or archiving. See [vision/README.md](vision/README.md).
+The worker no longer reads names off video frames. `review-speakers` still
+returns `evidence_labels` for each speaker, always as an empty list, because
+the app decodes it. A `visual-labels.json` left in an older meeting is ignored.
 
 ## Bruce background service
 

@@ -23,7 +23,7 @@ from .media_validation import MediaValidationError
 from .model_processor import _write_transcript_artifacts
 from .queue import Job, JobQueue, QueueConflict
 from .speakers import SpeakerRegistry
-from .speaker_evidence import automatic_names, refresh_speaker_matches, video_label_evidence
+from .speaker_evidence import automatic_names, refresh_speaker_matches
 
 
 class PermanentProcessingError(RuntimeError):
@@ -440,7 +440,6 @@ def main(argv: list[str] | None = None) -> int:
             reconcile_speaker_refresh(args.db, transcript["meeting_id"], args.revision)
             speaker_ids = sorted({turn["speaker"] for turn in transcript["turns"] if "speaker" in turn})
             metadata = json.loads((args.archive_dir / "metadata.json").read_text(encoding="utf-8"))
-            visual_evidence = video_label_evidence(args.archive_dir, transcript, registry)
             speakers = []
             for value in speaker_ids:
                 observation = registry.observation_record(transcript["meeting_id"], args.revision, value)
@@ -463,7 +462,9 @@ def main(argv: list[str] | None = None) -> int:
                     "suggestion_margin": match.get("suggestion_margin"),
                     "confirmation_count": match.get("confirmation_count", 0),
                     "embedding_available": observation is not None, "excerpts": excerpts,
-                    "evidence_labels": visual_evidence.get(value, []),
+                    # Names are no longer read from video frames. The app still
+                    # decodes this field, so it stays as an empty list.
+                    "evidence_labels": [],
                 })
             _print_json({"schema_version": 1, "meeting_id": transcript["meeting_id"], "manifest_revision": args.revision, "speakers": speakers, "calendar_candidates": _calendar_candidates(metadata)})
             return 0

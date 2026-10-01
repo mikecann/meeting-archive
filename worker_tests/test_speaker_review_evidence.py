@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 from contextlib import redirect_stdout
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
@@ -16,7 +16,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
 from meeting_archive_worker.speaker_evidence import (  # noqa: E402
     automatic_names,
     refresh_speaker_matches,
-    video_label_evidence,
 )
 from meeting_archive_worker.cli import main as cli_main, _speaker_counts_for_status  # noqa: E402
 from meeting_archive_worker.queue import JobQueue  # noqa: E402
@@ -88,44 +87,6 @@ class SpeakerEvidenceTests(unittest.TestCase):
         result["turns"].append({"speaker": "microphone:SPEAKER_00", "text": "unnamed"})
         self.assertEqual(automatic_names(result), {})
 
-    def test_visual_evidence_cache_reuses_frames_but_invalidates_new_candidates(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "playback").mkdir()
-            (root / "playback/meeting.mp4").write_bytes(b"test video")
-            (root / "transcripts/v2").mkdir(parents=True)
-            (root / "metadata.json").write_text(json.dumps({"attendees": ["James Smith"]}))
-            helper = root / "ocr"
-            helper.write_text("test helper")
-            registry = Mock()
-            registry.database = root / "worker.sqlite"
-            labels = {"microphone:SPEAKER_00": [{"name": "Mike Cann", "timestamps": [2.0], "source": "video_label"}]}
-            with patch("meeting_archive_worker.speaker_evidence.known_names", return_value=["Mike Cann"]) as names, \
-                 patch("meeting_archive_worker.speaker_evidence.default_helper_path", return_value=helper), \
-                 patch("meeting_archive_worker.speaker_evidence.extract_visual_labels", return_value=labels) as extract:
-                self.assertEqual(video_label_evidence(root, transcript(), registry), labels)
-                self.assertEqual(video_label_evidence(root, transcript(), registry), labels)
-                self.assertEqual(extract.call_count, 1)
-                self.assertEqual(extract.call_args.args[2], ["James Smith", "Mike Cann"])
-                names.return_value = ["Mike Cann", "Kelsie Cann"]
-                self.assertEqual(video_label_evidence(root, transcript(), registry), labels)
-                self.assertEqual(extract.call_count, 2)
-
-    def test_optional_video_analysis_failure_does_not_break_review_or_cache_failure(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "playback").mkdir()
-            (root / "playback/meeting.mp4").write_bytes(b"test video")
-            (root / "transcripts/v2").mkdir(parents=True)
-            helper = root / "ocr"
-            helper.write_text("test helper")
-            registry = Mock()
-            with patch("meeting_archive_worker.speaker_evidence.known_names", return_value=["Mike Cann"]), \
-                 patch("meeting_archive_worker.speaker_evidence.default_helper_path", return_value=helper), \
-                 patch("meeting_archive_worker.speaker_evidence.extract_visual_labels", side_effect=RuntimeError("unavailable")):
-                self.assertEqual(video_label_evidence(root, transcript(), registry), {})
-                self.assertFalse((root / "transcripts/v2/visual-labels.json").exists())
-
 
 class ReviewIntegrationTests(unittest.TestCase):
     def setup_archive(self, root, score):
@@ -178,6 +139,25 @@ class ReviewIntegrationTests(unittest.TestCase):
             self.assertEqual(registry.assignments("current", 2), {})
             with sqlite3.connect(database) as connection:
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM voice_profiles").fetchone()[0], 2)
+
+    def test_review_keeps_an_empty_evidence_list_and_ignores_old_video_labels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            database, _, archive = self.setup_archive(Path(temporary), .72)
+            (archive / "playback").mkdir()
+            (archive / "playback/meeting.mp4").write_bytes(b"old video playback")
+            # A v1 meeting can still hold the cache the removed OCR step wrote.
+            (archive / "transcripts/v2/visual-labels.json").write_text(json.dumps({
+                "key": "stale",
+                "labels": {"microphone:SPEAKER_00": [
+                    {"name": "Mike Cann", "timestamps": [2.0], "source": "video_label"},
+                ]},
+            }))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = cli_main(["review-speakers", "--archive-dir", str(archive), "--revision", "2", "--db", str(database)])
+            self.assertEqual(code, 0)
+            speakers = json.loads(output.getvalue())["speakers"]
+            self.assertEqual([speaker["evidence_labels"] for speaker in speakers], [[]])
 
     def test_status_does_not_hide_a_name_that_was_not_persisted(self):
         with tempfile.TemporaryDirectory() as temporary:

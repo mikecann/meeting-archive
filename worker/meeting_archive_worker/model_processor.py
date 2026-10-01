@@ -19,7 +19,7 @@ from .manifest import verify_incoming
 from .processing import TranscriptProcessor, timeline_offset
 from .queue import Job
 from .speakers import SpeakerRegistry
-from .speaker_evidence import refresh_speaker_matches, video_label_evidence
+from .speaker_evidence import refresh_speaker_matches
 
 
 PLAYBACK_PATH = "playback/meeting.mp4"
@@ -206,8 +206,6 @@ def process(archive_directory: Path, job: Job) -> None:
         _refresh_confirmed_names(existing, os.environ.get("MEETING_ARCHIVE_WORKER_DB"))
         _write_transcript_artifacts(output, existing)
         create_playback(archive_directory, manifest)
-        if os.environ.get("MEETING_ARCHIVE_WORKER_DB"):
-            video_label_evidence(archive_directory, existing, SpeakerRegistry(os.environ["MEETING_ARCHIVE_WORKER_DB"]))
         return
     if os.environ.get("HF_TOKEN", "").strip():
         # Fail an over-budget track in seconds, not after a full Whisper pass.
@@ -258,13 +256,11 @@ def process(archive_directory: Path, job: Job) -> None:
         result["processing"]["speaker_observations_committed"] = True
     else:
         result["processing"]["speaker_observations_committed"] = False
-    # OCR needs no speech model. Release those before optional frame analysis
-    # so Bruce does not keep both workloads resident on its 8 GB machine.
+    # The playback encode needs no speech model. Release those first so Bruce
+    # does not keep both workloads resident on its 8 GB machine.
     del transcriber
     _write_transcript_artifacts(output, result)
     create_playback(archive_directory, manifest)
-    if worker_db:
-        video_label_evidence(archive_directory, result, registry)
 
 
 def _refresh_confirmed_names(result: dict[str, Any], worker_db: str | None) -> None:
