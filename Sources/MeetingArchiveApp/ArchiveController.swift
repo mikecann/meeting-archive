@@ -511,6 +511,8 @@ final class ArchiveController: ObservableObject {
             let events = calendar.suggestions(start: entry.startedAt, end: callEnded, selectedCalendarIDs: settings.selectedCalendarIDs)
             if let match = CalendarRanking.best(events, start: entry.startedAt, end: callEnded) {
                 meeting.title = entry.part > 1 ? "\(match.title) (part \(entry.part))" : match.title
+                // Bruce never gives a calendar title an AI one in its place.
+                meeting.titleSource = .calendar
             }
             try ModelCodec.encoder.encode(events).write(to: directory.appendingPathComponent("calendar.json"), options: .atomic)
             try store?.insertMeeting(meeting)
@@ -548,6 +550,7 @@ final class ArchiveController: ObservableObject {
         MeetingRecord(
             id: entry.id,
             title: CaptureNotice.defaultTitle(source: entry.sourceApplication.displayName, startedAt: entry.startedAt, part: entry.part),
+            titleSource: .default,
             sourceApplication: entry.sourceApplication,
             startedAt: entry.startedAt,
             endedAt: ended,
@@ -666,13 +669,15 @@ final class ArchiveController: ObservableObject {
         let title = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty, var record = meetings.first(where: { $0.id == meetingID }) else { return false }
         do {
+            // Either way the title becomes the user's, so neither Bruce's AI
+            // title nor a later status refresh replaces it.
             if record.acceptance.isPending {
                 // Not uploaded yet, so the new title travels with the upload.
                 record = record.updatingTitle(title, at: Date())
                 try store?.updateMeeting(record)
             } else {
                 let saved = try await workerStatusClient.rename(meetingID: meetingID, title: title, configuration: transferConfiguration)
-                record = record.renamingArchived(saved, at: Date())
+                record = record.renamingArchived(saved, at: Date(), titleSource: .user)
                 try store?.updateMeeting(record)
             }
             refresh()
@@ -744,11 +749,31 @@ final class ArchiveController: ObservableObject {
             workerStatuses.merge(fetched) { _, fresh in fresh }
             workerStatusFailure = nil
             workerStatusFailures = 0
+            adoptArchivedTitles(fetched)
             presentReadySpeakerReview()
         } catch {
             workerStatusFailure = error.localizedDescription
             workerStatusFailures += 1
         }
+    }
+
+    /// The library shows the local title, so follow Bruce's: an AI title from
+    /// the summary, or a rename made there. A title the user typed here stays.
+    private func adoptArchivedTitles(_ statuses: [UUID: WorkerMeetingStatus]) {
+        var adopted = false
+        for (meetingID, status) in statuses {
+            guard let record = meetings.first(where: { $0.id == meetingID }),
+                  status.manifestRevision == record.metadataRevision,
+                  let updated = record.adoptingArchivedTitle(status.title, at: Date()) else { continue }
+            do {
+                try store?.updateMeeting(updated)
+                adopted = true
+                if followUpMeetingID == meetingID { followUpWindow?.title = updated.title }
+            } catch {
+                fail("Could not save the meeting's title from Bruce. \(error.localizedDescription)")
+            }
+        }
+        if adopted { refresh() }
     }
 
     func followUpPhase(for record: MeetingRecord) -> MeetingFollowUpPhase {

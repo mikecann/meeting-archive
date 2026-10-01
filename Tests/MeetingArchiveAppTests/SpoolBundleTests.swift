@@ -15,6 +15,31 @@ final class SpoolBundleTests: XCTestCase {
         XCTAssertEqual(metadata["duration_seconds"] as? Double, 60)
     }
 
+    func testTitleSourceTellsTheWorkerWhetherItMayRetitle() throws {
+        for (source, expected) in [(MeetingTitleSource.default, "default"), (.calendar, "calendar"), (.user, "user")] {
+            let directory = try bundle(with: ["microphone.m4a", "incoming.m4a"])
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var meeting = record()
+            meeting.titleSource = source
+
+            _ = try SpoolBundle.prepare(record: meeting, directory: directory)
+
+            let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("metadata.json"))) as! [String: Any]
+            XCTAssertEqual(metadata["title_source"] as? String, expected)
+        }
+    }
+
+    func testARecordFromBeforeTitleSourcesLeavesItOut() throws {
+        let directory = try bundle(with: ["microphone.m4a"])
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        _ = try SpoolBundle.prepare(record: record(), directory: directory)
+
+        let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("metadata.json"))) as! [String: Any]
+        // The worker then judges the title by the app's old default pattern.
+        XCTAssertNil(metadata["title_source"])
+    }
+
     func testAnAudioOnlyCaptureIsArchivedWithBothTracks() throws {
         let directory = try bundle(with: ["microphone.m4a", "incoming.m4a"])
         defer { try? FileManager.default.removeItem(at: directory) }

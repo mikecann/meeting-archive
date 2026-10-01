@@ -15,6 +15,20 @@ enum WorkerPublicationState: String, Codable, Equatable, Sendable {
     case succeeded
 }
 
+/// Bruce's AI summary stage. It is optional, so it never makes a meeting
+/// need attention; a pending one only keeps the meeting polled for its title.
+enum WorkerSummaryState: String, Equatable, Sendable {
+    case ready
+    case summarizing
+    case retryWait = "retry_wait"
+    case succeeded
+    case permanentFailure = "permanent_failure"
+
+    var isPending: Bool {
+        self == .ready || self == .summarizing || self == .retryWait
+    }
+}
+
 enum WorkerMeetingPhase: String, Equatable, Sendable {
     case archived
     case processing
@@ -43,6 +57,9 @@ struct WorkerMeetingStatus: Equatable, Sendable {
     var manifestRevision: Int? = nil
     var totalSpeakerCount: Int? = nil
     var unconfirmedSpeakerCount: Int? = nil
+    /// The title Bruce shows, which may be an AI title or a rename made there.
+    var title: String? = nil
+    var summaryState: WorkerSummaryState? = nil
 
     private var speakerReviewDetail: String {
         guard totalSpeakerCount != nil, let unconfirmedSpeakerCount else {
@@ -92,10 +109,12 @@ struct WorkerStatusResponse: Codable, Equatable, Sendable {
     var counts: [String: Int]
     var jobs: [WorkerProcessingJob]
     var publication: WorkerPublicationStatus
+    /// Nil from a worker without AI summaries.
+    var summary: WorkerSummaryStatus? = nil
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
-        case counts, jobs, publication
+        case counts, jobs, publication, summary
     }
 
     func statuses(for meetingIDs: some Sequence<UUID>) throws -> [UUID: WorkerMeetingStatus] {
@@ -140,6 +159,14 @@ struct WorkerStatusResponse: Codable, Equatable, Sendable {
         let publicationByJob = Dictionary(
             uniqueKeysWithValues: publication.jobs.map { ($0.processingJobID, $0) }
         )
+        // Optional extra detail, so a stray or repeated entry is ignored
+        // rather than failing the whole status.
+        let summaryByJob = Dictionary(
+            (summary?.jobs ?? []).compactMap { job in
+                WorkerSummaryState(rawValue: job.state).map { (job.processingJobID, $0) }
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
         return Dictionary(uniqueKeysWithValues: requested.map { meetingID in
             guard let job = jobsByMeeting[meetingID] else {
                 return (
@@ -155,8 +182,10 @@ struct WorkerStatusResponse: Codable, Equatable, Sendable {
                     )
                 )
             }
-            let publicationJob = publicationByJob[job.id]
-            return (meetingID, Self.makeStatus(job: job, publication: publicationJob))
+            var status = Self.makeStatus(job: job, publication: publicationByJob[job.id])
+            status.title = job.title
+            status.summaryState = summaryByJob[job.id]
+            return (meetingID, status)
         })
     }
 
@@ -231,6 +260,8 @@ struct WorkerProcessingJob: Codable, Equatable, Sendable {
     var lastError: String?
     var totalSpeakerCount: Int?
     var unconfirmedSpeakerCount: Int?
+    /// Missing from older workers.
+    var title: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -245,6 +276,24 @@ struct WorkerProcessingJob: Codable, Equatable, Sendable {
         case lastError = "last_error"
         case totalSpeakerCount = "total_speaker_count"
         case unconfirmedSpeakerCount = "unconfirmed_speaker_count"
+        case title
+    }
+}
+
+struct WorkerSummaryStatus: Codable, Equatable, Sendable {
+    var jobs: [WorkerSummaryJob]
+}
+
+struct WorkerSummaryJob: Codable, Equatable, Sendable {
+    var processingJobID: Int
+    /// Kept as text: a state this app doesn't know is ignored, not an error.
+    var state: String
+    var lastError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case processingJobID = "processing_job_id"
+        case state
+        case lastError = "last_error"
     }
 }
 
@@ -641,6 +690,8 @@ enum WorkerStatusPolling {
     static func isSettled(_ status: WorkerMeetingStatus?, revision: Int) -> Bool {
         guard let status, status.manifestRevision == revision else { return false }
         if status.processingState == .permanentFailure { return true }
+        // A summary on its way brings an AI title, so keep asking until it lands.
+        if status.summaryState?.isPending == true { return false }
         return status.processingState == .succeeded && status.publicationState == .succeeded
     }
 
