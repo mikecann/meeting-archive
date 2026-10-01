@@ -69,11 +69,20 @@ class ServiceScriptContractTests(unittest.TestCase):
 
         self.assertNotIn("vision", installer)
 
+    def test_summaries_need_no_sdk(self) -> None:
+        # OpenRouter is called with the standard library.
+        installer = (WORKER_ROOT / "install-bruce.sh").read_text(encoding="utf-8")
+        requirements = (WORKER_ROOT / "requirements.txt").read_text(encoding="utf-8")
+
+        self.assertNotIn("anthropic", installer)
+        self.assertNotIn("anthropic", requirements)
+
     def test_worker_wrapper_does_not_print_loaded_credentials(self) -> None:
         wrapper = (WORKER_ROOT / "run-service-bruce.sh").read_text(encoding="utf-8")
 
         self.assertNotIn("echo \"${HF_TOKEN}", wrapper)
         self.assertNotIn("echo \"${MEETING_ARCHIVE_NOTION_TOKEN}", wrapper)
+        self.assertNotIn("OPENROUTER_API_KEY}", wrapper)
         self.assertNotIn("ANTHROPIC_API_KEY}", wrapper)
         self.assertNotIn("set -x", wrapper)
 
@@ -84,9 +93,9 @@ class ServiceScriptContractTests(unittest.TestCase):
         self.assertIsNotNone(unset)
         cleared = set(unset.group(1).split())  # type: ignore[union-attr]
         # A key inherited from launchd or a login shell must never reach the
-        # worker, and nothing may redirect the Anthropic key to another host.
+        # worker. The old Anthropic variables stay cleared as well.
         for variable in (
-            "HF_TOKEN", "MEETING_ARCHIVE_NOTION_TOKEN",
+            "HF_TOKEN", "MEETING_ARCHIVE_NOTION_TOKEN", "OPENROUTER_API_KEY",
             "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
         ):
             self.assertIn(variable, cleared)

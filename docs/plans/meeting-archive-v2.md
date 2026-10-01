@@ -109,10 +109,11 @@ Each with headphones and once on speakers:
 
 - The calendar only ever matched one family event, so the Convex Google account
   is probably missing from macOS Internet Accounts. Mike to check.
-- AI titles and summaries are built: Claude writes a title, three to five
-  summary points and action items for each meeting, shown in Notion and
-  synced to the app's library. They stay off until Mike adds `anthropicApiKey`
-  to Bruce's protected credentials file, reruns `install-bruce.sh` for the
-  `anthropic` package and restarts the worker. The first start then summarizes
-  earlier meetings too, at roughly 5 to 15 cents each. Only titles nobody
-  chose are replaced; calendar titles and renames stay.
+- AI titles and summaries are built: Claude Opus 5.5, through Mike's existing
+  OpenRouter account, writes a title, three to five summary points and action
+  items for each meeting, shown in Notion and synced to the app's library.
+  They stay off until the updated worker is on Bruce, `openRouterApiKey` is in
+  its protected credentials file and the worker is restarted. No extra package
+  is needed. The first start then summarizes earlier meetings too, at roughly
+  5 to 15 US cents each. Only titles nobody chose are replaced; calendar
+  titles and renames stay.

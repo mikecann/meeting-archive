@@ -13,7 +13,7 @@ from collections.abc import MutableMapping
 DEFAULT_PATH = Path("/Volumes/CannMedia/MeetingArchive/runtime/secrets/credentials.json")
 ACCOUNTS = {"huggingFaceToken": "HF_TOKEN", "notionToken": "MEETING_ARCHIVE_NOTION_TOKEN"}
 # AI titles and summaries are off until this key is added to the file.
-OPTIONAL_ACCOUNTS = {"anthropicApiKey": "ANTHROPIC_API_KEY"}
+OPTIONAL_ACCOUNTS = {"openRouterApiKey": "OPENROUTER_API_KEY"}
 
 
 class CredentialError(RuntimeError):
@@ -44,7 +44,7 @@ def load_credentials(path: Path = DEFAULT_PATH, environment: MutableMapping[str,
         ):
             raise CredentialError(
                 "Credential file must contain the approved nonempty accounts: huggingFaceToken, "
-                "notionToken and optionally anthropicApiKey.",
+                "notionToken and optionally openRouterApiKey.",
             )
     except CredentialError:
         raise

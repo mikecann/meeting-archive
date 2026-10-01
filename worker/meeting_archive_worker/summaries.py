@@ -1,18 +1,19 @@
-"""AI titles and short summaries for transcribed meetings, written by Claude.
+"""AI titles and short summaries for transcribed meetings, written by Claude through OpenRouter.
 
 This is its own durable stage, like Notion publication. It runs on its own
-service thread, only when ANTHROPIC_API_KEY is set, once a meeting's
-transcript is written. A Claude outage never holds up transcription or
+service thread, only when OPENROUTER_API_KEY is set, once a meeting's
+transcript is written. An OpenRouter outage never holds up transcription or
 Notion: the page is published without a summary and updated when one arrives.
 
-The anthropic SDK is imported only when a summary is requested, so the
-standard-library test suite runs without it.
+Requests go through the standard library's urllib, so the worker needs no SDK
+and the tests never touch the network.
 """
 
 from __future__ import annotations
 
+import email.utils
 import hashlib
-import importlib.util
+import http.client
 import json
 import math
 import os
@@ -22,6 +23,8 @@ import sqlite3
 import stat
 import sys
 import time
+import urllib.error
+import urllib.request
 import uuid
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -37,15 +40,26 @@ from .titles import apply_generated_title, effective_title, normalize_title, tit
 
 SUMMARY_NAME = "summary.json"
 SCHEMA_VERSION = 1
-MODEL = "claude-opus-5-5"
-# Opts in to Anthropic's recommended fallback model when a safety classifier
-# declines a request, so a false positive doesn't cost the summary.
-FALLBACK_BETA = "server-side-fallback-2026-07-01"
-# Thinking can't be turned off on this model and counts towards max_tokens.
-# Low effort keeps it short; if it still runs out, one retry gets more room.
-MAX_TOKENS = 4_000
+PROVIDER = "openrouter"
+ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+APP_TITLE = "Meeting Archive"
+API_KEY_VARIABLE = "OPENROUTER_API_KEY"
+MODEL_VARIABLE = "MEETING_ARCHIVE_SUMMARY_MODEL"
+DEFAULT_MODEL = "anthropic/claude-opus-5.5"
+# Claude always thinks before answering and the thinking counts towards
+# max_tokens. Low effort keeps it short; if it still runs out, one retry gets
+# more room.
+MAX_TOKENS = 2_000
 LONG_MAX_TOKENS = 16_000
 REQUEST_TIMEOUT_SECONDS = 300.0
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_ERROR_BODY_BYTES = 64 * 1024
+# Credits come back when someone tops up, not a minute later, so running out
+# waits the longest backoff between tries.
+OUT_OF_CREDITS_WAIT_SECONDS = RETRY_MAXIMUM_SECONDS
+# A longer Retry-After counts as a day, so one odd header can't park a summary
+# for weeks.
+MAX_RETRY_AFTER_SECONDS = 86_400.0
 # About 750k tokens, inside the model's 1M context. A longer transcript fails
 # visibly rather than being cut short.
 MAX_PROMPT_CHARACTERS = 3_000_000
@@ -90,7 +104,17 @@ class PermanentSummaryError(SummaryError):
 
 
 class TransientSummaryError(SummaryError):
-    """Claude or the network had a problem. Retried with backoff."""
+    """OpenRouter, the model or the network had a problem. Retried with backoff."""
+
+    def __init__(self, message: str, *, retry_after: float = 0.0) -> None:
+        super().__init__(message)
+        # The least time to wait before trying again, from Retry-After or an
+        # empty credit balance. The queue's own backoff applies when longer.
+        self.retry_after = retry_after
+
+
+class UnusableAnswerError(TransientSummaryError):
+    """The answer wasn't JSON in the expected shape. Asked for once more, then permanent."""
 
 
 def _log(message: str) -> None:
@@ -100,19 +124,19 @@ def _log(message: str) -> None:
 def summaries_disabled_reason(environment: Mapping[str, str] | None = None) -> str | None:
     """Why summaries are off, or None when they can run."""
     environment = os.environ if environment is None else environment
-    if not environment.get("ANTHROPIC_API_KEY", "").strip():
-        return "ANTHROPIC_API_KEY is not set"
-    try:
-        installed = importlib.util.find_spec("anthropic") is not None
-    except (ImportError, ValueError):
-        installed = False
-    if not installed:
-        return "the anthropic package is not installed in the worker environment"
+    if not environment.get(API_KEY_VARIABLE, "").strip():
+        return f"{API_KEY_VARIABLE} is not set"
     return None
 
 
 def summaries_enabled(environment: Mapping[str, str] | None = None) -> bool:
     return summaries_disabled_reason(environment) is None
+
+
+def summary_model(environment: Mapping[str, str] | None = None) -> str:
+    """The OpenRouter model to ask: MEETING_ARCHIVE_SUMMARY_MODEL, or Claude Opus 5.5."""
+    environment = os.environ if environment is None else environment
+    return environment.get(MODEL_VARIABLE, "").strip() or DEFAULT_MODEL
 
 
 # Prompt
@@ -266,154 +290,268 @@ def build_prompt(
     return "\n".join(details) + "\n\nTranscript\n" + "\n".join(lines) + "\n"
 
 
-def input_digest(prompt: str) -> str:
-    """Identifies everything sent to Claude, so an unchanged meeting isn't paid for twice."""
+def input_digest(prompt: str, model: str) -> str:
+    """Identifies everything sent to the model, so an unchanged meeting isn't paid for twice."""
     material = json.dumps(
-        {"model": MODEL, "system": SYSTEM_PROMPT, "schema": OUTPUT_SCHEMA, "prompt": prompt},
+        {"model": model, "system": SYSTEM_PROMPT, "schema": OUTPUT_SCHEMA, "prompt": prompt},
         ensure_ascii=False,
         sort_keys=True,
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-# Claude
+# The answer
 
 
 def _points(value: Any, label: str, minimum: int, maximum: int) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise TransientSummaryError(f"Claude's {label} was not a list of text.")
+        raise UnusableAnswerError(f"The answer's {label} were not a list of text.")
     points = []
     for item in value:
         text = re.sub(r"^[-*•]\s*", "", " ".join(item.split())).strip()
         if text:
             points.append(text)
     if not minimum <= len(points) <= maximum:
-        raise TransientSummaryError(f"Claude returned {len(points)} {label}.")
+        raise UnusableAnswerError(f"The answer had {len(points)} {label}.")
     if any(len(point) > MAX_POINT_CHARACTERS for point in points):
-        raise TransientSummaryError(f"Claude's {label} were unexpectedly long.")
+        raise UnusableAnswerError(f"The answer's {label} were unexpectedly long.")
     return points
 
 
 def validate_answer(answer: Any) -> dict[str, Any]:
-    """Check and tidy Claude's JSON answer."""
-    if not isinstance(answer, dict) or not isinstance(answer.get("title"), str):
-        raise TransientSummaryError("Claude's answer had no title.")
+    """Check the answer against OUTPUT_SCHEMA, which not every provider enforces, then tidy it."""
+    if not isinstance(answer, dict) or set(answer) != set(OUTPUT_SCHEMA["required"]):
+        raise UnusableAnswerError("The answer was not an object with just a title, summary and action_items.")
+    if not isinstance(answer["title"], str):
+        raise UnusableAnswerError("The answer's title was not text.")
     title = " ".join(answer["title"].split()).strip(" \"'“”‘’").rstrip(".").strip()
     try:
         title = normalize_title(title)
     except ValueError as error:
-        raise TransientSummaryError(f"Claude's title was unusable: {error}") from error
+        raise UnusableAnswerError(f"The answer's title was unusable: {error}") from None
     return {
         "title": title,
-        "summary": _points(answer.get("summary"), "summary points", 1, 10),
-        "action_items": _points(answer.get("action_items"), "action items", 0, 20),
+        "summary": _points(answer["summary"], "summary points", 1, 10),
+        "action_items": _points(answer["action_items"], "action items", 0, 20),
     }
 
 
-def _read_answer(response: Any) -> dict[str, Any]:
-    stop_reason = getattr(response, "stop_reason", None)
-    if stop_reason == "refusal":
-        # Branch on stop_reason; stop_details is informational and may be empty.
-        details = getattr(response, "stop_details", None)
-        category = getattr(details, "category", None)
-        reason = f" ({category})" if category else ""
-        if getattr(details, "recommended_model", None):
-            # The fallback model was busy, so a later attempt can still be served.
-            raise TransientSummaryError(f"Claude declined to summarize{reason} and the fallback model was busy.")
-        raise PermanentSummaryError(f"Claude declined to summarize this meeting{reason}.")
-    if stop_reason == "max_tokens":
-        raise PermanentSummaryError(f"Claude's answer ran past {LONG_MAX_TOKENS} tokens.")
-    if stop_reason != "end_turn":
-        raise TransientSummaryError(f"Claude stopped before finishing ({stop_reason}).")
-    # A response can start with thinking or fallback blocks; the answer is the text block.
-    text = next(
-        (getattr(block, "text", None) for block in getattr(response, "content", None) or []
-         if getattr(block, "type", None) == "text"),
-        None,
-    )
-    if not isinstance(text, str):
-        raise TransientSummaryError("Claude's answer had no text.")
+# OpenRouter
+
+
+# Printable ASCII with no spaces, like every OpenRouter key. A line break would
+# make http.client refuse the header in an error that repeats it, key included.
+_API_KEY_PATTERN = re.compile(r"[\x21-\x7e]+")
+
+
+def _retry_after_seconds(headers: Any) -> float:
+    """How long a Retry-After header asks us to wait, or 0 without a usable one."""
+    value = headers.get("Retry-After") if headers is not None else None
+    if value is None:
+        return 0.0
+    value = str(value).strip()
     try:
-        answer = json.loads(text)
-    except json.JSONDecodeError as error:
-        raise TransientSummaryError("Claude's answer was not valid JSON.") from error
-    result = validate_answer(answer)
-    result["served_by"] = str(getattr(response, "model", None) or MODEL)
-    usage = getattr(response, "usage", None)
-    result["usage"] = {}
-    for key in ("input_tokens", "output_tokens"):
-        value = getattr(usage, key, None)
-        if isinstance(value, int) and not isinstance(value, bool):
-            result["usage"][key] = value
-    return result
+        seconds = float(value)
+    except ValueError:
+        try:
+            when = email.utils.parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return 0.0
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        seconds = (when - datetime.now(UTC)).total_seconds()
+    if not math.isfinite(seconds) or seconds <= 0:
+        return 0.0
+    return min(seconds, MAX_RETRY_AFTER_SECONDS)
 
 
-def _status_message(prefix: str, error: Any) -> str:
-    detail = " ".join(str(getattr(error, "message", "") or "").split())[:300]
-    status = getattr(error, "status_code", None)
-    code = f" (HTTP {status})" if status else ""
-    return f"{prefix}{code}: {detail}" if detail else f"{prefix}{code}."
+def _status_error(status: Any, detail: Any, headers: Any = None) -> SummaryError:
+    """Sort an OpenRouter error by whether sending the same request again can help.
+
+    Only OpenRouter's short message is kept. Its metadata can quote the
+    transcript (a moderation flag does), so it never reaches a log.
+    """
+    message = ""
+    if isinstance(detail, dict):
+        message = " ".join(str(detail.get("message") or "").split())[:300].rstrip(".")
+    if isinstance(status, bool) or not isinstance(status, int):
+        return TransientSummaryError(f"OpenRouter reported an error ({message or 'no details'}).")
+    label = f"HTTP {status}: {message}" if message else f"HTTP {status}"
+    wait = _retry_after_seconds(headers)
+    if status == 401:
+        return PermanentSummaryError(
+            f"OpenRouter rejected the API key ({label}). Fix openRouterApiKey in Bruce's "
+            "credentials file, restart the worker, then retry.",
+        )
+    if status == 402:
+        return TransientSummaryError(
+            f"The OpenRouter key is out of credits ({label}). It's tried again every hour, "
+            "so topping up lets it carry on.",
+            retry_after=max(OUT_OF_CREDITS_WAIT_SECONDS, wait),
+        )
+    if status == 429:
+        return TransientSummaryError(f"OpenRouter is rate limiting summaries ({label}).", retry_after=wait)
+    if 400 <= status < 500 and status not in (408, 409):
+        # A bad request (400), a key without permission or a moderation block
+        # (403), an unknown model (404): the same request gets the same answer.
+        return PermanentSummaryError(f"OpenRouter refused the summary request ({label}).")
+    return TransientSummaryError(f"OpenRouter is unavailable ({label}).", retry_after=wait)
 
 
-class ClaudeSummarizer:
-    """Asks Claude for a title, summary and action items as structured JSON."""
+def _http_error(error: urllib.error.HTTPError) -> SummaryError:
+    try:
+        raw = error.read(MAX_ERROR_BODY_BYTES)
+    except (OSError, ValueError, http.client.HTTPException):
+        raw = b""
+    finally:
+        error.close()
+    try:
+        body = json.loads(raw) if raw else None
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        body = None
+    return _status_error(error.code, body.get("error") if isinstance(body, dict) else None, error.headers)
 
-    def __init__(self, api_key: str, *, client: Any = None) -> None:
+
+def _network_error(error: BaseException) -> TransientSummaryError:
+    reason = error.reason if isinstance(error, urllib.error.URLError) else error
+    name = type(reason if isinstance(reason, BaseException) else error).__name__
+    return TransientSummaryError(f"Couldn't reach OpenRouter ({name}).")
+
+
+def _choice(completion: dict[str, Any]) -> dict[str, Any]:
+    """The first choice, once refusals and errors in a 200 response are ruled out."""
+    choices = completion.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        # A provider that fails after OpenRouter has sent its headers leaves
+        # only an error object in a 200 response.
+        error = completion.get("error")
+        if isinstance(error, dict):
+            raise _status_error(error.get("code"), error)
+        raise TransientSummaryError("OpenRouter's response had no answer in it.")
+    choice = choices[0]
+    message = choice.get("message")
+    refusal = message.get("refusal") if isinstance(message, dict) else None
+    if choice.get("native_finish_reason") == "refusal" or (isinstance(refusal, str) and refusal.strip()):
+        raise PermanentSummaryError("The model declined to summarize this meeting.")
+    if choice.get("finish_reason") == "content_filter":
+        raise PermanentSummaryError("A content filter stopped this meeting's summary.")
+    if choice.get("finish_reason") == "error":
+        error = choice.get("error")
+        raise _status_error(error.get("code") if isinstance(error, dict) else None, error)
+    return choice
+
+
+def _answer(choice: dict[str, Any]) -> dict[str, Any]:
+    message = choice.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str):
+        raise UnusableAnswerError("The answer had no text.")
+    try:
+        answer = json.loads(content)
+    except json.JSONDecodeError:
+        raise UnusableAnswerError("The answer was not valid JSON.") from None
+    return validate_answer(answer)
+
+
+def _add_usage(total: dict[str, Any], usage: Any) -> None:
+    """Add one response's tokens and cost, in OpenRouter credits (US dollars), to the total."""
+    total["requests"] = total.get("requests", 0) + 1
+    if not isinstance(usage, dict):
+        return
+    details = usage.get("completion_tokens_details")
+    counts = {
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+        "reasoning_tokens": details.get("reasoning_tokens") if isinstance(details, dict) else None,
+    }
+    for key, value in counts.items():
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            total[key] = total.get(key, 0) + value
+    cost = usage.get("cost")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost) and cost >= 0:
+        total["cost"] = round(total.get("cost", 0) + cost, 8)
+
+
+class OpenRouterSummarizer:
+    """Asks a model on OpenRouter for a title, summary and action items as structured JSON."""
+
+    def __init__(self, api_key: str, *, model: str = DEFAULT_MODEL) -> None:
+        if not _API_KEY_PATTERN.fullmatch(api_key):
+            raise PermanentSummaryError(
+                "The OpenRouter API key has spaces or unexpected characters. Fix openRouterApiKey "
+                "in Bruce's credentials file, restart the worker, then retry.",
+            )
         self.api_key = api_key
-        self.client = client
+        self.model = model
 
     def summarize(self, prompt: str) -> dict[str, Any]:
-        import anthropic  # Only Bruce's worker environment has the SDK.
+        """At most three requests: one more with room to finish, one more for a usable answer."""
+        usage: dict[str, Any] = {}
+        max_tokens = MAX_TOKENS
+        asked_again = False
+        while True:
+            completion = self._complete(prompt, max_tokens)
+            _add_usage(usage, completion.get("usage"))
+            choice = _choice(completion)
+            if choice.get("finish_reason") == "length":
+                if max_tokens >= LONG_MAX_TOKENS:
+                    raise PermanentSummaryError(f"The answer ran past {LONG_MAX_TOKENS} tokens.")
+                max_tokens = LONG_MAX_TOKENS
+                continue
+            try:
+                answer = _answer(choice)
+            except UnusableAnswerError as error:
+                if asked_again:
+                    raise PermanentSummaryError(f"Asked twice and neither answer was usable. {error}") from None
+                asked_again = True
+                continue
+            # The model OpenRouter actually used, which can be a dated snapshot.
+            served_by = completion.get("model")
+            answer["served_by"] = served_by if isinstance(served_by, str) and served_by.strip() else self.model
+            answer["usage"] = usage
+            return answer
 
-        if self.client is not None:
-            return self._summarize(anthropic, self.client, prompt)
-        # Closed after each summary, so the long-running service keeps no
-        # idle connections open between meetings.
-        with anthropic.Anthropic(api_key=self.api_key, timeout=REQUEST_TIMEOUT_SECONDS) as client:
-            return self._summarize(anthropic, client, prompt)
-
-    def _summarize(self, anthropic: Any, client: Any, prompt: str) -> dict[str, Any]:
-        response = self._create(anthropic, client, prompt, MAX_TOKENS)
-        if getattr(response, "stop_reason", None) == "max_tokens":
-            response = self._create(anthropic, client, prompt, LONG_MAX_TOKENS)
-        return _read_answer(response)
-
-    @staticmethod
-    def _create(anthropic: Any, client: Any, prompt: str, max_tokens: int) -> Any:
+    def _complete(self, prompt: str, max_tokens: int) -> dict[str, Any]:
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": max_tokens,
+            "reasoning": {"effort": "low"},
+            "usage": {"include": True},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "meeting_summary", "strict": True, "schema": OUTPUT_SCHEMA},
+            },
+        }
+        request = urllib.request.Request(
+            ENDPOINT,
+            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json", "X-Title": APP_TITLE},
+            method="POST",
+        )
+        # Left off any redirect, so the key only ever goes to OpenRouter.
+        request.add_unredirected_header("Authorization", f"Bearer {self.api_key}")
+        # Every failure becomes a message of our own. Nothing about the request,
+        # which holds the key and the transcript, is passed on.
         try:
-            return client.beta.messages.create(
-                model=MODEL,
-                max_tokens=max_tokens,
-                betas=[FALLBACK_BETA],
-                fallbacks="default",
-                output_config={
-                    "effort": "low",
-                    "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
-                },
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
-            )
-        # The SDK has already retried connection errors, 408, 409, 429 and 5xx
-        # with backoff. What reaches here is either lasting or worth a later try.
-        except anthropic.AuthenticationError as error:
-            raise PermanentSummaryError(
-                "Anthropic rejected the API key (HTTP 401). Fix anthropicApiKey in Bruce's "
-                "credentials file, restart the worker, then retry.",
-            ) from error
-        except anthropic.PermissionDeniedError as error:
-            raise PermanentSummaryError(_status_message("The Anthropic key isn't allowed to do this", error)) from error
-        except anthropic.NotFoundError as error:
-            raise PermanentSummaryError(_status_message(f"{MODEL} isn't available to this Anthropic account", error)) from error
-        except anthropic.BadRequestError as error:
-            raise PermanentSummaryError(_status_message("Anthropic rejected the summary request", error)) from error
-        except anthropic.RateLimitError as error:
-            raise TransientSummaryError(_status_message("Anthropic is rate limiting summaries", error)) from error
-        except anthropic.APIStatusError as error:
-            if error.status_code >= 500 or error.status_code in (408, 409):
-                raise TransientSummaryError(_status_message("Anthropic is unavailable", error)) from error
-            raise PermanentSummaryError(_status_message("Anthropic refused the summary request", error)) from error
-        except anthropic.APIConnectionError as error:
-            raise TransientSummaryError(f"Couldn't reach Anthropic ({type(error).__name__}).") from error
+            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:  # noqa: S310 - fixed HTTPS endpoint
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+        except urllib.error.HTTPError as error:
+            raise _http_error(error) from None
+        except (OSError, http.client.HTTPException) as error:
+            raise _network_error(error) from None
+        if len(raw) > MAX_RESPONSE_BYTES:
+            raise TransientSummaryError("OpenRouter's response was unexpectedly large.")
+        try:
+            completion = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise TransientSummaryError("OpenRouter's response was not JSON.") from None
+        if not isinstance(completion, dict):
+            raise TransientSummaryError("OpenRouter's response was not a JSON object.")
+        return completion
 
 
 # Archive files
@@ -471,8 +609,9 @@ def read_summary(archive_directory: Path | str, metadata: dict[str, Any]) -> dic
 def summarize_archive(archive_directory: Path | str, summarizer: Any) -> dict[str, Any]:
     """Write transcripts/vN/summary.json and give an automatic title the summary's.
 
-    Idempotent: a summary made from the same transcript and prompt is reused
-    without calling Claude, and the title is only written when it changes.
+    Idempotent: a summary made from the same transcript, prompt and model is
+    reused without calling OpenRouter, and the title is only written when it
+    changes.
     """
     archive = Path(archive_directory)
     metadata = _read_json_object(archive / "metadata.json", MAX_METADATA_BYTES, "metadata.json")
@@ -497,7 +636,7 @@ def summarize_archive(archive_directory: Path | str, summarizer: Any) -> dict[st
         raise PermanentSummaryError(
             f"The transcript is too long to summarize in one request ({len(prompt)} characters).",
         )
-    digest = input_digest(prompt)
+    digest = input_digest(prompt, summarizer.model)
     summary = read_summary(archive, metadata)
     written = False
     if summary is None or summary.get("input_sha256") != digest:
@@ -506,7 +645,8 @@ def summarize_archive(archive_directory: Path | str, summarizer: Any) -> dict[st
             "schema_version": SCHEMA_VERSION,
             "meeting_id": meeting_id,
             "manifest_revision": revision,
-            "model": MODEL,
+            "provider": PROVIDER,
+            "model": summarizer.model,
             "served_by": answer["served_by"],
             "input_sha256": digest,
             "title": answer["title"],
@@ -521,17 +661,17 @@ def summarize_archive(archive_directory: Path | str, summarizer: Any) -> dict[st
         )
         written = True
     title_changed = apply_generated_title(
-        archive, summary["title"], metadata, model=str(summary.get("served_by") or MODEL),
+        archive, summary["title"], metadata, model=str(summary.get("served_by") or summarizer.model),
     )
     return {"summary_written": written, "title_changed": title_changed}
 
 
-def summarize_with_claude(archive_directory: Path) -> dict[str, Any]:
+def summarize_with_openrouter(archive_directory: Path) -> dict[str, Any]:
     """The service's summarizer, using the key loaded from Bruce's credentials file."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    api_key = os.environ.get(API_KEY_VARIABLE, "").strip()
     if not api_key:
-        raise TransientSummaryError("ANTHROPIC_API_KEY is not set.")
-    return summarize_archive(archive_directory, ClaudeSummarizer(api_key))
+        raise TransientSummaryError(f"{API_KEY_VARIABLE} is not set.")
+    return summarize_archive(archive_directory, OpenRouterSummarizer(api_key, model=summary_model()))
 
 
 # Durable stage
@@ -539,7 +679,7 @@ def summarize_with_claude(archive_directory: Path) -> dict[str, Any]:
 
 class SummaryQueue:
     """One summary job per succeeded processing job, kept apart from
-    transcription and Notion so a Claude outage only delays the summary."""
+    transcription and Notion so an OpenRouter outage only delays the summary."""
 
     def __init__(self, database: Path | str, clock: Callable[[], float] = time.time) -> None:
         self.database = Path(database)
@@ -724,6 +864,10 @@ class SummaryQueue:
             message = str(error) if isinstance(error, SummaryError) else f"{type(error).__name__}: {error}"
             message = message[:1000]
             _log(f"summary for processing job {job_id} failed: {message}")
+            delay = _retry_delay(attempts, RETRY_BASE_SECONDS, RETRY_MAXIMUM_SECONDS)
+            if isinstance(error, TransientSummaryError):
+                # Never sooner than OpenRouter asked, or an hour for an empty balance.
+                delay = max(delay, error.retry_after)
             with closing_connection(self._connect) as connection:
                 connection.execute(
                     "UPDATE summary_jobs SET state=?, available_at=?, last_error=?, refresh_requested=0, "
@@ -731,7 +875,7 @@ class SummaryQueue:
                     "WHERE processing_job_id=? AND state='summarizing' AND lease_owner=?",
                     (
                         "permanent_failure" if permanent else "retry_wait",
-                        self.clock() + _retry_delay(attempts, RETRY_BASE_SECONDS, RETRY_MAXIMUM_SECONDS),
+                        self.clock() + delay,
                         message,
                         job_id,
                         owner,
@@ -751,14 +895,16 @@ class SummaryQueue:
 
 
 __all__ = [
-    "ClaudeSummarizer",
+    "OpenRouterSummarizer",
     "PermanentSummaryError",
     "SummaryQueue",
     "TransientSummaryError",
+    "UnusableAnswerError",
     "build_prompt",
     "read_summary",
     "summaries_disabled_reason",
     "summaries_enabled",
     "summarize_archive",
-    "summarize_with_claude",
+    "summarize_with_openrouter",
+    "summary_model",
 ]

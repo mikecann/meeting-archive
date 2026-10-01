@@ -73,7 +73,7 @@ separate durable SQLite states. A Notion outage retries publication with
 backoff and does not run transcription or playback generation again.
 Credentials are read only from `MEETING_ARCHIVE_NOTION_TOKEN`,
 `MEETING_ARCHIVE_NOTION_DATA_SOURCE`, `HF_TOKEN` and, for summaries,
-`ANTHROPIC_API_KEY`; the worker never includes them in status or result JSON.
+`OPENROUTER_API_KEY`; the worker never includes them in status or result JSON.
 The service accepts `--db WORKER_DB` and optional `--poll-seconds SECONDS`. It
 holds one process lock for that database, while both media processing and
 publication also use durable leases for crash recovery. Heavy processing runs
@@ -166,35 +166,46 @@ the app decodes it. A `visual-labels.json` left in an older meeting is ignored.
 
 ## AI titles and summaries
 
-With an Anthropic API key, each meeting gets a short title, three to five
+With an OpenRouter API key, each meeting gets a short title, three to five
 summary points and any action items, written by Claude from its transcript.
 Without a key the stage is skipped quietly and nothing else changes. To turn
-it on, rerun `install-bruce.sh` so the environment has the pinned `anthropic`
-package, add `anthropicApiKey` to the protected credentials file (see below),
-then restart with `install-service-bruce.sh --enable`. A key without the
-package is reported once in the service log.
+it on, add `openRouterApiKey` to the protected credentials file (see below),
+then restart with `install-service-bruce.sh --enable`. Nothing extra is
+installed: the worker calls OpenRouter's chat completions API with the
+standard library.
 
 It is its own durable stage on its own service thread. When a transcript is
 written, a summary job is queued. The first start with a key also queues every
 meeting processed earlier. The job sends the transcript, with speaker names or
 labels like "Remote speaker 1", rough timestamps, the source app, date, length
-and calendar attendees, to `claude-opus-5-5` at low effort with a structured
-output schema, opting in to Anthropic's recommended fallback model if a safety
-classifier declines. The whole transcript is always sent; one too long for a
-single request fails visibly rather than being cut short.
+and calendar attendees, to `anthropic/claude-opus-5.5` at low reasoning
+effort, asking for JSON that fits a strict schema. Set
+`MEETING_ARCHIVE_SUMMARY_MODEL` to use another OpenRouter model. The whole
+transcript is always sent; one too long for a single request fails visibly
+rather than being cut short.
 
-The answer is written atomically to `transcripts/vN/summary.json` with its
-`schema_version`, `model`, `served_by` model and an `input_sha256` of
-everything sent. A retry with the same transcript reuses it without calling
-Claude. Confirming speaker names asks for a fresh summary five minutes after
-the last name, so it can use them.
+The worker checks the answer against that schema itself, since not every
+provider behind OpenRouter enforces it, then writes it atomically to
+`transcripts/vN/summary.json` with its `schema_version`, `provider`
+(`openrouter`), the `model` it asked for, the `served_by` model OpenRouter
+reports, its `usage` (requests, tokens and `cost` in US dollars, added up
+across any retries) and an `input_sha256` of everything sent. A retry with the
+same transcript and model reuses it without calling OpenRouter. Confirming
+speaker names asks for a fresh summary five minutes after the last name, so it
+can use them.
 
-A Claude outage never holds up transcription or Notion. The page is published
-without a summary and updated in place once one arrives. The SDK retries rate
-limits and server errors itself; anything still failing retries with backoff
-from 1 minute, doubling to an hour, and becomes a `permanent_failure` after 8
-attempts. A refusal, a rejected key or an invalid request is permanent at
-once. `retry` releases it, for example after fixing the key and restarting.
+An OpenRouter outage never holds up transcription or Notion. The page is
+published without a summary and updated in place once one arrives. Rate limits
+(429), timeouts (408), server errors and network failures retry with backoff
+from 1 minute, doubling to an hour, never sooner than a `Retry-After` header
+asks, and become a `permanent_failure` after 8 attempts. Running out of
+credits (402) waits an hour between tries, so a top-up within about seven
+hours lets it carry on by itself. An answer that runs out of room is asked for
+again with 16,000 tokens, and one that isn't valid JSON in the expected shape
+is asked for once more. If the second try doesn't help, the summary fails
+permanently, as a refusal or content filter, a rejected key (401), a
+forbidden request (403) or a bad request (400) does straight away. `retry`
+releases it, for example after fixing the key and restarting.
 
 The AI title replaces only a title nobody chose: the app's default title
 (`title_source` `default`), or, for recordings from before the app recorded a
@@ -204,10 +215,11 @@ AI title is written through the same `title.json` as `rename`, marked
 `"source": "ai"`, so Notion, search, the viewer and the app pick it up. The app
 adopts Bruce's display title for any meeting the user didn't name there.
 
-Cost is roughly 5 cents for a half-hour call and 10 to 15 cents for 90
-minutes, at $4 per million input tokens and $20 per million output tokens. A
-meeting whose speakers are named after it was summarized is summarized again,
-so allow about double for those.
+Cost is roughly 5 to 15 US cents per meeting on Claude Opus 5.5, at $4 per
+million input tokens and $20 per million output tokens: about 5 cents for a
+half-hour call and 10 to 15 cents for 90 minutes. A meeting whose speakers are
+named after it was summarized is summarized again, so allow about double for
+those. Each `summary.json` records what it actually cost.
 
 ## Bruce background service
 
@@ -253,12 +265,13 @@ loads `/Volumes/CannMedia/MeetingArchive/runtime/secrets/credentials.json`
 from the encrypted archive volume. The directory must be owned by the worker
 user with mode `0700`; the regular file must have mode `0600` and contain the
 approved `huggingFaceToken` and `notionToken` JSON fields, plus an optional
-`anthropicApiKey`, which becomes `ANTHROPIC_API_KEY` and turns on AI titles
+`openRouterApiKey`, which becomes `OPENROUTER_API_KEY` and turns on AI titles
 and summaries. Symlinks, shared permissions, unexpected fields, empty values
 and malformed data are rejected. Values only enter the worker's process
-environment; the wrapper clears any inherited `ANTHROPIC_API_KEY`,
-`ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_BASE_URL` first. They are never printed,
-placed in command arguments, or included in the plist/source repository.
+environment; the wrapper first clears any inherited `OPENROUTER_API_KEY`,
+along with the old `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+`ANTHROPIC_BASE_URL`. They are never printed, placed in command arguments, or
+included in the plist/source repository.
 Provisioning requires the user's authorization and occurs separately over
 encrypted SSH.
 

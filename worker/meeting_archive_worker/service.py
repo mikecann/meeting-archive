@@ -22,7 +22,7 @@ from .db import closing_connection
 from .notion import publish
 from .processor import process
 from .queue import JobQueue, QueueConflict
-from .summaries import SummaryQueue, summaries_disabled_reason, summaries_enabled, summarize_with_claude
+from .summaries import SummaryQueue, summaries_enabled, summarize_with_openrouter
 
 
 class PublicationQueue:
@@ -348,13 +348,13 @@ def run_publication(database: Path, publisher=publish) -> bool:
 def run_summary(database: Path, summarize=None) -> bool:
     """Write one due AI title and summary, then ask Notion to show it.
 
-    Without ANTHROPIC_API_KEY nothing is queued or run. Meetings processed
+    Without OPENROUTER_API_KEY nothing is queued or run. Meetings processed
     before a key was added are summarized once it is.
     """
     if summarize is None:
         if not summaries_enabled():
             return False
-        summarize = summarize_with_claude
+        summarize = summarize_with_openrouter
     summaries = SummaryQueue(database)
     summaries.reconcile(JobQueue(database).status()["jobs"])
     return summaries.run_one(
@@ -433,7 +433,7 @@ def _publication_loop(database: Path, poll_seconds: float, stop: threading.Event
 
 
 def _summary_loop(database: Path, poll_seconds: float, stop: threading.Event, summarize=None) -> None:
-    """Summaries wait on Claude, so they get their own thread and never delay Notion."""
+    """Summaries wait on OpenRouter, so they get their own thread and never delay Notion."""
     while not stop.is_set():
         try:
             while run_summary(database, summarize) and not stop.is_set():
@@ -505,18 +505,14 @@ def main() -> int:
         )
         light.start()
         # Credentials are loaded once at start, so this is decided once too.
-        disabled = summaries_disabled_reason()
-        if disabled is None:
+        # Without a key summaries are simply off.
+        if summaries_enabled():
             threading.Thread(
                 target=_summary_loop,
                 args=(args.db, args.poll_seconds, stop),
                 name="meeting-archive-summary",
                 daemon=True,
             ).start()
-        elif os.environ.get("ANTHROPIC_API_KEY", "").strip():
-            # Without a key summaries are simply off. A key that can't be
-            # used is worth one line in the log.
-            _log(f"AI summaries are off: {disabled}.")
         try:
             while True:
                 try:

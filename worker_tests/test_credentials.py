@@ -55,11 +55,11 @@ class CredentialTests(unittest.TestCase):
             with self.assertRaises(CredentialError):
                 load_credentials(self.path, {})
 
-    def test_optional_anthropic_key_becomes_its_environment_variable(self):
+    def test_optional_openrouter_key_becomes_its_environment_variable(self):
         self.path.write_text(json.dumps({
             "huggingFaceToken": "private-hf",
             "notionToken": "private-notion",
-            "anthropicApiKey": "private-anthropic",
+            "openRouterApiKey": "private-openrouter",
         }))
         environment = {}
 
@@ -68,22 +68,24 @@ class CredentialTests(unittest.TestCase):
         self.assertEqual(environment, {
             "HF_TOKEN": "private-hf",
             "MEETING_ARCHIVE_NOTION_TOKEN": "private-notion",
-            "ANTHROPIC_API_KEY": "private-anthropic",
+            "OPENROUTER_API_KEY": "private-openrouter",
         })
 
-    def test_without_an_anthropic_key_summaries_stay_off(self):
+    def test_without_an_openrouter_key_summaries_stay_off(self):
         environment = {}
 
         load_credentials(self.path, environment)
 
-        self.assertNotIn("ANTHROPIC_API_KEY", environment)
+        self.assertNotIn("OPENROUTER_API_KEY", environment)
 
-    def test_anthropic_key_must_be_nonempty_and_other_fields_stay_rejected(self):
+    def test_openrouter_key_must_be_nonempty_and_other_fields_stay_rejected(self):
         for value in (
-            {"huggingFaceToken": "private-hf", "notionToken": "private-notion", "anthropicApiKey": " "},
-            {"huggingFaceToken": "private-hf", "notionToken": "private-notion", "anthropicApiKey": 7},
+            {"huggingFaceToken": "private-hf", "notionToken": "private-notion", "openRouterApiKey": " "},
+            {"huggingFaceToken": "private-hf", "notionToken": "private-notion", "openRouterApiKey": 7},
             {"huggingFaceToken": "private-hf", "notionToken": "private-notion", "openaiApiKey": "private-other"},
-            {"notionToken": "private-notion", "anthropicApiKey": "private-anthropic"},
+            # Replaced by openRouterApiKey before it was ever deployed.
+            {"huggingFaceToken": "private-hf", "notionToken": "private-notion", "anthropicApiKey": "private-old"},
+            {"notionToken": "private-notion", "openRouterApiKey": "private-openrouter"},
         ):
             with self.subTest(fields=sorted(value)):
                 self.path.write_text(json.dumps(value))

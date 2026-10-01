@@ -19,5 +19,5 @@ export PIP_CACHE_DIR="$ROOT/runtime/cache/pip"
 export TMPDIR="$ROOT/runtime/tmp"
 "$ROOT/runtime/venv/bin/python3" -m pip install -r "$ROOT/runtime/worker/requirements.txt"
 "$ROOT/runtime/venv/bin/python3" -m pip check
-"$ROOT/runtime/venv/bin/python3" -c 'import anthropic, faster_whisper, pyannote.audio; print("Worker libraries import successfully")'
+"$ROOT/runtime/venv/bin/python3" -c 'import faster_whisper, pyannote.audio; print("Worker libraries import successfully")'
 echo "Installed worker at $ROOT. No background service has been enabled yet."
