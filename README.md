@@ -82,6 +82,10 @@ calendars you want to use. Set the worker host and archive path to match your
 worker installation. Join a Zoom call and turn the camera on to begin recording.
 Turning the camera off for 20 seconds or closing the meeting window ends it.
 
+If a recording can't get started it has another go after 10, 30 and 60 seconds,
+then gives up on that call and shows Needs attention in the menu bar. Anything
+it caught before that is still saved, it just won't ask you for a title.
+
 Give the call a title when prompted. The library shows transfer and processing
 progress, then lets you play the recording and review the speaker names. Enable
 launch at login from Settings if you want the app available after a restart.

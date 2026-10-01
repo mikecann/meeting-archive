@@ -87,9 +87,12 @@ public enum SessionSuppressionReason: String, Codable, Sendable {
 public enum ActiveSessionPhase: Codable, Equatable, Sendable {
     case startRequested
     case recording
+    /// The last start failed. Capture starts again once the same camera
+    /// session is seen on at or after this time.
+    case retryScheduled(at: Date)
     case suppressed(SessionSuppressionReason)
 
-    private enum CodingKeys: String, CodingKey { case status, reason }
+    private enum CodingKeys: String, CodingKey { case status, reason, retryAt = "retry_at" }
     private enum Status: String, Codable { case startRequested = "start_requested", recording, suppressed }
 
     public init(from decoder: Decoder) throws {
@@ -97,7 +100,13 @@ public enum ActiveSessionPhase: Codable, Equatable, Sendable {
         switch try container.decode(Status.self, forKey: .status) {
         case .startRequested: self = .startRequested
         case .recording: self = .recording
-        case .suppressed: self = .suppressed(try container.decode(SessionSuppressionReason.self, forKey: .reason))
+        case .suppressed:
+            let reason = try container.decode(SessionSuppressionReason.self, forKey: .reason)
+            if reason == .interrupted, let retryAt = try container.decodeIfPresent(Date.self, forKey: .retryAt) {
+                self = .retryScheduled(at: retryAt)
+            } else {
+                self = .suppressed(reason)
+            }
         }
     }
 
@@ -108,6 +117,13 @@ public enum ActiveSessionPhase: Codable, Equatable, Sendable {
             try container.encode(Status.startRequested, forKey: .status)
         case .recording:
             try container.encode(Status.recording, forKey: .status)
+        case .retryScheduled(let retryAt):
+            // Stored as an interrupted suppression plus the retry time, so a
+            // build without retries reads a pending retry as the suppression
+            // it already understands instead of failing to load its state.
+            try container.encode(Status.suppressed, forKey: .status)
+            try container.encode(SessionSuppressionReason.interrupted, forKey: .reason)
+            try container.encode(retryAt, forKey: .retryAt)
         case .suppressed(let reason):
             try container.encode(Status.suppressed, forKey: .status)
             try container.encode(reason, forKey: .reason)
@@ -120,17 +136,37 @@ public struct ActiveMeetingSession: Codable, Equatable, Sendable {
     public var phase: ActiveSessionPhase
     public var firstObservedAt: Date
     public var meetingID: UUID?
+    /// Starts of this camera session that failed before capture produced
+    /// both meeting video and microphone audio. It caps the retries and is
+    /// saved with the session, so a relaunch cannot reset it.
+    public var failedStarts: Int
 
     public init(
         descriptor: MeetingSessionDescriptor,
         phase: ActiveSessionPhase,
         firstObservedAt: Date,
-        meetingID: UUID?
+        meetingID: UUID?,
+        failedStarts: Int = 0
     ) {
         self.descriptor = descriptor
         self.phase = phase
         self.firstObservedAt = firstObservedAt
         self.meetingID = meetingID
+        self.failedStarts = failedStarts
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case descriptor, phase, firstObservedAt, meetingID, failedStarts
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        descriptor = try container.decode(MeetingSessionDescriptor.self, forKey: .descriptor)
+        phase = try container.decode(ActiveSessionPhase.self, forKey: .phase)
+        firstObservedAt = try container.decode(Date.self, forKey: .firstObservedAt)
+        meetingID = try container.decodeIfPresent(UUID.self, forKey: .meetingID)
+        // Sessions saved before start retries existed have no count.
+        failedStarts = try container.decodeIfPresent(Int.self, forKey: .failedStarts) ?? 0
     }
 }
 
@@ -153,8 +189,10 @@ public struct RecorderState: Codable, Equatable, Sendable {
     }
 
     /// A persisted writer cannot still be alive after this process starts.
-    /// Keep the session suppressed until its detector reports a real off edge,
-    /// rather than starting a second recording because the app remains open.
+    /// Keep a session that was starting or recording suppressed until its
+    /// detector reports a real off edge, rather than starting a second
+    /// recording because the app remains open. A retry that was still waiting
+    /// had no writer, so it stays due, and its failed start count still caps it.
     public func restoredAfterProcessRestart() -> RecorderState {
         guard var currentSession else { return self }
         switch currentSession.phase {
@@ -163,7 +201,7 @@ public struct RecorderState: Codable, Equatable, Sendable {
             var copy = self
             copy.currentSession = currentSession
             return copy
-        case .suppressed:
+        case .retryScheduled, .suppressed:
             return self
         }
     }

@@ -106,6 +106,31 @@ private func verifyCaptureLifecycle() throws {
             == [.stopCapture(meetingID: lateMeetingID, reason: .interrupted)],
         "late writer start was not stopped"
     )
+
+    // A start that never produced both sources retries the same session
+    // under a new meeting ID, and its fragment saves without a naming panel.
+    let flaky = session("failed-start")
+    let failedID = UUID()
+    let failedAt = Date(timeIntervalSince1970: 1_800_000_000)
+    var retrying = CaptureStateMachine()
+    _ = retrying.handle(.cameraOn(flaky, at: failedAt))
+    _ = retrying.handle(.captureStarted(sessionID: flaky.id, meetingID: failedID, at: failedAt))
+    try require(
+        retrying.handle(.captureStartFailed(sessionID: flaky.id, at: failedAt))
+            == [
+                .stopCapture(meetingID: failedID, reason: .startFailed),
+                .retryScheduled(sessionID: flaky.id, at: failedAt.addingTimeInterval(10)),
+            ],
+        "failed start was not stopped and retried"
+    )
+    try require(
+        retrying.handle(.cameraOn(flaky, at: failedAt.addingTimeInterval(10))) == [.startCapture(flaky)],
+        "due retry did not start the same session again"
+    )
+    try require(
+        !CaptureFinalizationRequest(meetingID: failedID, reason: .startFailed).asksForTitle,
+        "failed start fragment asked for a title"
+    )
 }
 
 private func verifyNativeCaptureLifecycle() throws {
