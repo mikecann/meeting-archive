@@ -4,6 +4,7 @@
 <key>CFBundleDevelopmentRegion</key><string>en</string>
 <key>CFBundleDisplayName</key><string>Meeting Archive</string>
 <key>CFBundleExecutable</key><string>meeting-archive-app</string>
+<key>CFBundleIconFile</key><string>meeting-archive</string>
 <key>CFBundleIdentifier</key><string>com.mikerosoft.meeting-archive</string>
 <key>CFBundleName</key><string>Meeting Archive</string>
 <key>CFBundlePackageType</key><string>APPL</string>

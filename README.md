@@ -257,9 +257,8 @@ calendars, Bruce host and archive path, and the backup-coverage confirmation.
 Do not describe the app as production-ready until a representative live run has
 verified recording, transfer, retries, and review on your installation.
 
-The catalog icon reuses the film icon from
-[Mark James’s famfamfam silk set](https://www.famfamfam.com/lab/icons/silk/),
-licensed under CC BY 2.5.
+The app icon is drawn in `icons/meeting-archive.svg`, with `icons/meeting-archive.png`
+rendered from it.
 
 ## More tools
 
