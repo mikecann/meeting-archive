@@ -69,7 +69,6 @@ bash verification/run-contract-roundtrip.sh
 bash verification/run-offline-regressions.sh
 bash verification/run-rebuild-guard-tests.sh
 bash worker/launcher/run-tests.sh
-bash worker/vision/run-tests.sh
 ```
 
 Use ffmpeg for the synthetic media checks. Keep CI offline, with no model

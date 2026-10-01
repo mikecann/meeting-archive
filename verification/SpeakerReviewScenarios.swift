@@ -168,11 +168,6 @@ private enum SpeakerReviewScenarios {
         try require(model.confirmedSpeakerIDs == ["saved"], "saved name was not restored as confirmed")
         try require(model.remainingUnconfirmedCount == 1, "reopened pending count was wrong")
 
-        let evidence = SpeakerEvidenceLabel(
-            name: "Michael Cann",
-            timestamps: [12.5, 42],
-            source: "video_text"
-        )
         let automaticResponse = response(
             meetingID: meetingID,
             speakers: [
@@ -186,8 +181,7 @@ private enum SpeakerReviewScenarios {
                 speaker(
                     "tentative",
                     suggestion: "Alex Chen",
-                    suggestionKind: "tentative",
-                    evidenceLabels: [evidence]
+                    suggestionKind: "tentative"
                 ),
             ]
         )
@@ -224,11 +218,11 @@ private enum SpeakerReviewScenarios {
             "explicit edit remained classified as an automatic match"
         )
 
-        automatic.selectEvidence(evidence, for: "tentative")
-        try require(automatic.drafts["tentative"]?.name == "Michael Cann", "visible label did not fill the draft")
+        automatic.setName("Michael Cann", for: "tentative")
+        try require(automatic.drafts["tentative"]?.name == "Michael Cann", "typed name did not fill the draft")
         try require(
             !automatic.confirmedSpeakerIDs.contains("tentative") && !automatic.canComplete,
-            "visible label evidence confirmed a speaker without user confirmation"
+            "a typed name confirmed a speaker without user confirmation"
         )
 
         let oldResponse = try JSONDecoder().decode(
@@ -252,22 +246,6 @@ private enum SpeakerReviewScenarios {
             """.utf8)
         )
         try require(oldResponse.speakers.first?.automaticName == nil, "old response did not decode without automatic fields")
-
-        let invalidEvidenceResponse = response(
-            meetingID: meetingID,
-            speakers: [
-                speaker(
-                    "invalid-evidence",
-                    evidenceLabels: [SpeakerEvidenceLabel(name: "", timestamps: [-1], source: "video_text")]
-                ),
-            ]
-        )
-        do {
-            try invalidEvidenceResponse.validate(meetingID: meetingID, revision: 3)
-            throw ScenarioFailure(description: "malformed visible label evidence passed validation")
-        } catch is SpeakerReviewError {
-            // Expected: visible labels must have a bounded name and valid time.
-        }
 
         model.setName("Mike", for: "saved")
         try require(model.remainingUnconfirmedCount == 2, "edit did not invalidate saved confirmation")
@@ -421,8 +399,7 @@ private enum SpeakerReviewScenarios {
         suggestion: String? = nil,
         automaticName: String? = nil,
         suggestionKind: String? = nil,
-        confirmationCount: Int? = nil,
-        evidenceLabels: [SpeakerEvidenceLabel]? = nil
+        confirmationCount: Int? = nil
     ) -> SpeakerReviewSpeaker {
         SpeakerReviewSpeaker(
             speakerID: id,
@@ -434,8 +411,7 @@ private enum SpeakerReviewScenarios {
             excerpts: [],
             automaticName: automaticName,
             suggestionKind: suggestionKind,
-            confirmationCount: confirmationCount,
-            evidenceLabels: evidenceLabels
+            confirmationCount: confirmationCount
         )
     }
 }

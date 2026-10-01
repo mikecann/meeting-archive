@@ -36,20 +36,6 @@ struct SpeakerReviewResponse: Codable, Equatable, Sendable {
                     throw SpeakerReviewError.invalidResponse("review-speakers returned an invalid excerpt range")
                 }
             }
-            let evidenceLabels = speaker.evidenceLabels ?? []
-            guard evidenceLabels.count <= 100 else {
-                throw SpeakerReviewError.invalidResponse("review-speakers returned too many visible name labels")
-            }
-            for evidence in evidenceLabels {
-                let name = evidence.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !name.isEmpty,
-                      name.count <= 200,
-                      (1 ... 100).contains(evidence.timestamps.count),
-                      evidence.timestamps.allSatisfy({ $0.isFinite && $0 >= 0 })
-                else {
-                    throw SpeakerReviewError.invalidResponse("review-speakers returned invalid visible name evidence")
-                }
-            }
         }
     }
 }
@@ -65,7 +51,6 @@ struct SpeakerReviewSpeaker: Codable, Equatable, Identifiable, Sendable {
     var automaticName: String? = nil
     var suggestionKind: String? = nil
     var confirmationCount: Int? = nil
-    var evidenceLabels: [SpeakerEvidenceLabel]? = nil
 
     var id: String { speakerID }
 
@@ -80,18 +65,6 @@ struct SpeakerReviewSpeaker: Codable, Equatable, Identifiable, Sendable {
         case automaticName = "automatic_name"
         case suggestionKind = "suggestion_kind"
         case confirmationCount = "confirmation_count"
-        case evidenceLabels = "evidence_labels"
-    }
-}
-
-struct SpeakerEvidenceLabel: Codable, Equatable, Identifiable, Sendable {
-    var name: String
-    var timestamps: [Double]
-    var source: String
-
-    var id: String {
-        let timestampBits = timestamps.map { String($0.bitPattern) }.joined(separator: ",")
-        return "\(source)\u{0}\(name)\u{0}\(timestampBits)"
     }
 }
 
@@ -555,10 +528,6 @@ final class SpeakerReviewModel: ObservableObject {
         confirmedSpeakerIDs.remove(speakerID)
     }
 
-    func selectEvidence(_ evidence: SpeakerEvidenceLabel, for speakerID: String) {
-        setName(evidence.name, for: speakerID)
-    }
-
     @discardableResult
     func confirm(_ speakerID: String) async -> Bool {
         guard response?.speakers.contains(where: { $0.speakerID == speakerID }) == true,
@@ -761,7 +730,7 @@ struct SpeakerReviewView: View {
     private func reviewList(_ response: SpeakerReviewResponse) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
-                Text("Strong voice matches are filled in automatically; suggestions and names visible in the video still need your confirmation.")
+                Text("Strong voice matches are filled in automatically; suggestions still need your confirmation.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
 
@@ -862,30 +831,6 @@ struct SpeakerReviewView: View {
                     .foregroundStyle(.secondary)
             }
 
-            if let evidenceLabels = speaker.evidenceLabels, !evidenceLabels.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Name visible in the meeting video")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    ForEach(evidenceLabels) { evidence in
-                        HStack(spacing: 8) {
-                            Button(evidence.name) {
-                                model.selectEvidence(evidence, for: speaker.speakerID)
-                            }
-                            .buttonStyle(.link)
-                            if evidence.source == "active_speaker_label" {
-                                Text("Shown as speaking").font(.caption).foregroundStyle(.secondary)
-                            }
-                            if let times = evidenceTimes(evidence), !times.isEmpty {
-                                Text(times)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
-            }
-
             if !candidates.isEmpty {
                 Menu("Choose a calendar attendee") {
                     ForEach(candidates) { candidate in
@@ -936,13 +881,6 @@ struct SpeakerReviewView: View {
             return "Recognized from \(count) prior voice \(noun)."
         }
         return "Recognized from a previously confirmed voice."
-    }
-
-    private func evidenceTimes(_ evidence: SpeakerEvidenceLabel) -> String? {
-        let times = evidence.timestamps
-            .filter { $0.isFinite && $0 >= 0 }
-            .map(formatTime)
-        return times.isEmpty ? nil : times.joined(separator: ", ")
     }
 
     private func candidateLabel(_ candidate: SpeakerCalendarCandidate) -> String {

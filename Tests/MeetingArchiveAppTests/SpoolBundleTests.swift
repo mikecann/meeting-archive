@@ -57,7 +57,7 @@ final class SpoolBundleTests: XCTestCase {
         XCTAssertEqual((metadata["calendar"] as? [Any])?.count, 2)
     }
 
-    func testNoAttendeesAreWrittenWithoutAClearCalendarMatch() throws {
+    func testAnEmptyAttendeeListIsWrittenWithoutAClearCalendarMatch() throws {
         let directory = try bundle(with: ["microphone.m4a"])
         defer { try? FileManager.default.removeItem(at: directory) }
         let meeting = record()
@@ -71,7 +71,8 @@ final class SpoolBundleTests: XCTestCase {
         _ = try SpoolBundle.prepare(record: meeting, directory: directory)
 
         let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("metadata.json"))) as! [String: Any]
-        XCTAssertNil(metadata["attendees"])
+        // Present but empty, so the worker doesn't fall back to that lone event.
+        XCTAssertEqual((metadata["attendees"] as? [Any])?.count, 0)
     }
 
     func testACaptureWithoutMicrophoneAudioIsArchivedWithTheTracksItHas() throws {

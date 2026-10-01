@@ -56,10 +56,10 @@ final class SpeakerReviewTests: XCTestCase {
         XCTAssertNil(response.speakers[0].automaticName)
         XCTAssertNil(response.speakers[0].suggestionKind)
         XCTAssertNil(response.speakers[0].confirmationCount)
-        XCTAssertNil(response.speakers[0].evidenceLabels)
     }
 
-    func testReviewResponseDecodesAutomaticNameAndVisibleLabelEvidence() throws {
+    /// Bruce stopped reading names off video, but older payloads still decode.
+    func testReviewResponseDecodesAutomaticNameAndIgnoresOldVideoEvidence() throws {
         let meetingID = UUID()
         let data = Data("""
         {
@@ -93,36 +93,6 @@ final class SpeakerReviewTests: XCTestCase {
         XCTAssertEqual(speaker.automaticName, "Mike Cann")
         XCTAssertEqual(speaker.suggestionKind, "strong")
         XCTAssertEqual(speaker.confirmationCount, 4)
-        XCTAssertEqual(
-            speaker.evidenceLabels,
-            [SpeakerEvidenceLabel(name: "Michael Cann", timestamps: [12.5, 42], source: "video_text")]
-        )
-    }
-
-    func testReviewResponseRejectsMalformedOrExcessiveVisibleLabelEvidence() {
-        let meetingID = UUID()
-        let invalidEvidence = [
-            SpeakerEvidenceLabel(name: "", timestamps: [12], source: "video_text"),
-            SpeakerEvidenceLabel(name: "Michael", timestamps: [.nan], source: "video_text"),
-            SpeakerEvidenceLabel(name: "Michael", timestamps: [-1], source: "video_text"),
-        ]
-
-        for evidence in invalidEvidence {
-            let response = makeResponse(
-                meetingID: meetingID,
-                speakers: [makeSpeaker(id: "speaker", evidenceLabels: [evidence])]
-            )
-            XCTAssertThrowsError(try response.validate(meetingID: meetingID, revision: 3))
-        }
-
-        let excessive = (0 ... 100).map {
-            SpeakerEvidenceLabel(name: "Name \($0)", timestamps: [Double($0)], source: "video_text")
-        }
-        let response = makeResponse(
-            meetingID: meetingID,
-            speakers: [makeSpeaker(id: "speaker", evidenceLabels: excessive)]
-        )
-        XCTAssertThrowsError(try response.validate(meetingID: meetingID, revision: 3))
     }
 
     func testDraftsAutofillExistingNameThenPredictionAndMarkOnlyPrediction() {
@@ -165,8 +135,7 @@ final class SpeakerReviewTests: XCTestCase {
                 excerpts: [],
                 automaticName: "Known voice",
                 suggestionKind: "strong",
-                confirmationCount: 3,
-                evidenceLabels: nil
+                confirmationCount: 3
             ),
         ]
 
@@ -364,25 +333,6 @@ final class SpeakerReviewTests: XCTestCase {
     }
 
     @MainActor
-    func testSelectingVisibleLabelEvidenceLeavesSpeakerUnconfirmed() async {
-        let meetingID = UUID()
-        let evidence = SpeakerEvidenceLabel(name: "Mike Cann", timestamps: [12.5, 42], source: "video_text")
-        let response = makeResponse(
-            meetingID: meetingID,
-            speakers: [makeSpeaker(id: "pending", evidenceLabels: [evidence])]
-        )
-        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: response))
-        await model.load()
-
-        model.selectEvidence(evidence, for: "pending")
-
-        XCTAssertEqual(model.drafts["pending"]?.name, "Mike Cann")
-        XCTAssertFalse(model.confirmedSpeakerIDs.contains("pending"))
-        XCTAssertEqual(model.remainingUnconfirmedCount, 1)
-        XCTAssertFalse(model.canComplete)
-    }
-
-    @MainActor
     func testEditingSavedNameInvalidatesConfirmationUntilSuccessfulSave() async {
         let meetingID = UUID()
         let response = makeResponse(meetingID: meetingID, speakers: [makeSpeaker(id: "saved", name: "Michael")])
@@ -512,8 +462,7 @@ final class SpeakerReviewTests: XCTestCase {
         suggestion: String? = nil,
         automaticName: String? = nil,
         suggestionKind: String? = nil,
-        confirmationCount: Int? = nil,
-        evidenceLabels: [SpeakerEvidenceLabel]? = nil
+        confirmationCount: Int? = nil
     ) -> SpeakerReviewSpeaker {
         SpeakerReviewSpeaker(
             speakerID: id,
@@ -525,8 +474,7 @@ final class SpeakerReviewTests: XCTestCase {
             excerpts: [],
             automaticName: automaticName,
             suggestionKind: suggestionKind,
-            confirmationCount: confirmationCount,
-            evidenceLabels: evidenceLabels
+            confirmationCount: confirmationCount
         )
     }
 }

@@ -38,4 +38,3 @@ jobs:
           bash verification/run-rebuild-guard-tests.sh
           bash verification/run-speaker-review-scenarios.sh
           bash worker/launcher/run-tests.sh
-          bash worker/vision/run-tests.sh
