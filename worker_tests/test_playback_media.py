@@ -337,7 +337,7 @@ class PlaybackMediaTests(unittest.TestCase):
             beep_time = float(re.search(r"silence_end: ([0-9.]+)", silencedetect).group(1))
 
             class FakeTranscriber:
-                def transcribe(self, _path: Path, origin: str):
+                def transcribe(self, _path: Path, origin: str, *, single_speaker: bool = False):
                     start = 1.1 if origin == "microphone" else 0.9
                     return [{"start": start, "end": start + 0.1, "text": "beep"}]
 

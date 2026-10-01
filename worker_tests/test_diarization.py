@@ -15,17 +15,24 @@ from unittest.mock import patch
 WORKER_ROOT = Path(__file__).resolve().parents[1] / "worker"
 sys.path.insert(0, str(WORKER_ROOT))
 
-from meeting_archive_worker.manifest import verify_incoming  # noqa: E402
+from meeting_archive_worker.manifest import VerifiedFile, verify_incoming  # noqa: E402
 from meeting_archive_worker.model_processor import (  # noqa: E402
     WhisperPyannoteTranscriber,
+    diarize_waveform,
     extract_speaker_embeddings,
     process as model_process,
+)
+from meeting_archive_worker.processing import (  # noqa: E402
+    TranscriptProcessor,
+    microphone_is_one_speaker,
 )
 from meeting_archive_worker.speakers import SpeakerRegistry  # noqa: E402
 from test_worker import write_bundle  # noqa: E402
 
 
 NAN = float("nan")
+MIKE = [0.6, 0.8]
+MODEL_ID = "pyannote/speaker-diarization-community-1@4.0.3"
 
 
 class Annotation:
@@ -83,9 +90,145 @@ def run_process(incoming: Path, transcriber, database: Path) -> None:
     )
     with patch.dict(os.environ, {"MEETING_ARCHIVE_WORKER_DB": str(database)}, clear=True), \
          patch("meeting_archive_worker.model_processor.WhisperPyannoteTranscriber", return_value=transcriber), \
+         patch("meeting_archive_worker.model_processor.version", return_value="4.0.3"), \
          patch("meeting_archive_worker.model_processor.probe_start_time", return_value=None), \
          patch("meeting_archive_worker.model_processor.create_playback"):
         model_process(incoming, job)
+
+
+def saved_transcript(incoming: Path) -> dict:
+    return json.loads((incoming / "transcripts/v1/transcript.json").read_text(encoding="utf-8"))
+
+
+class MicrophoneSpeakerTests(unittest.TestCase):
+    def test_any_incoming_speech_makes_the_microphone_one_speaker(self) -> None:
+        self.assertFalse(microphone_is_one_speaker([]))
+        self.assertFalse(microphone_is_one_speaker([{"start": 0.0, "end": 1.0, "text": "  "}]))
+        self.assertTrue(microphone_is_one_speaker([
+            {"start": 0.0, "end": 1.0, "text": " "},
+            {"start": 2.0, "end": 3.0, "text": "Can you hear me?"},
+        ]))
+
+    def test_incoming_is_transcribed_first_and_decides_the_microphone(self) -> None:
+        # The app lists the microphone before incoming in its manifest.
+        files = (
+            VerifiedFile("microphone.m4a", 1, "0" * 64, "microphone_audio"),
+            VerifiedFile("incoming.m4a", 1, "0" * 64, "incoming_audio"),
+        )
+        manifest = SimpleNamespace(files=files, metadata={}, meeting_id="meeting", revision=1)
+        for incoming_speech, one_speaker in ((["Morning all."], True), ([], False)):
+            with self.subTest(incoming_speech=incoming_speech):
+                calls = []
+
+                class RecordingTranscriber:
+                    def transcribe(self, _path, channel_origin, *, single_speaker=False):
+                        calls.append((channel_origin, single_speaker))
+                        texts = incoming_speech if channel_origin == "incoming" else ["Hi."]
+                        return [{"start": 0.0, "end": 1.0, "text": text} for text in texts]
+
+                result = TranscriptProcessor(RecordingTranscriber()).process(Path("archive"), manifest)
+
+                self.assertEqual(calls, [("incoming", False), ("microphone", one_speaker)])
+                self.assertEqual(
+                    [source["channel_origin"] for source in result["sources"]],
+                    ["microphone", "incoming"],
+                )
+
+    def test_one_speaker_microphone_labels_every_turn_and_keeps_its_voice(self) -> None:
+        transcriber, calls = stub_transcriber(
+            {"microphone": [(0.0, 2.0, "Hi everyone."), (3.0, 4.0, "Mm."), (9.0, 12.0, "Let's start.")]},
+            # pyannote heard nothing at 3s, yet that turn is still Mike's.
+            {"microphone": diarization([(0.0, 2.0, "SPEAKER_00"), (9.0, 12.0, "SPEAKER_00")], [MIKE])},
+        )
+
+        turns = transcriber.transcribe(Path("microphone.m4a"), "microphone", single_speaker=True)
+
+        self.assertEqual(calls, [("microphone", {"num_speakers": 1})])
+        self.assertEqual([turn["speaker"] for turn in turns], ["microphone:SPEAKER_00"] * 3)
+        self.assertEqual(transcriber.embeddings, {"microphone:SPEAKER_00": MIKE})
+
+    def test_speaker_count_reaches_the_pyannote_pipeline_call(self) -> None:
+        calls = []
+
+        def pipeline(audio, **options):
+            calls.append((audio, options))
+            return "output"
+
+        waveform = object()
+        self.assertEqual(diarize_waveform(pipeline, waveform, 16000, num_speakers=1), "output")
+        self.assertEqual(calls, [({"waveform": waveform, "sample_rate": 16000}, {"num_speakers": 1})])
+
+    def test_one_speaker_microphone_without_a_usable_voice_is_still_labelled(self) -> None:
+        transcriber, _ = stub_transcriber(
+            {"microphone": [(0.0, 0.4, "Yep.")]},
+            {"microphone": diarization([(0.0, 0.4, "SPEAKER_00")], [[NAN, NAN]])},
+        )
+
+        turns = transcriber.transcribe(Path("microphone.m4a"), "microphone", single_speaker=True)
+
+        self.assertEqual([turn["speaker"] for turn in turns], ["microphone:SPEAKER_00"])
+        self.assertEqual(transcriber.embeddings, {})
+
+    def test_call_makes_the_microphone_one_speaker_named_by_voice(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            incoming, _ = write_bundle(root)
+            database = root / "worker.sqlite"
+            registry = SpeakerRegistry(database)
+            # Mike confirmed his voice on an earlier call.
+            registry.save_observation("earlier-call", 1, "microphone:SPEAKER_00", MIKE, MODEL_ID)
+            registry.confirm_observation("earlier-call", 1, "microphone:SPEAKER_00", "Mike Cann")
+            transcriber, calls = stub_transcriber(
+                {
+                    "microphone": [(1.0, 3.0, "Thanks for making time."), (8.0, 9.0, "Sure.")],
+                    "incoming": [(3.5, 6.0, "No worries."), (6.5, 7.5, "Hello!")],
+                },
+                {
+                    "microphone": diarization([(1.0, 3.0, "SPEAKER_00"), (8.0, 9.0, "SPEAKER_00")], [MIKE]),
+                    "incoming": diarization(
+                        [(3.5, 6.0, "SPEAKER_00"), (6.5, 7.5, "SPEAKER_01")],
+                        [[0.8, -0.6], [-0.8, 0.6]],
+                    ),
+                },
+            )
+
+            run_process(incoming, transcriber, database)
+
+            turns = saved_transcript(incoming)["turns"]
+            self.assertEqual(calls, [("incoming", {}), ("microphone", {"num_speakers": 1})])
+            self.assertEqual(
+                [(turn["speaker"], turn.get("name")) for turn in turns],
+                [
+                    ("microphone:SPEAKER_00", "Mike Cann"),
+                    ("incoming:SPEAKER_00", None),
+                    ("incoming:SPEAKER_01", None),
+                    ("microphone:SPEAKER_00", "Mike Cann"),
+                ],
+            )
+            meeting_id = verify_incoming(incoming).meeting_id
+            self.assertEqual(SpeakerRegistry(database).observation(meeting_id, 1, "microphone:SPEAKER_00"), MIKE)
+
+    def test_recording_without_remote_speech_still_diarizes_the_microphone(self) -> None:
+        # An in-person meeting, or a manual recording with nothing playing, has
+        # everyone on the microphone.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            incoming, _ = write_bundle(root)
+            transcriber, calls = stub_transcriber(
+                {"microphone": [(1.0, 3.0, "Shall we start?"), (3.5, 6.0, "Yes, go ahead.")]},
+                {"microphone": diarization(
+                    [(1.0, 3.0, "SPEAKER_00"), (3.5, 6.0, "SPEAKER_01")],
+                    [MIKE, [0.8, -0.6]],
+                )},
+            )
+
+            run_process(incoming, transcriber, root / "worker.sqlite")
+
+            self.assertEqual(calls, [("microphone", {})])
+            self.assertEqual(
+                [turn["speaker"] for turn in saved_transcript(incoming)["turns"]],
+                ["microphone:SPEAKER_00", "microphone:SPEAKER_01"],
+            )
 
 
 class VoiceEmbeddingTests(unittest.TestCase):
@@ -120,7 +263,7 @@ class VoiceEmbeddingTests(unittest.TestCase):
             registry = SpeakerRegistry(database)
             self.assertEqual(registry.observation(meeting_id, 1, "incoming:SPEAKER_00"), [0.6, 0.8])
             self.assertIsNone(registry.observation(meeting_id, 1, "incoming:SPEAKER_01"))
-            transcript = json.loads((incoming / "transcripts/v1/transcript.json").read_text(encoding="utf-8"))
+            transcript = saved_transcript(incoming)
             self.assertEqual(
                 [turn.get("speaker") for turn in transcript["turns"]],
                 ["incoming:SPEAKER_00", "incoming:SPEAKER_01"],

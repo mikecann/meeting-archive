@@ -1091,7 +1091,7 @@ class ProcessingTests(unittest.TestCase):
             self.assertGreater(playback.stat().st_size, 0)  # type: ignore[union-attr]
 
             class FakeTranscriber:
-                def transcribe(self, path: Path, channel_origin: str):
+                def transcribe(self, path: Path, channel_origin: str, *, single_speaker: bool = False):
                     return [{"start": 0.0, "end": 1.0, "text": "can you hear me"}]
 
             result = TranscriptProcessor(FakeTranscriber()).process(destination, verified)
@@ -1131,7 +1131,7 @@ class ProcessingTests(unittest.TestCase):
             verified = verify_incoming(incoming)
 
             class FakeTranscriber:
-                def transcribe(self, path: Path, channel_origin: str):
+                def transcribe(self, path: Path, channel_origin: str, *, single_speaker: bool = False):
                     if channel_origin == "microphone":
                         return [{"start": 1.0, "end": 2.0, "text": "hello"}]
                     return [{"start": 0.5, "end": 1.5, "text": "hi", "speaker": "SPEAKER_00"}]

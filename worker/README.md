@@ -45,6 +45,13 @@ transcription model. `TranscriptProcessor` provides the separate-channel merge
 seam: it preserves `microphone` or `incoming` as `channel_origin`, independently
 of any optional diarization speaker label.
 
+It transcribes the incoming track first. If anyone on it spoke, the whole
+microphone track is one speaker, `microphone:SPEAKER_00`, because Mike wears
+headphones on calls and the mic only hears him. pyannote still runs once on
+the mic, held to one speaker, purely for that voice embedding so profile
+matching can name him. A recording with no incoming speech, like an in-person
+meeting, has its microphone diarized as before.
+
 The optional Bruce adapter is `meeting_archive_worker.processor:process`.
 It imports faster-whisper and pyannote only when a job runs. Configure `HF_HOME`
 on CannMedia and supply `HF_TOKEN` to enable diarization. With no token it

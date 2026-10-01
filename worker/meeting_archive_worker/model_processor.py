@@ -100,7 +100,13 @@ class WhisperPyannoteTranscriber:
                 token=token,
             )
 
-    def transcribe(self, path: Path, channel_origin: str) -> list[dict[str, Any]]:
+    def transcribe(
+        self,
+        path: Path,
+        channel_origin: str,
+        *,
+        single_speaker: bool = False,
+    ) -> list[dict[str, Any]]:
         segments, _ = self.whisper.transcribe(str(path), vad_filter=True)
         turns = [
             {"start": float(item.start), "end": float(item.end), "text": item.text.strip()}
@@ -110,6 +116,8 @@ class WhisperPyannoteTranscriber:
         # decoding it again and loading audio for pyannote.
         if self.diarizer is None or not turns:
             return turns
+        if single_speaker:
+            return self._label_one_speaker(path, channel_origin, turns)
         output = self._diarize_without_torchcodec(path)
         annotation = getattr(output, "exclusive_speaker_diarization", None) or getattr(
             output, "speaker_diarization", output,
@@ -139,7 +147,30 @@ class WhisperPyannoteTranscriber:
                 turn["speaker"] = f"{channel_origin}:{max(overlaps)[1]}"
         return turns
 
-    def _diarize_without_torchcodec(self, path: Path):
+    def _label_one_speaker(
+        self,
+        path: Path,
+        channel_origin: str,
+        turns: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        speaker = f"{channel_origin}:SPEAKER_00"
+        # pyannote runs once, held to one speaker, only for that speaker's
+        # centroid. It is the same kind of embedding the voice profiles were
+        # enrolled from, so matching can still name the speaker. Its timeline
+        # is not used: every transcribed turn belongs to the one speaker.
+        output = self._diarize_without_torchcodec(path, num_speakers=1)
+        embeddings = list(extract_speaker_embeddings(
+            getattr(output, "speaker_embeddings", {}),
+            getattr(output, "speaker_diarization", output),
+            channel_origin,
+        ).values())
+        if len(embeddings) == 1:
+            self.embeddings[speaker] = embeddings[0]
+        for turn in turns:
+            turn["speaker"] = speaker
+        return turns
+
+    def _diarize_without_torchcodec(self, path: Path, **options):
         """Decode with ffmpeg 8, then pass a waveform so pyannote skips torchcodec."""
         ffmpeg = find_executable("ffmpeg")
         if ffmpeg is None:
@@ -163,13 +194,13 @@ class WhisperPyannoteTranscriber:
             torch.set_num_threads(max(1, min(4, int(os.environ.get("MEETING_ARCHIVE_TORCH_THREADS", "2")))))
             samples = np.memmap(raw_path, mode="c", dtype="<i2")
             waveform = torch.from_numpy(samples).to(torch.float32).div_(32768.0).unsqueeze(0)
-            return diarize_waveform(self.diarizer, waveform, 16000)
+            return diarize_waveform(self.diarizer, waveform, 16000, **options)
         finally:
             raw_path.unlink(missing_ok=True)
 
 
-def diarize_waveform(pipeline, waveform, sample_rate: int):
-    return pipeline({"waveform": waveform, "sample_rate": sample_rate})
+def diarize_waveform(pipeline, waveform, sample_rate: int, **options):
+    return pipeline({"waveform": waveform, "sample_rate": sample_rate}, **options)
 
 
 def process(archive_directory: Path, job: Job) -> None:

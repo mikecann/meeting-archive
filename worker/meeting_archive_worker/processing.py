@@ -10,8 +10,29 @@ from .manifest import VerifiedManifest
 
 
 class AudioTranscriber(Protocol):
-    def transcribe(self, path: Path, channel_origin: str) -> list[dict[str, Any]]:
-        """Return timestamped transcript turns for one preserved source channel."""
+    def transcribe(
+        self,
+        path: Path,
+        channel_origin: str,
+        *,
+        single_speaker: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Return timestamped transcript turns for one preserved source channel.
+
+        With single_speaker, every turn belongs to one speaker instead of the
+        channel being diarized.
+        """
+
+
+def microphone_is_one_speaker(incoming_turns: list[dict[str, Any]]) -> bool:
+    """Whether the whole microphone track is one speaker.
+
+    Mike wears headphones on calls, so when anyone on the incoming track
+    spoke, the microphone heard only him. Diarizing it would just split his
+    voice into several speakers to review. With no incoming speech, as in an
+    in-person meeting, the microphone hears everyone and is diarized.
+    """
+    return any(str(turn.get("text", "")).strip() for turn in incoming_turns)
 
 
 class TranscriptProcessor:
@@ -37,21 +58,28 @@ class TranscriptProcessor:
         manifest: VerifiedManifest,
     ) -> dict[str, Any]:
         root = Path(archive_directory)
+        channels = [
+            (item, self.CHANNEL_KINDS[item.kind])
+            for item in manifest.files
+            if item.kind in self.CHANNEL_KINDS
+        ]
         turns: list[dict[str, Any]] = []
-        sources: list[dict[str, str]] = []
-        for item in manifest.files:
-            channel_origin = self.CHANNEL_KINDS.get(item.kind)
-            if channel_origin is None:
-                continue
+        incoming_turns: list[dict[str, Any]] = []
+        # Incoming goes first, since whether anyone remote spoke decides how
+        # the microphone is labelled.
+        for item, channel_origin in sorted(channels, key=lambda channel: channel[1] != "incoming"):
             path = root.joinpath(*item.path.split("/"))
-            sources.append({"path": item.path, "channel_origin": channel_origin})
-            for raw_turn in self.transcriber.transcribe(path, channel_origin):
+            single_speaker = channel_origin == "microphone" and microphone_is_one_speaker(incoming_turns)
+            for raw_turn in self.transcriber.transcribe(path, channel_origin, single_speaker=single_speaker):
                 turn = self._validated_turn(raw_turn)
+                if channel_origin == "incoming":
+                    incoming_turns.append(turn)
                 offset = self.source_offsets.get(channel_origin, self.metadata_offset(manifest, channel_origin))
                 turn["start"] += offset
                 turn["end"] += offset
                 turn["channel_origin"] = channel_origin
                 turns.append(turn)
+        sources = [{"path": item.path, "channel_origin": channel_origin} for item, channel_origin in channels]
         turns.sort(key=lambda turn: (turn["start"], turn["end"], turn["channel_origin"]))
         return {
             "schema_version": 1,
