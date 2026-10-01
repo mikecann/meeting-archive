@@ -45,6 +45,13 @@ transcription model. `TranscriptProcessor` provides the separate-channel merge
 seam: it preserves `microphone` or `incoming` as `channel_origin`, independently
 of any optional diarization speaker label.
 
+It transcribes the incoming track first. If anyone on it spoke, the whole
+microphone track is one speaker, `microphone:SPEAKER_00`, because Mike wears
+headphones on calls and the mic only hears him. pyannote still runs once on
+the mic, held to one speaker, purely for that voice embedding so profile
+matching can name him. A recording with no incoming speech, like an in-person
+meeting, has its microphone diarized as before.
+
 The optional Bruce adapter is `meeting_archive_worker.processor:process`.
 It imports faster-whisper and pyannote only when a job runs. Configure `HF_HOME`
 on CannMedia and supply `HF_TOKEN` to enable diarization. With no token it
@@ -54,6 +61,12 @@ synthetic testing and records diarization as disabled in provenance. The setup
 smoke test is
 `python -c 'import faster_whisper, pyannote.audio'`; real model success still
 requires a representative fixture benchmark on Bruce.
+
+After the transcript, the adapter builds `playback/meeting.mp4` for review
+excerpts and the viewer, with a `meeting-playback.json` receipt so a retry
+reuses it. Both audio tracks are mixed on the transcript's capture clock. A
+bundle with video, from before v2, also gets H.264 video. An audio-only
+bundle gets an AAC-only MP4.
 
 The service keeps media processing and Notion publication in separate durable
 SQLite states. A Notion outage retries publication with backoff and does not
@@ -118,8 +131,14 @@ fresh idempotent Notion publication without retranscribing media.
 `review-speakers` returns nullable confirmed, automatic, and tentative names,
 cosine similarity and separation values, whether an embedding exists, three timestamped excerpts
 per diarized speaker, an optional absolute playback path, and normalized
-calendar candidate objects. `identify` uses the saved observation automatically
-and enrolls it only after that explicit confirmation.
+calendar candidate objects. Candidates are the top-level `attendees` the app
+writes for the calendar event it matched, each `{name, email, response}`. A
+bundle without that list falls back to the attendees of its only event under
+`calendar`, and suggests nobody when there were several. `identify` uses the
+saved observation automatically and enrolls it only after that explicit
+confirmation. A speaker whose pyannote
+embedding is empty, non-finite or all zeros has no embedding: it is still
+reviewed, but never matched or enrolled, and the rest of the job carries on.
 
 Strong matches retain the 0.82 cosine / 0.08 runner-up margin gate and require
 an explicitly confirmed source meeting. Review-only tentative suggestions use
@@ -135,13 +154,9 @@ the review evidence. The service retries durable speaker refresh requests so
 interrupted transcript or Notion updates recover without retranscribing or
 enrolling predictions. Per-meeting locks serialize review/confirmation writes.
 
-`vision/build.sh` builds the local Apple Vision OCR helper during Bruce setup.
-Video analysis samples at most 12 frames, three per speaker, within a shared
-20-second budget. It compares text only against previously confirmed full names
-and calendar attendee names. `video_label` and `active_speaker_label` evidence
-is cached separately with video/turn/candidate provenance, never used to lower
-voice thresholds or automatically name a speaker. Missing OCR tools and failed
-frame reads do not block transcription or archiving. See [vision/README.md](vision/README.md).
+The worker no longer reads names off video frames. `review-speakers` still
+returns `evidence_labels` for each speaker, always as an empty list, because
+the app decodes it. A `visual-labels.json` left in an older meeting is ignored.
 
 ## Bruce background service
 

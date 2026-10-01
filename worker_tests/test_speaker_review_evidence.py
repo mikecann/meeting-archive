@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 from contextlib import redirect_stdout
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
@@ -16,11 +16,69 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
 from meeting_archive_worker.speaker_evidence import (  # noqa: E402
     automatic_names,
     refresh_speaker_matches,
-    video_label_evidence,
 )
-from meeting_archive_worker.cli import main as cli_main, _speaker_counts_for_status  # noqa: E402
+from meeting_archive_worker.cli import (  # noqa: E402
+    _calendar_candidates,
+    _speaker_counts_for_status,
+    main as cli_main,
+)
 from meeting_archive_worker.queue import JobQueue  # noqa: E402
 from meeting_archive_worker.speakers import SpeakerRegistry  # noqa: E402
+
+
+# Events exactly as the Mac app writes them under metadata["calendar"]: its
+# CalendarSuggestion type encoded by ModelCodec, then re-serialized with sorted
+# keys by SpoolBundle. "email" is left out when unknown and "response" is
+# EKParticipantStatus's raw value as a string. Generated with the app's types.
+PORT_GEO_ATTENDEES = [
+    {"email": "mike.cann@gmail.com", "name": "Mike Cann", "response": "2"},
+    {"email": "priya@example.com", "name": "Priya Shah", "response": "4"},
+    {"name": "Unnamed guest", "response": "0"},
+]
+PORT_GEO_EVENT = {
+    "attendees": PORT_GEO_ATTENDEES,
+    "end": "2026-10-01T01:30:00.000Z",
+    "id": "7D1A6C2E-1F00-4C55-9D2B-3C1D5F2A9B10:1790816400.0",
+    "start": "2026-10-01T01:00:00.000Z",
+    "title": "Acme sync",
+}
+FAMILY_EVENT = {
+    "attendees": [{"email": "kelsie@example.com", "name": "Kelsie Cann", "response": "1"}],
+    "end": "2026-10-01T01:15:00.000Z",
+    "id": "0B5E9F3A-77C4-4E0B-8A61-2D4C9E8F1A23:1790816400.0",
+    "start": "2026-10-01T01:00:00.000Z",
+    "title": "School pickup",
+}
+
+
+def app_metadata(events, attendees=None):
+    """metadata.json as the app writes it; top-level attendees are new in v2."""
+    metadata = {
+        "calendar": events,
+        "duration_seconds": 1800,
+        "ended_at": "2026-10-01T01:30:00.000Z",
+        "manifest_revision": 2,
+        "meeting_id": "current",
+        "schema_version": 1,
+        "source_app": "com.google.Chrome",
+        "started_at": "2026-10-01T01:00:00.000Z",
+        "timezone": "Australia/Perth",
+        "title": "Acme sync",
+        "tracks": {
+            "incoming": {"endOffset": 1800.2, "firstOffset": 0.41, "lastOffset": 1800.18, "sampleCount": 84390},
+            "microphone": {"endOffset": 1800.1, "firstOffset": 0.38, "lastOffset": 1800.08, "sampleCount": 84385},
+        },
+    }
+    if attendees is not None:
+        metadata["attendees"] = attendees
+    return metadata
+
+
+PORT_GEO_CANDIDATES = [
+    {"name": "Mike Cann", "email": "mike.cann@gmail.com", "response_status": "2", "source": None},
+    {"name": "Priya Shah", "email": "priya@example.com", "response_status": "4", "source": None},
+    {"name": "Unnamed guest", "email": None, "response_status": "0", "source": None},
+]
 
 
 def transcript():
@@ -88,43 +146,21 @@ class SpeakerEvidenceTests(unittest.TestCase):
         result["turns"].append({"speaker": "microphone:SPEAKER_00", "text": "unnamed"})
         self.assertEqual(automatic_names(result), {})
 
-    def test_visual_evidence_cache_reuses_frames_but_invalidates_new_candidates(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "playback").mkdir()
-            (root / "playback/meeting.mp4").write_bytes(b"test video")
-            (root / "transcripts/v2").mkdir(parents=True)
-            (root / "metadata.json").write_text(json.dumps({"attendees": ["James Smith"]}))
-            helper = root / "ocr"
-            helper.write_text("test helper")
-            registry = Mock()
-            registry.database = root / "worker.sqlite"
-            labels = {"microphone:SPEAKER_00": [{"name": "Mike Cann", "timestamps": [2.0], "source": "video_label"}]}
-            with patch("meeting_archive_worker.speaker_evidence.known_names", return_value=["Mike Cann"]) as names, \
-                 patch("meeting_archive_worker.speaker_evidence.default_helper_path", return_value=helper), \
-                 patch("meeting_archive_worker.speaker_evidence.extract_visual_labels", return_value=labels) as extract:
-                self.assertEqual(video_label_evidence(root, transcript(), registry), labels)
-                self.assertEqual(video_label_evidence(root, transcript(), registry), labels)
-                self.assertEqual(extract.call_count, 1)
-                self.assertEqual(extract.call_args.args[2], ["James Smith", "Mike Cann"])
-                names.return_value = ["Mike Cann", "Kelsie Cann"]
-                self.assertEqual(video_label_evidence(root, transcript(), registry), labels)
-                self.assertEqual(extract.call_count, 2)
 
-    def test_optional_video_analysis_failure_does_not_break_review_or_cache_failure(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "playback").mkdir()
-            (root / "playback/meeting.mp4").write_bytes(b"test video")
-            (root / "transcripts/v2").mkdir(parents=True)
-            helper = root / "ocr"
-            helper.write_text("test helper")
-            registry = Mock()
-            with patch("meeting_archive_worker.speaker_evidence.known_names", return_value=["Mike Cann"]), \
-                 patch("meeting_archive_worker.speaker_evidence.default_helper_path", return_value=helper), \
-                 patch("meeting_archive_worker.speaker_evidence.extract_visual_labels", side_effect=RuntimeError("unavailable")):
-                self.assertEqual(video_label_evidence(root, transcript(), registry), {})
-                self.assertFalse((root / "transcripts/v2/visual-labels.json").exists())
+class CalendarCandidateTests(unittest.TestCase):
+    def test_top_level_attendees_of_the_matched_event_come_first(self):
+        metadata = app_metadata([PORT_GEO_EVENT, FAMILY_EVENT], attendees=PORT_GEO_ATTENDEES)
+        self.assertEqual(_calendar_candidates(metadata), PORT_GEO_CANDIDATES)
+
+    def test_a_bundle_without_top_level_attendees_uses_its_only_calendar_event(self):
+        self.assertEqual(_calendar_candidates(app_metadata([PORT_GEO_EVENT])), PORT_GEO_CANDIDATES)
+
+    def test_several_calendar_events_without_a_matched_one_suggest_nobody(self):
+        self.assertEqual(_calendar_candidates(app_metadata([PORT_GEO_EVENT, FAMILY_EVENT])), [])
+        self.assertEqual(_calendar_candidates(app_metadata([])), [])
+
+    def test_empty_top_level_attendees_are_not_replaced_by_the_calendar(self):
+        self.assertEqual(_calendar_candidates(app_metadata([FAMILY_EVENT], attendees=[])), [])
 
 
 class ReviewIntegrationTests(unittest.TestCase):
@@ -139,7 +175,10 @@ class ReviewIntegrationTests(unittest.TestCase):
         archive = root / "archive"
         (archive / "transcripts/v2").mkdir(parents=True)
         (archive / "transcripts/v2/transcript.json").write_text(json.dumps(transcript()))
-        (archive / "metadata.json").write_text('{"attendees":[]}')
+        (archive / "metadata.json").write_text(json.dumps(
+            app_metadata([PORT_GEO_EVENT, FAMILY_EVENT], attendees=PORT_GEO_ATTENDEES),
+            sort_keys=True,
+        ))
         return database, registry, archive
 
     def test_two_confirmations_prefill_tentative_review_without_naming_or_enrolling(self):
@@ -150,6 +189,7 @@ class ReviewIntegrationTests(unittest.TestCase):
                 code = cli_main(["review-speakers", "--archive-dir", str(archive), "--revision", "2", "--db", str(database)])
             response = json.loads(output.getvalue())
             self.assertEqual(code, 0)
+            self.assertEqual(response["calendar_candidates"], PORT_GEO_CANDIDATES)
             speaker = response["speakers"][0]
             self.assertEqual(speaker["suggested_name"], "Mike Cann")
             self.assertEqual(speaker["suggestion_kind"], "tentative")
@@ -178,6 +218,25 @@ class ReviewIntegrationTests(unittest.TestCase):
             self.assertEqual(registry.assignments("current", 2), {})
             with sqlite3.connect(database) as connection:
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM voice_profiles").fetchone()[0], 2)
+
+    def test_review_keeps_an_empty_evidence_list_and_ignores_old_video_labels(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            database, _, archive = self.setup_archive(Path(temporary), .72)
+            (archive / "playback").mkdir()
+            (archive / "playback/meeting.mp4").write_bytes(b"old video playback")
+            # A v1 meeting can still hold the cache the removed OCR step wrote.
+            (archive / "transcripts/v2/visual-labels.json").write_text(json.dumps({
+                "key": "stale",
+                "labels": {"microphone:SPEAKER_00": [
+                    {"name": "Mike Cann", "timestamps": [2.0], "source": "video_label"},
+                ]},
+            }))
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = cli_main(["review-speakers", "--archive-dir", str(archive), "--revision", "2", "--db", str(database)])
+            self.assertEqual(code, 0)
+            speakers = json.loads(output.getvalue())["speakers"]
+            self.assertEqual([speaker["evidence_labels"] for speaker in speakers], [[]])
 
     def test_status_does_not_hide_a_name_that_was_not_persisted(self):
         with tempfile.TemporaryDirectory() as temporary:

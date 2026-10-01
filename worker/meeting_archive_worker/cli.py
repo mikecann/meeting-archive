@@ -23,7 +23,7 @@ from .media_validation import MediaValidationError
 from .model_processor import _write_transcript_artifacts
 from .queue import Job, JobQueue, QueueConflict
 from .speakers import SpeakerRegistry
-from .speaker_evidence import automatic_names, refresh_speaker_matches, video_label_evidence
+from .speaker_evidence import automatic_names, refresh_speaker_matches
 
 
 class PermanentProcessingError(RuntimeError):
@@ -66,16 +66,36 @@ def _load_processor(specification: str) -> Callable[[Path, Job], None]:
     return processor
 
 
+def _matched_event_attendees(metadata: dict[str, Any]) -> list[Any]:
+    """Attendees of the calendar event this recording matched.
+
+    The app writes them at the top level. Older bundles only list every nearby
+    event under "calendar", so one of those is used only when it is the sole
+    event. An empty top-level list means the app matched nobody.
+    """
+    attendees = metadata.get("attendees")
+    if isinstance(attendees, list):
+        return attendees
+    events = metadata.get("calendar")
+    if isinstance(events, list) and len(events) == 1 and isinstance(events[0], dict):
+        attendees = events[0].get("attendees")
+        if isinstance(attendees, list):
+            return attendees
+    return []
+
+
 def _calendar_candidates(metadata: dict[str, Any]) -> list[dict[str, str | None]]:
     result = []
-    for raw in metadata.get("attendees", []):
+    for raw in _matched_event_attendees(metadata):
         if isinstance(raw, str) and raw.strip():
             result.append({"name": raw.strip(), "email": None, "response_status": None, "source": None})
         elif isinstance(raw, dict) and isinstance(raw.get("name"), str) and raw["name"].strip():
+            # The app calls it "response": EKParticipantStatus's raw value.
+            response = raw.get("response", raw.get("response_status"))
             result.append({
                 "name": raw["name"].strip(),
                 "email": raw.get("email") if isinstance(raw.get("email"), str) else None,
-                "response_status": raw.get("response_status") if isinstance(raw.get("response_status"), str) else None,
+                "response_status": response if isinstance(response, str) else None,
                 "source": raw.get("source") if isinstance(raw.get("source"), str) else None,
             })
     return result
@@ -440,7 +460,6 @@ def main(argv: list[str] | None = None) -> int:
             reconcile_speaker_refresh(args.db, transcript["meeting_id"], args.revision)
             speaker_ids = sorted({turn["speaker"] for turn in transcript["turns"] if "speaker" in turn})
             metadata = json.loads((args.archive_dir / "metadata.json").read_text(encoding="utf-8"))
-            visual_evidence = video_label_evidence(args.archive_dir, transcript, registry)
             speakers = []
             for value in speaker_ids:
                 observation = registry.observation_record(transcript["meeting_id"], args.revision, value)
@@ -463,7 +482,9 @@ def main(argv: list[str] | None = None) -> int:
                     "suggestion_margin": match.get("suggestion_margin"),
                     "confirmation_count": match.get("confirmation_count", 0),
                     "embedding_available": observation is not None, "excerpts": excerpts,
-                    "evidence_labels": visual_evidence.get(value, []),
+                    # Names are no longer read from video frames. The app still
+                    # decodes this field, so it stays as an empty list.
+                    "evidence_labels": [],
                 })
             _print_json({"schema_version": 1, "meeting_id": transcript["meeting_id"], "manifest_revision": args.revision, "speakers": speakers, "calendar_candidates": _calendar_candidates(metadata)})
             return 0

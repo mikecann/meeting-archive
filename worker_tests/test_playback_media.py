@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import shutil
 import subprocess
@@ -21,6 +22,7 @@ from meeting_archive_worker.processing import TranscriptProcessor, timeline_offs
 
 
 FFMPEG = shutil.which("ffmpeg")
+FFPROBE = shutil.which("ffprobe")
 
 
 def _encoder_available(name: str) -> bool:
@@ -172,6 +174,107 @@ class PlaybackMediaTests(unittest.TestCase):
             self.assertIn("h264_videotoolbox", commands[0])
             self.assertIn("libx264", commands[1])
             self.assertEqual(commands[1][commands[1].index("-threads:v") + 1], "2")
+
+    def test_audio_only_bundle_mixes_both_tracks_into_aac_on_the_capture_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = (
+                VerifiedFile("microphone.m4a", 10, "a" * 64, "microphone_audio"),
+                VerifiedFile("incoming.m4a", 12, "b" * 64, "incoming_audio"),
+            )
+            metadata = {"tracks": {"microphone": {"firstOffset": 0.2}, "incoming": {"firstOffset": 0.1}}}
+            commands = []
+
+            def fake_run(command, **_kwargs):
+                commands.append(command)
+                Path(command[-1]).write_bytes(b"AAC playback")
+
+            with patch("meeting_archive_worker.model_processor.find_executable", return_value="ffmpeg"), \
+                 patch("meeting_archive_worker.model_processor.subprocess.run", side_effect=fake_run):
+                output = create_playback(root, SimpleNamespace(files=files, metadata=metadata))
+
+            self.assertEqual(output, root / "playback" / "meeting.mp4")
+            self.assertEqual(output.read_bytes(), b"AAC playback")
+            [command] = commands
+            self.assertEqual(
+                [command[index + 1] for index, value in enumerate(command) if value == "-i"],
+                [str(root / "microphone.m4a"), str(root / "incoming.m4a")],
+            )
+            self.assertEqual(
+                command[command.index("-filter_complex") + 1],
+                "[0:a:0]asetpts=PTS-STARTPTS,adelay=200:all=1[a0];"
+                "[1:a:0]asetpts=PTS-STARTPTS,adelay=100:all=1[a1];"
+                "[a0][a1]amix=inputs=2:duration=longest[a]",
+            )
+            self.assertEqual(command[command.index("-map") + 1], "[a]")
+            self.assertEqual(command[command.index("-c:a") + 1], "aac")
+            self.assertIn("+faststart", command)
+            self.assertNotIn("-c:v", command)
+            self.assertNotIn("[v]", command)
+            self.assertEqual(
+                json.loads((root / "playback" / "meeting-playback.json").read_text(encoding="utf-8")),
+                {
+                    "schema_version": 1,
+                    "recipe_version": 2,
+                    "sources": [
+                        {"path": "microphone.m4a", "size_bytes": 10, "sha256": "a" * 64, "kind": "microphone_audio"},
+                        {"path": "incoming.m4a", "size_bytes": 12, "sha256": "b" * 64, "kind": "incoming_audio"},
+                    ],
+                    "first_offsets": {"microphone": 0.2, "incoming": 0.1},
+                },
+            )
+
+    def test_audio_only_bundle_with_one_track_needs_no_mix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = (VerifiedFile("incoming.m4a", 10, "a" * 64, "incoming_audio"),)
+            commands = []
+
+            def fake_run(command, **_kwargs):
+                commands.append(command)
+                Path(command[-1]).write_bytes(b"AAC playback")
+
+            with patch("meeting_archive_worker.model_processor.find_executable", return_value="ffmpeg"), \
+                 patch("meeting_archive_worker.model_processor.subprocess.run", side_effect=fake_run):
+                create_playback(root, SimpleNamespace(
+                    files=files,
+                    metadata={"tracks": {"incoming": {"firstOffset": 0.4}}},
+                ))
+
+            [command] = commands
+            self.assertEqual(
+                command[command.index("-filter_complex") + 1],
+                "[0:a:0]asetpts=PTS-STARTPTS,adelay=400:all=1[a0]",
+            )
+            self.assertEqual(command[command.index("-map") + 1], "[a0]")
+
+    def test_audio_only_receipt_is_reused_only_while_the_output_is_aac(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = (
+                VerifiedFile("microphone.m4a", 10, "a" * 64, "microphone_audio"),
+                VerifiedFile("incoming.m4a", 10, "b" * 64, "incoming_audio"),
+            )
+            manifest = SimpleNamespace(files=files, metadata={})
+            commands = []
+
+            def fake_run(command, **_kwargs):
+                commands.append(command)
+                Path(command[-1]).write_bytes(f"AAC playback {len(commands)}".encode())
+
+            # An audio-only playback has no H.264 stream to check.
+            with patch("meeting_archive_worker.model_processor.find_executable", return_value="ffmpeg"), \
+                 patch("meeting_archive_worker.model_processor._playback_is_h264", side_effect=AssertionError), \
+                 patch("meeting_archive_worker.model_processor.subprocess.run", side_effect=fake_run):
+                create_playback(root, manifest)
+                with patch("meeting_archive_worker.model_processor._playback_is_aac", return_value=True):
+                    create_playback(root, manifest)
+                self.assertEqual(len(commands), 1)
+                with patch("meeting_archive_worker.model_processor._playback_is_aac", return_value=False):
+                    output = create_playback(root, manifest)
+
+            self.assertEqual(len(commands), 2)
+            self.assertEqual(output.read_bytes(), b"AAC playback 2")
 
     def test_derived_output_symlink_is_replaced_and_never_receipted_as_reused(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -337,7 +440,7 @@ class PlaybackMediaTests(unittest.TestCase):
             beep_time = float(re.search(r"silence_end: ([0-9.]+)", silencedetect).group(1))
 
             class FakeTranscriber:
-                def transcribe(self, _path: Path, origin: str):
+                def transcribe(self, _path: Path, origin: str, *, single_speaker: bool = False):
                     start = 1.1 if origin == "microphone" else 0.9
                     return [{"start": start, "end": start + 0.1, "text": "beep"}]
 
@@ -354,6 +457,72 @@ class PlaybackMediaTests(unittest.TestCase):
             self.assertEqual(len(transcript_times), 2)
             for transcript_time in transcript_times:
                 self.assertAlmostEqual(transcript_time, 1.3, delta=0.0001)
+
+    @unittest.skipUnless(FFMPEG and FFPROBE, "ffmpeg and ffprobe are required")
+    def test_audio_only_sources_become_aligned_aac_playback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            microphone = root / "microphone.m4a"
+            incoming = root / "incoming.m4a"
+            # v2 records a mono microphone and stereo incoming audio. Each file
+            # has its own AAC priming and container start.
+            for path, start, frequency, container_offset, layout in (
+                (microphone, 1.1, 1000, 0.05, "mono"),
+                (incoming, 0.9, 700, 0.12, "stereo"),
+            ):
+                subprocess.run([
+                    FFMPEG, "-v", "error", "-f", "lavfi", "-i",
+                    f"aevalsrc=if(between(t\\,{start}\\,{start + 0.1})\\,"
+                    f"0.8*sin(2*PI*{frequency}*t)\\,0):s=48000:d=2:c={layout}",
+                    "-af", f"asetpts=PTS+{container_offset}/TB", "-c:a", "aac", "-y", str(path),
+                ], check=True, capture_output=True)
+
+            files = (
+                VerifiedFile(microphone.name, microphone.stat().st_size, "0" * 64, "microphone_audio"),
+                VerifiedFile(incoming.name, incoming.stat().st_size, "0" * 64, "incoming_audio"),
+            )
+            source_hashes = {
+                path: hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in (microphone, incoming)
+            }
+            manifest = SimpleNamespace(
+                files=files,
+                metadata={"tracks": {"microphone": {"firstOffset": 0.2}, "incoming": {"firstOffset": 0.4}}},
+                meeting_id="11111111-1111-4111-8111-111111111111",
+                revision=1,
+            )
+            output = create_playback(root, manifest)
+            self.assertEqual(output, root / "playback" / "meeting.mp4")
+            self.assertEqual(
+                {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in source_hashes},
+                source_hashes,
+            )
+
+            streams = json.loads(subprocess.run([
+                FFPROBE, "-v", "error", "-show_entries", "stream=codec_type,codec_name",
+                "-of", "json", str(output),
+            ], check=True, capture_output=True, text=True).stdout)["streams"]
+            self.assertEqual(streams, [{"codec_name": "aac", "codec_type": "audio"}])
+
+            silencedetect = subprocess.run([
+                FFMPEG, "-hide_banner", "-i", str(output), "-af",
+                "silencedetect=noise=-30dB:d=0.05", "-f", "null", "-",
+            ], check=True, capture_output=True, text=True).stderr
+            beep_time = float(re.search(r"silence_end: ([0-9.]+)", silencedetect).group(1))
+            self.assertAlmostEqual(beep_time, 1.3, delta=0.1)
+
+            class FakeTranscriber:
+                def transcribe(self, _path: Path, origin: str, *, single_speaker: bool = False):
+                    start = 1.1 if origin == "microphone" else 0.9
+                    return [{"start": start, "end": start + 0.1, "text": "beep"}]
+
+            transcript = TranscriptProcessor(FakeTranscriber()).process(root, manifest)
+            self.assertEqual([round(turn["start"], 4) for turn in transcript["turns"]], [1.3, 1.3])
+
+            # The receipt and a real AAC probe let a retry keep the same file.
+            inode = output.stat().st_ino
+            self.assertEqual(create_playback(root, manifest), output)
+            self.assertEqual(output.stat().st_ino, inode)
 
 
 if __name__ == "__main__":

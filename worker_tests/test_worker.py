@@ -805,10 +805,12 @@ class ProcessingTests(unittest.TestCase):
             }
             (output / "transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
 
+            # The fixture's audio bytes are not real media, so the playback
+            # encode this audio-only bundle now gets is stubbed out.
             with patch.dict(os.environ, {}, clear=True), patch(
                 "meeting_archive_worker.model_processor.WhisperPyannoteTranscriber",
                 side_effect=AssertionError("checkpoint recovery must not load models"),
-            ):
+            ), patch("meeting_archive_worker.model_processor.create_playback") as playback:
                 model_process(
                     incoming,
                     SimpleNamespace(
@@ -820,6 +822,7 @@ class ProcessingTests(unittest.TestCase):
 
             self.assertIn("Recovered view", (output / "transcript.md").read_text(encoding="utf-8"))
             self.assertEqual(list(output.glob("*.part")), [])
+            playback.assert_called_once()
 
     def test_whisper_uses_bounded_cpu_threads_and_vad(self) -> None:
         calls = {}
@@ -1091,11 +1094,63 @@ class ProcessingTests(unittest.TestCase):
             self.assertGreater(playback.stat().st_size, 0)  # type: ignore[union-attr]
 
             class FakeTranscriber:
-                def transcribe(self, path: Path, channel_origin: str):
+                def transcribe(self, path: Path, channel_origin: str, *, single_speaker: bool = False):
                     return [{"start": 0.0, "end": 1.0, "text": "can you hear me"}]
 
             result = TranscriptProcessor(FakeTranscriber()).process(destination, verified)
             self.assertEqual(result["sources"], [{"path": "incoming.m4a", "channel_origin": "incoming"}])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg or ffprobe is unavailable")
+    def test_audio_only_v2_bundle_is_validated_archived_and_played_back(self) -> None:
+        # v2 captures a mono microphone and stereo incoming audio, and no video.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            meeting_id = str(uuid.uuid4())
+            incoming = root / "incoming" / meeting_id / "r1"
+            incoming.mkdir(parents=True)
+            ffmpeg = shutil.which("ffmpeg")
+            for name, layout, frequency in (("microphone.m4a", "mono", 440), ("incoming.m4a", "stereo", 660)):
+                subprocess.run([
+                    ffmpeg, "-v", "error", "-f", "lavfi", "-i", f"sine=frequency={frequency}:sample_rate=48000:duration=2",
+                    "-af", f"aformat=channel_layouts={layout}", "-c:a", "aac", str(incoming / name),
+                ], check=True)
+            metadata = {
+                "schema_version": 1,
+                "meeting_id": meeting_id,
+                "manifest_revision": 1,
+                "started_at": "2026-10-01T09:02:00+08:00",
+                "ended_at": "2026-10-01T09:02:02+08:00",
+                "duration_seconds": 2,
+                "timezone": "Australia/Perth",
+                "source_app": "com.google.Chrome",
+                "tracks": {"incoming": {"firstOffset": 0.41}, "microphone": {"firstOffset": 0.38}},
+            }
+            (incoming / "metadata.json").write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
+            files = []
+            for path, kind in (("microphone.m4a", "microphone_audio"), ("incoming.m4a", "incoming_audio"), ("metadata.json", "metadata")):
+                data = (incoming / path).read_bytes()
+                files.append({"path": path, "size_bytes": len(data), "sha256": sha256(data), "kind": kind})
+            manifest = {"schema_version": 1, "meeting_id": meeting_id, "revision": 1, "files": files}
+            (incoming / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+            archive = root / "archive"
+            archive.mkdir()
+
+            acknowledgement = ArchiveStore(archive, root / "worker.sqlite3", validate_media=True).accept(incoming)
+
+            self.assertTrue(acknowledgement["cleanup_allowed"])
+            self.assertEqual(
+                sorted(item["kind"] for item in acknowledgement["media_validation"]["files"]),
+                ["incoming_audio", "microphone_audio"],
+            )
+            archive_path = Path(acknowledgement["archive_path"])
+            destination = archive_path if archive_path.is_absolute() else archive / archive_path
+            playback = create_playback(destination, verify_incoming(destination))
+            self.assertEqual(playback, destination / "playback" / "meeting.mp4")
+            codecs = subprocess.run(
+                [shutil.which("ffprobe"), "-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "csv=p=0", str(playback)],
+                check=True, capture_output=True, text=True,
+            ).stdout.split()
+            self.assertEqual(codecs, ["aac,audio"])
 
     def test_playback_command_rebuilds_shared_timeline_from_capture_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1131,7 +1186,7 @@ class ProcessingTests(unittest.TestCase):
             verified = verify_incoming(incoming)
 
             class FakeTranscriber:
-                def transcribe(self, path: Path, channel_origin: str):
+                def transcribe(self, path: Path, channel_origin: str, *, single_speaker: bool = False):
                     if channel_origin == "microphone":
                         return [{"start": 1.0, "end": 2.0, "text": "hello"}]
                     return [{"start": 0.5, "end": 1.5, "text": "hi", "speaker": "SPEAKER_00"}]
