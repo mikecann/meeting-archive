@@ -49,8 +49,9 @@ enum AppPermissionStatus: String, Equatable, Sendable {
     case denied
     case restricted
     case unknown
-    /// macOS has no public API to read this one. It asks on the first recording.
-    case askedOnFirstUse
+    /// macOS has no public API to read this one, so after asking all the app
+    /// can do is point at System Settings.
+    case cannotCheck
 
     var label: String {
         switch self {
@@ -60,7 +61,7 @@ enum AppPermissionStatus: String, Equatable, Sendable {
         case .denied: "Denied"
         case .restricted: "Restricted"
         case .unknown: "Unknown"
-        case .askedOnFirstUse: "Asked on first recording"
+        case .cannotCheck: "Can't be checked"
         }
     }
 }
@@ -105,7 +106,7 @@ final class AppPermissions: ObservableObject {
     func refresh() async {
         let notificationSettings = await UNUserNotificationCenter.current().notificationSettings()
         statuses = [
-            .systemAudio: .askedOnFirstUse,
+            .systemAudio: defaults.bool(forKey: AppPermissionKind.systemAudio.requestAttemptedKey) ? .cannotCheck : .notRequested,
             .microphone: AppPermissionStatusMapper.system(Self.microphoneStatus()),
             .notifications: AppPermissionStatusMapper.system(Self.notificationStatus(notificationSettings.authorizationStatus)),
             .calendar: AppPermissionStatusMapper.system(Self.calendarStatus()),
@@ -118,7 +119,7 @@ final class AppPermissions: ObservableObject {
     ) async {
         failure = nil
         switch status(for: permission) {
-        case .needsAccess, .denied, .restricted, .unknown, .askedOnFirstUse:
+        case .needsAccess, .denied, .restricted, .unknown, .cannotCheck:
             openSystemSettings(for: permission)
             return
         case .granted:
@@ -132,7 +133,7 @@ final class AppPermissions: ObservableObject {
         do {
             switch permission {
             case .systemAudio:
-                break
+                await SystemAudioPermission.request()
             case .microphone:
                 _ = await AVCaptureDevice.requestAccess(for: .audio)
             case .notifications:

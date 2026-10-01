@@ -80,11 +80,12 @@ when one is available, so the signature stays stable across rebuilds.
 
 ## Using it
 
-Open Settings from the menu bar, allow the microphone and notifications, and
-select the calendars you want to use. macOS asks about recording system audio
-the first time a call gets recorded. Set the worker host and archive path to
-match your worker installation, and enable launch at login if you want it
-running after a restart.
+Open Settings from the menu bar, allow the microphone, call audio and
+notifications, and select the calendars you want to use. Allowing call audio
+records a second of nothing so macOS asks you there and then, rather than in
+the middle of your first call. Set the worker host and archive path to match
+your worker installation, and enable launch at login if you want it running
+after a restart.
 
 After that you shouldn't need to do anything. When a call starts you get a
 notification with Stop and Discard buttons, and the menu bar icon goes red.
@@ -160,9 +161,9 @@ needs. macOS may require reopening the app after granting them:
 
 - Microphone, for your side of the call. It keeps recording even when you're
   muted in the call app
-- System Audio Recording Only, for everyone else on the call. macOS asks the
-  first time a call is recorded, and there's no way for the app to check it
-  beforehand
+- System Audio Recording Only, for everyone else on the call. There's no way
+  for the app to check it, so if a call ever comes out with only your side, it
+  tells you to look in System Settings
 - Notifications, so you can see when it's recording and stop or discard it
   from the banner
 - Calendar access, after adding your accounts in macOS Internet Accounts;

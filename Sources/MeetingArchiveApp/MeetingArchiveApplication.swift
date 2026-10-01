@@ -474,8 +474,8 @@ private struct PermissionRow: View {
             return "Restricted · Open Settings"
         case .unknown:
             return "Unknown · Open Settings"
-        case .askedOnFirstUse:
-            return "Asked on first recording · Open Settings"
+        case .cannotCheck:
+            return "Can't be checked · Open Settings"
         }
     }
 }
