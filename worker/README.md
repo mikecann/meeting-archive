@@ -118,8 +118,12 @@ fresh idempotent Notion publication without retranscribing media.
 `review-speakers` returns nullable confirmed, automatic, and tentative names,
 cosine similarity and separation values, whether an embedding exists, three timestamped excerpts
 per diarized speaker, an optional absolute playback path, and normalized
-calendar candidate objects. `identify` uses the saved observation automatically
-and enrolls it only after that explicit confirmation. A speaker whose pyannote
+calendar candidate objects. Candidates are the top-level `attendees` the app
+writes for the calendar event it matched, each `{name, email, response}`. A
+bundle without that list falls back to the attendees of its only event under
+`calendar`, and suggests nobody when there were several. `identify` uses the
+saved observation automatically and enrolls it only after that explicit
+confirmation. A speaker whose pyannote
 embedding is empty, non-finite or all zeros has no embedding: it is still
 reviewed, but never matched or enrolled, and the rest of the job carries on.
 

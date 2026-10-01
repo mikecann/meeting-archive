@@ -17,9 +17,68 @@ from meeting_archive_worker.speaker_evidence import (  # noqa: E402
     automatic_names,
     refresh_speaker_matches,
 )
-from meeting_archive_worker.cli import main as cli_main, _speaker_counts_for_status  # noqa: E402
+from meeting_archive_worker.cli import (  # noqa: E402
+    _calendar_candidates,
+    _speaker_counts_for_status,
+    main as cli_main,
+)
 from meeting_archive_worker.queue import JobQueue  # noqa: E402
 from meeting_archive_worker.speakers import SpeakerRegistry  # noqa: E402
+
+
+# Events exactly as the Mac app writes them under metadata["calendar"]: its
+# CalendarSuggestion type encoded by ModelCodec, then re-serialized with sorted
+# keys by SpoolBundle. "email" is left out when unknown and "response" is
+# EKParticipantStatus's raw value as a string. Generated with the app's types.
+PORT_GEO_ATTENDEES = [
+    {"email": "mike.cann@gmail.com", "name": "Mike Cann", "response": "2"},
+    {"email": "priya@example.com", "name": "Priya Shah", "response": "4"},
+    {"name": "Unnamed guest", "response": "0"},
+]
+PORT_GEO_EVENT = {
+    "attendees": PORT_GEO_ATTENDEES,
+    "end": "2026-10-01T01:30:00.000Z",
+    "id": "7D1A6C2E-1F00-4C55-9D2B-3C1D5F2A9B10:1790816400.0",
+    "start": "2026-10-01T01:00:00.000Z",
+    "title": "Acme sync",
+}
+FAMILY_EVENT = {
+    "attendees": [{"email": "kelsie@example.com", "name": "Kelsie Cann", "response": "1"}],
+    "end": "2026-10-01T01:15:00.000Z",
+    "id": "0B5E9F3A-77C4-4E0B-8A61-2D4C9E8F1A23:1790816400.0",
+    "start": "2026-10-01T01:00:00.000Z",
+    "title": "School pickup",
+}
+
+
+def app_metadata(events, attendees=None):
+    """metadata.json as the app writes it; top-level attendees are new in v2."""
+    metadata = {
+        "calendar": events,
+        "duration_seconds": 1800,
+        "ended_at": "2026-10-01T01:30:00.000Z",
+        "manifest_revision": 2,
+        "meeting_id": "current",
+        "schema_version": 1,
+        "source_app": "com.google.Chrome",
+        "started_at": "2026-10-01T01:00:00.000Z",
+        "timezone": "Australia/Perth",
+        "title": "Acme sync",
+        "tracks": {
+            "incoming": {"endOffset": 1800.2, "firstOffset": 0.41, "lastOffset": 1800.18, "sampleCount": 84390},
+            "microphone": {"endOffset": 1800.1, "firstOffset": 0.38, "lastOffset": 1800.08, "sampleCount": 84385},
+        },
+    }
+    if attendees is not None:
+        metadata["attendees"] = attendees
+    return metadata
+
+
+PORT_GEO_CANDIDATES = [
+    {"name": "Mike Cann", "email": "mike.cann@gmail.com", "response_status": "2", "source": None},
+    {"name": "Priya Shah", "email": "priya@example.com", "response_status": "4", "source": None},
+    {"name": "Unnamed guest", "email": None, "response_status": "0", "source": None},
+]
 
 
 def transcript():
@@ -88,6 +147,22 @@ class SpeakerEvidenceTests(unittest.TestCase):
         self.assertEqual(automatic_names(result), {})
 
 
+class CalendarCandidateTests(unittest.TestCase):
+    def test_top_level_attendees_of_the_matched_event_come_first(self):
+        metadata = app_metadata([PORT_GEO_EVENT, FAMILY_EVENT], attendees=PORT_GEO_ATTENDEES)
+        self.assertEqual(_calendar_candidates(metadata), PORT_GEO_CANDIDATES)
+
+    def test_a_bundle_without_top_level_attendees_uses_its_only_calendar_event(self):
+        self.assertEqual(_calendar_candidates(app_metadata([PORT_GEO_EVENT])), PORT_GEO_CANDIDATES)
+
+    def test_several_calendar_events_without_a_matched_one_suggest_nobody(self):
+        self.assertEqual(_calendar_candidates(app_metadata([PORT_GEO_EVENT, FAMILY_EVENT])), [])
+        self.assertEqual(_calendar_candidates(app_metadata([])), [])
+
+    def test_empty_top_level_attendees_are_not_replaced_by_the_calendar(self):
+        self.assertEqual(_calendar_candidates(app_metadata([FAMILY_EVENT], attendees=[])), [])
+
+
 class ReviewIntegrationTests(unittest.TestCase):
     def setup_archive(self, root, score):
         database = root / "worker.sqlite"
@@ -100,7 +175,10 @@ class ReviewIntegrationTests(unittest.TestCase):
         archive = root / "archive"
         (archive / "transcripts/v2").mkdir(parents=True)
         (archive / "transcripts/v2/transcript.json").write_text(json.dumps(transcript()))
-        (archive / "metadata.json").write_text('{"attendees":[]}')
+        (archive / "metadata.json").write_text(json.dumps(
+            app_metadata([PORT_GEO_EVENT, FAMILY_EVENT], attendees=PORT_GEO_ATTENDEES),
+            sort_keys=True,
+        ))
         return database, registry, archive
 
     def test_two_confirmations_prefill_tentative_review_without_naming_or_enrolling(self):
@@ -111,6 +189,7 @@ class ReviewIntegrationTests(unittest.TestCase):
                 code = cli_main(["review-speakers", "--archive-dir", str(archive), "--revision", "2", "--db", str(database)])
             response = json.loads(output.getvalue())
             self.assertEqual(code, 0)
+            self.assertEqual(response["calendar_candidates"], PORT_GEO_CANDIDATES)
             speaker = response["speakers"][0]
             self.assertEqual(speaker["suggested_name"], "Mike Cann")
             self.assertEqual(speaker["suggestion_kind"], "tentative")

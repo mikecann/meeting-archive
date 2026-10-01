@@ -66,16 +66,36 @@ def _load_processor(specification: str) -> Callable[[Path, Job], None]:
     return processor
 
 
+def _matched_event_attendees(metadata: dict[str, Any]) -> list[Any]:
+    """Attendees of the calendar event this recording matched.
+
+    The app writes them at the top level. Older bundles only list every nearby
+    event under "calendar", so one of those is used only when it is the sole
+    event. An empty top-level list means the app matched nobody.
+    """
+    attendees = metadata.get("attendees")
+    if isinstance(attendees, list):
+        return attendees
+    events = metadata.get("calendar")
+    if isinstance(events, list) and len(events) == 1 and isinstance(events[0], dict):
+        attendees = events[0].get("attendees")
+        if isinstance(attendees, list):
+            return attendees
+    return []
+
+
 def _calendar_candidates(metadata: dict[str, Any]) -> list[dict[str, str | None]]:
     result = []
-    for raw in metadata.get("attendees", []):
+    for raw in _matched_event_attendees(metadata):
         if isinstance(raw, str) and raw.strip():
             result.append({"name": raw.strip(), "email": None, "response_status": None, "source": None})
         elif isinstance(raw, dict) and isinstance(raw.get("name"), str) and raw["name"].strip():
+            # The app calls it "response": EKParticipantStatus's raw value.
+            response = raw.get("response", raw.get("response_status"))
             result.append({
                 "name": raw["name"].strip(),
                 "email": raw.get("email") if isinstance(raw.get("email"), str) else None,
-                "response_status": raw.get("response_status") if isinstance(raw.get("response_status"), str) else None,
+                "response_status": response if isinstance(response, str) else None,
                 "source": raw.get("source") if isinstance(raw.get("source"), str) else None,
             })
     return result
