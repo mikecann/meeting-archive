@@ -330,3 +330,47 @@ class DiarizationDeviceTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             transcriber._run_diarizer(object())
+
+
+class EchoTests(unittest.TestCase):
+    """The 1 Oct test call, played through speakers into the Yeti."""
+
+    def turn(self, channel: str, start: float, end: float, text: str) -> dict:
+        return {"start": start, "end": end, "text": text, "channel_origin": channel}
+
+    def test_mic_lines_repeating_the_call_audio_are_dropped(self) -> None:
+        from meeting_archive_worker.processing import remove_echoed_microphone_turns
+
+        turns = [
+            self.turn("incoming", 4.4, 9.0, "Hi Mike, this is a test call for meeting archive. Can you hear me all right?"),
+            self.turn("microphone", 4.6, 9.2, "Hi Mike, this is a test call for meeting our guy. Can you hear me alright?"),
+            self.turn("incoming", 18.6, 25.5, "Great. The other thing to check is that the call audio comes through clearly. So this is me talking for a little while longer"),
+            self.turn("microphone", 18.8, 22.6, "Great, the other thing to check is that the call audio comes through it clearly,"),
+            self.turn("microphone", 22.8, 25.4, "so this is me talking through a little while longer."),
+            self.turn("incoming", 25.7, 26.6, "Thanks speak soon"),
+            self.turn("microphone", 25.6, 26.5, "Thanks, speak soon."),
+            self.turn("microphone", 87.2, 88.0, "I'm outta here."),
+        ]
+
+        kept, removed = remove_echoed_microphone_turns(turns)
+
+        self.assertEqual(removed, 4)
+        self.assertEqual([turn["channel_origin"] for turn in kept], ["incoming", "incoming", "incoming", "microphone"])
+        self.assertEqual(kept[-1]["text"], "I'm outta here.")
+
+    def test_mikes_own_words_are_kept_even_mid_call(self) -> None:
+        from meeting_archive_worker.processing import remove_echoed_microphone_turns
+
+        turns = [
+            self.turn("incoming", 0.0, 5.0, "So the quote for the lights came in at five hundred dollars"),
+            self.turn("microphone", 4.0, 7.0, "That sounds fine, let's go ahead with it"),
+            # A short reply only counts as echo when every word was just said.
+            self.turn("incoming", 8.0, 9.0, "Okay great"),
+            self.turn("microphone", 8.5, 9.0, "Yeah"),
+            self.turn("microphone", 30.0, 32.0, "Five hundred dollars"),
+        ]
+
+        kept, removed = remove_echoed_microphone_turns(turns)
+
+        self.assertEqual(removed, 0)
+        self.assertEqual(len(kept), 5)

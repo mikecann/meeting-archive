@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import math
+import re
 from typing import Any, Protocol
 
 from .manifest import VerifiedManifest
@@ -48,6 +49,61 @@ def microphone_is_one_speaker(incoming_turns: list[dict[str, Any]], *, source_ap
     return speech >= MINIMUM_INCOMING_SPEECH_SECONDS
 
 
+#: How far apart, in seconds, a mic line and the call audio it echoes can sit.
+#: Whisper cuts the two tracks into segments at different places.
+ECHO_WINDOW_SECONDS = 2.0
+#: The share of a mic line's words that must appear, in order, in what the
+#: call audio said around the same time for the line to count as echo.
+ECHO_MATCH_RATIO = 0.7
+
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
+def _common_in_order(first: list[str], second: list[str]) -> int:
+    """Length of the longest run of words the two share in the same order."""
+    previous = [0] * (len(second) + 1)
+    for word in first:
+        current = [0]
+        for index, other in enumerate(second, start=1):
+            current.append(previous[index - 1] + 1 if word == other else max(previous[index], current[index - 1]))
+        previous = current
+    return previous[-1]
+
+
+def remove_echoed_microphone_turns(turns: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Drop mic lines that are the call audio heard through the speakers.
+
+    Without headphones the microphone hears the other side too, and the
+    transcript says everything twice, the second time as if Mike said it. A
+    mic line counts as echo when most of its words appear, in order, in what
+    the call audio said within a couple of seconds. A one or two word line
+    must match completely, so Mike's own short replies survive.
+    """
+    incoming = [turn for turn in turns if turn.get("channel_origin") == "incoming"]
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    for turn in turns:
+        words = _words(str(turn.get("text", ""))) if turn.get("channel_origin") == "microphone" else []
+        if not words:
+            kept.append(turn)
+            continue
+        heard = [
+            word
+            for other in incoming
+            if other["start"] <= turn["end"] + ECHO_WINDOW_SECONDS and other["end"] >= turn["start"] - ECHO_WINDOW_SECONDS
+            for word in _words(str(other.get("text", "")))
+        ]
+        matched = _common_in_order(words, heard) if heard else 0
+        echo = matched == len(words) if len(words) <= 2 else matched / len(words) >= ECHO_MATCH_RATIO
+        if echo:
+            removed += 1
+        else:
+            kept.append(turn)
+    return kept, removed
+
+
 class TranscriptProcessor:
     """Transcribe preserved channels separately and merge their timelines.
 
@@ -64,6 +120,7 @@ class TranscriptProcessor:
     def __init__(self, transcriber: AudioTranscriber, source_offsets: dict[str, float] | None = None):
         self.transcriber = transcriber
         self.source_offsets = source_offsets or {}
+        self.echo_turns_removed = 0
 
     def process(
         self,
@@ -94,6 +151,7 @@ class TranscriptProcessor:
                 turn["channel_origin"] = channel_origin
                 turns.append(turn)
         sources = [{"path": item.path, "channel_origin": channel_origin} for item, channel_origin in channels]
+        turns, self.echo_turns_removed = remove_echoed_microphone_turns(turns)
         turns.sort(key=lambda turn: (turn["start"], turn["end"], turn["channel_origin"]))
         return {
             "schema_version": 1,

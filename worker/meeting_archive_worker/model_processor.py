@@ -302,7 +302,10 @@ def process(archive_directory: Path, job: Job) -> None:
         if origin:
             first = TranscriptProcessor.metadata_offset(manifest, origin)
             offsets[origin] = timeline_offset(first, probe_start_time(archive_directory / item.path))
-    result = TranscriptProcessor(transcriber, offsets).process(archive_directory, manifest)
+    processor = TranscriptProcessor(transcriber, offsets)
+    result = processor.process(archive_directory, manifest)
+    if processor.echo_turns_removed:
+        print(f"Removed {processor.echo_turns_removed} microphone lines that echoed the call audio.", file=sys.stderr)
     result["processing"] = {
         "manifest_sha256": manifest.manifest_sha256,
         "whisper_model": os.environ.get("MEETING_ARCHIVE_WHISPER_MODEL", "small.en"),
@@ -323,7 +326,11 @@ def process(archive_directory: Path, job: Job) -> None:
     worker_db = os.environ.get("MEETING_ARCHIVE_WORKER_DB")
     if worker_db:
         registry = SpeakerRegistry(worker_db)
+        # A speaker whose every line was echo isn't anyone to name.
+        heard = {turn.get("speaker") for turn in result["turns"]}
         for speaker_id, embedding in transcriber.embeddings.items():
+            if speaker_id not in heard:
+                continue
             registry.save_observation(
                 manifest.meeting_id,
                 manifest.revision,

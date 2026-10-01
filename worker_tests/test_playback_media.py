@@ -442,7 +442,7 @@ class PlaybackMediaTests(unittest.TestCase):
             class FakeTranscriber:
                 def transcribe(self, _path: Path, origin: str, *, single_speaker: bool = False):
                     start = 1.1 if origin == "microphone" else 0.9
-                    return [{"start": start, "end": start + 0.1, "text": "beep"}]
+                    return [{"start": start, "end": start + 0.1, "text": f"{origin} beep"}]
 
             transcript_manifest = SimpleNamespace(
                 files=files,
@@ -514,7 +514,7 @@ class PlaybackMediaTests(unittest.TestCase):
             class FakeTranscriber:
                 def transcribe(self, _path: Path, origin: str, *, single_speaker: bool = False):
                     start = 1.1 if origin == "microphone" else 0.9
-                    return [{"start": start, "end": start + 0.1, "text": "beep"}]
+                    return [{"start": start, "end": start + 0.1, "text": f"{origin} beep"}]
 
             transcript = TranscriptProcessor(FakeTranscriber()).process(root, manifest)
             self.assertEqual([round(turn["start"], 4) for turn in transcript["turns"]], [1.3, 1.3])
