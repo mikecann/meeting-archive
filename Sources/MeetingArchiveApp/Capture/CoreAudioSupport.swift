@@ -81,8 +81,13 @@ struct AudioHALError: LocalizedError {
 /// function-pointer API: removing a Swift listener block never matched the
 /// block that was added, even a stored one, so cancelled listeners kept
 /// firing (measured on macOS 26.6), and the remove call still succeeded.
+///
+/// Core Audio is handed a number that is never reused rather than a pointer,
+/// and the callback looks it up among the live listeners. A notification
+/// that arrives after `cancel`, even from a registration Core Audio failed
+/// to remove, finds nothing instead of freed memory.
 final class AudioPropertyListener: @unchecked Sendable {
-    /// What the shared C callback reaches through its context pointer.
+    /// What the shared C callback finds for a live listener's number.
     fileprivate final class Target: @unchecked Sendable {
         let queue: DispatchQueue
         let handler: @Sendable () -> Void
@@ -94,54 +99,55 @@ final class AudioPropertyListener: @unchecked Sendable {
         }
     }
 
+    fileprivate static let live = Mutex<[UInt: Target]>([:])
+    private static let lastToken = Atomic<UInt>(0)
+
     private let object: AudioObjectID
     private let address: AudioObjectPropertyAddress
+    private let token: UInt
     private let target: Target
-    private let lock = NSLock()
-    private var registered = false
 
     init(_ selector: AudioObjectPropertySelector, of object: AudioObjectID, queue: DispatchQueue,
          handler: @escaping @Sendable () -> Void) throws {
         self.object = object
         address = AudioHAL.address(selector)
-        target = Target(queue: queue, handler: handler)
+        let target = Target(queue: queue, handler: handler)
+        let token = Self.lastToken.wrappingAdd(1, ordering: .relaxed).newValue
+        self.target = target
+        self.token = token
+        Self.live.withLock { $0[token] = target }
         var address = address
-        // The registration holds its own reference until `cancel` lets it go.
-        let context = Unmanaged.passRetained(target)
-        let status = AudioObjectAddPropertyListener(object, &address, audioPropertyChanged, context.toOpaque())
+        let status = AudioObjectAddPropertyListener(object, &address, audioPropertyChanged, Self.context(token))
         guard status == noErr else {
-            context.release()
+            Self.live.withLock { $0[token] = nil }
             throw AudioHALError(status: status, operation: "Listening for \(AudioHALError.code(selector))")
         }
-        registered = true
     }
 
     func cancel() {
-        let wasRegistered = lock.withLock {
-            defer { registered = false }
-            return registered
-        }
-        guard wasRegistered else { return }
+        // Only the first cancel still finds the listener live.
+        guard Self.live.withLock({ $0.removeValue(forKey: token) }) != nil else { return }
         target.isLive.store(false, ordering: .relaxed)
         var address = address
-        let context = Unmanaged.passUnretained(target)
-        AudioObjectRemovePropertyListener(object, &address, audioPropertyChanged, context.toOpaque())
-        // A notification already under way may still reach the target, so the
-        // registration's reference is dropped a little later rather than now.
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { context.release() }
+        AudioObjectRemovePropertyListener(object, &address, audioPropertyChanged, Self.context(token))
     }
 
     deinit { cancel() }
+
+    fileprivate static func context(_ token: UInt) -> UnsafeMutableRawPointer? {
+        UnsafeMutableRawPointer(bitPattern: token)
+    }
 }
 
 /// The one callback every listener shares. Core Audio calls it on its own
-/// thread, so it only hops to the listener's queue.
+/// notification thread, where a brief lock is fine, and it only hops to the
+/// listener's queue.
 private func audioPropertyChanged(_ object: AudioObjectID, _ count: UInt32,
                                   _ addresses: UnsafePointer<AudioObjectPropertyAddress>,
                                   _ context: UnsafeMutableRawPointer?) -> OSStatus {
-    guard let context else { return noErr }
-    let target = Unmanaged<AudioPropertyListener.Target>.fromOpaque(context).takeUnretainedValue()
-    guard target.isLive.load(ordering: .relaxed) else { return noErr }
+    let token = UInt(bitPattern: context)
+    guard let target = AudioPropertyListener.live.withLock({ $0[token] }) else { return noErr }
+    // A cancel between the lookup and the hop is caught on the queue.
     target.queue.async {
         if target.isLive.load(ordering: .relaxed) { target.handler() }
     }
