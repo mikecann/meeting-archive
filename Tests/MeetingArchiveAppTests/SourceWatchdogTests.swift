@@ -77,6 +77,28 @@ final class SourceWatchdogTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(rebuilds.times[1] - rebuilds.times[0], 0.45)
     }
 
+    func testARestartForAnotherReasonReplacesARebuildThatIsWaiting() {
+        let queue = DispatchQueue(label: "rebuild-scheduler-test")
+        let scheduler = RebuildScheduler(queue: queue, settleDelay: 0.05, minimumSpacing: 0.3)
+        let rebuilds = Rebuilds()
+        let waited = expectation(description: "waited past the settle delay")
+        queue.async {
+            scheduler.request("The default microphone changed") { rebuilds.add($0) }
+            // The watchdog restarts the source before the change settles,
+            // on whatever is the default by then.
+            scheduler.rebuilt(at: DeliveryClock.now)
+            queue.asyncAfter(deadline: .now() + 0.3) { waited.fulfill() }
+        }
+        wait(for: [waited], timeout: 2)
+        XCTAssertEqual(rebuilds.reasons, [])
+
+        // A change after the restart still rebuilds, for its own reason.
+        let later = expectation(description: "rebuilt after a later change")
+        queue.async { scheduler.request("The sound output changed") { rebuilds.add($0); later.fulfill() } }
+        wait(for: [later], timeout: 2)
+        XCTAssertEqual(rebuilds.reasons, ["The sound output changed"])
+    }
+
     func testARebuildForANewDeviceCountsTowardTheSpacing() {
         var watchdog = SourceWatchdog()
         watchdog.restarted(at: 100)
