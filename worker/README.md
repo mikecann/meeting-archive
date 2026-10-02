@@ -184,7 +184,10 @@ Automatic names are written as transcript names with `name_source` set to
 never enrolled. Explicit corrections use `confirmed`. Tentative matches stay in
 the review evidence. Saving a name also queues a refresh of every other accepted
 meeting with an unnamed voice within 0.57 of it, so the service names that
-voice there in the background. The service retries durable speaker refresh
+voice there in the background. When the matching rules change
+(`MATCHING_RULES_VERSION`), the service queues one refresh of every meeting
+with an unnamed voice, so older meetings get the new rules without being
+opened. On 2 Oct that takes Bruce from 12 voices needing names to 9. The service retries durable speaker refresh
 requests so interrupted transcript or Notion updates recover without
 retranscribing or enrolling predictions. Per-meeting locks serialize
 review/confirmation writes.

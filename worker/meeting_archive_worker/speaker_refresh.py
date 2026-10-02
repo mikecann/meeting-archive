@@ -266,7 +266,8 @@ def reconcile_pending_speakers(database: Path | str, *, clock=time.time) -> dict
     database = Path(database)
     from .speakers import SpeakerRegistry
 
-    SpeakerRegistry(database)
+    # New matching rules reach meetings nobody reopens.
+    SpeakerRegistry(database).request_refresh_after_rule_change()
     with closing_connection(lambda: _connect(database)) as connection:
         pending = connection.execute(
             "SELECT meeting_id, manifest_revision FROM speaker_refreshes "

@@ -43,6 +43,10 @@ REFRESH_SIMILARITY = TENTATIVE_MATCH_THRESHOLD - MATCH_MARGIN
 
 #: Kinds of automatic name, as written to transcript speaker_matches.
 AUTOMATIC_KINDS = frozenset({"strong", "own_microphone", "same_meeting"})
+#: Bump when the rules above change. The service then refreshes every meeting
+#: with an unnamed voice once, so older meetings get the new rules without
+#: anyone opening them.
+MATCHING_RULES_VERSION = 2
 
 
 def classify_match(score: float | None, margin: float | None, confirmation_count: int) -> str | None:
@@ -109,6 +113,9 @@ class SpeakerRegistry:
                 generation INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT, requested_at TEXT NOT NULL,
                 PRIMARY KEY(meeting_id, manifest_revision))""",
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS speaker_matching_rules (version INTEGER NOT NULL)",
             )
             self._ensure_columns(connection, "voice_profiles", {
                 "model_id": "TEXT NOT NULL DEFAULT 'legacy'",
@@ -442,25 +449,10 @@ class SpeakerRegistry:
         The service applies the refreshes in the background, so a voice saved
         in one meeting stops being asked about in the others.
         """
-        if not voices or connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='acceptances'",
-        ).fetchone() is None:
+        if not voices:
             return
-        rows = connection.execute(
-            "SELECT observed.meeting_id, observed.manifest_revision, "
-            "observed.embedding_json, observed.model_id "
-            "FROM observed_voices AS observed "
-            "JOIN acceptances AS accepted ON accepted.meeting_id=observed.meeting_id "
-            "AND accepted.manifest_revision=observed.manifest_revision "
-            "LEFT JOIN speaker_assignments AS assignment ON "
-            "assignment.meeting_id=observed.meeting_id AND "
-            "assignment.manifest_revision=observed.manifest_revision AND "
-            "assignment.speaker_id=observed.speaker_id "
-            "WHERE assignment.speaker_id IS NULL AND observed.meeting_id<>?",
-            (exclude_meeting_id,),
-        ).fetchall()
         affected: set[tuple[str, int]] = set()
-        for meeting_id, revision, raw, model_id in rows:
+        for meeting_id, revision, raw, model_id in cls._unnamed_accepted_voices(connection, exclude_meeting_id):
             if (meeting_id, revision) in affected:
                 continue
             embedding = cls._finite_embedding(raw)
@@ -475,6 +467,63 @@ class SpeakerRegistry:
                 affected.add((meeting_id, revision))
         for meeting_id, revision in sorted(affected):
             cls._request_refresh_with_connection(connection, meeting_id, revision, requested_at)
+
+    @staticmethod
+    def _unnamed_accepted_voices(
+        connection: sqlite3.Connection,
+        exclude_meeting_id: str | None = None,
+    ) -> list[tuple[str, int, str, str]]:
+        """Observed voices of accepted meetings that Mike hasn't named."""
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='acceptances'",
+        ).fetchone() is None:
+            return []
+        query = (
+            "SELECT observed.meeting_id, observed.manifest_revision, "
+            "observed.embedding_json, observed.model_id "
+            "FROM observed_voices AS observed "
+            "JOIN acceptances AS accepted ON accepted.meeting_id=observed.meeting_id "
+            "AND accepted.manifest_revision=observed.manifest_revision "
+            "LEFT JOIN speaker_assignments AS assignment ON "
+            "assignment.meeting_id=observed.meeting_id AND "
+            "assignment.manifest_revision=observed.manifest_revision AND "
+            "assignment.speaker_id=observed.speaker_id "
+            "WHERE assignment.speaker_id IS NULL"
+        )
+        parameters: list[object] = []
+        if exclude_meeting_id is not None:
+            query += " AND observed.meeting_id<>?"
+            parameters.append(exclude_meeting_id)
+        return connection.execute(query + " ORDER BY 1, 2", parameters).fetchall()
+
+    def request_refresh_after_rule_change(self) -> int:
+        """Once per MATCHING_RULES_VERSION, refresh every meeting with an unnamed voice.
+
+        Returns how many meetings were queued. Nothing is enrolled; the
+        refresh only rewrites automatic names under the current rules.
+        """
+        requested_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        with closing_connection(
+            lambda: sqlite3.connect(self.database, timeout=30, isolation_level=None),
+        ) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            applied = connection.execute("SELECT MAX(version) FROM speaker_matching_rules").fetchone()[0]
+            if applied == MATCHING_RULES_VERSION:
+                connection.commit()
+                return 0
+            meetings = sorted({
+                (meeting_id, revision)
+                for meeting_id, revision, _, _ in self._unnamed_accepted_voices(connection)
+            })
+            for meeting_id, revision in meetings:
+                self._request_refresh_with_connection(connection, meeting_id, revision, requested_at)
+            connection.execute("DELETE FROM speaker_matching_rules")
+            connection.execute(
+                "INSERT INTO speaker_matching_rules (version) VALUES (?)",
+                (MATCHING_RULES_VERSION,),
+            )
+            connection.commit()
+        return len(meetings)
 
     def review_match(
         self,

@@ -107,8 +107,10 @@ voices.
 - **Ask less over time.** Bruce names automatically a voice matching someone
   confirmed in two meetings (0.72), the mic's only voice once its owner's voice
   is saved (0.65), and a voice matching one saved in the same meeting (0.72).
-  Saving a name refreshes other meetings with that voice in the background.
-  Automatic names still never train the profiles.
+  Saving a name refreshes other meetings with that voice in the background,
+  and the first sweep after deploying refreshes every meeting with an unnamed
+  voice once, which takes Bruce from 12 voices needing names to 9. Automatic
+  names still never train the profiles.
 
 The gates come from the voices on Bruce on 2 Oct, read from a copy of
 `worker.sqlite`: 43 voices observed in 11 meetings, 22 of them confirmed in 9.
