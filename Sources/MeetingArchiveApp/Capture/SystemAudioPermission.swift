@@ -32,8 +32,10 @@ extension SystemAudioPermission {
     /// call answers it, the same way AudioCap does. It is private, so it is
     /// looked up at runtime, and nil means the answer isn't available.
     static func status() -> AppSystemAuthorizationStatus? {
-        guard let handle = dlopen("/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC", RTLD_NOW),
-              let symbol = dlsym(handle, "TCCAccessPreflight") else { return nil }
+        guard let handle = dlopen("/System/Library/PrivateFrameworks/TCC.framework/Versions/A/TCC", RTLD_NOW) else { return nil }
+        // Each open is counted, and Settings checks on every refresh.
+        defer { dlclose(handle) }
+        guard let symbol = dlsym(handle, "TCCAccessPreflight") else { return nil }
         typealias Preflight = @convention(c) (CFString, CFDictionary?) -> Int32
         let preflight = unsafeBitCast(symbol, to: Preflight.self)
         return status(preflightResult: preflight("kTCCServiceAudioCapture" as CFString, nil))
