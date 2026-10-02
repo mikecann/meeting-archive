@@ -286,10 +286,18 @@ class TitleSourceTests(unittest.TestCase):
 
         from meeting_archive_worker.titles import title_lock, write_title
 
+        started, renamed = threading.Event(), threading.Event()
+
+        def rename() -> None:
+            started.set()
+            write_title(self.archive, "Mine")
+            renamed.set()
+
         with title_lock(self.archive):
-            renamed = threading.Event()
-            thread = threading.Thread(target=lambda: (write_title(self.archive, "Mine"), renamed.set()))
+            thread = threading.Thread(target=rename)
             thread.start()
+            # Only time the wait once the rename is actually under way.
+            self.assertTrue(started.wait(5))
             self.assertFalse(renamed.wait(0.3), "a rename must not interleave with a generated title")
         thread.join(5)
         self.assertTrue(renamed.is_set())

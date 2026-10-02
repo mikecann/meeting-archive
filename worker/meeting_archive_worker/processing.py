@@ -55,6 +55,9 @@ ECHO_WINDOW_SECONDS = 2.0
 #: The share of a mic line's words that must appear, in order, in what the
 #: call audio said around the same time for the line to count as echo.
 ECHO_MATCH_RATIO = 0.7
+#: The fewest words a mic line needs to count as echo. "Okay" or "Yeah" right
+#: after the call said it is as likely to be Mike agreeing.
+ECHO_MINIMUM_WORDS = 3
 
 
 def _words(text: str) -> list[str]:
@@ -79,14 +82,14 @@ def remove_echoed_microphone_turns(turns: list[dict[str, Any]]) -> tuple[list[di
     transcript says everything twice, the second time as if Mike said it. A
     mic line counts as echo when most of its words appear, in order, in what
     the call audio said within a couple of seconds. A one or two word line
-    must match completely, so Mike's own short replies survive.
+    always stays, so Mike's own short replies survive.
     """
     incoming = [turn for turn in turns if turn.get("channel_origin") == "incoming"]
     kept: list[dict[str, Any]] = []
     removed = 0
     for turn in turns:
         words = _words(str(turn.get("text", ""))) if turn.get("channel_origin") == "microphone" else []
-        if not words:
+        if len(words) < ECHO_MINIMUM_WORDS:
             kept.append(turn)
             continue
         heard = [
@@ -96,8 +99,7 @@ def remove_echoed_microphone_turns(turns: list[dict[str, Any]]) -> tuple[list[di
             for word in _words(str(other.get("text", "")))
         ]
         matched = _common_in_order(words, heard) if heard else 0
-        echo = matched == len(words) if len(words) <= 2 else matched / len(words) >= ECHO_MATCH_RATIO
-        if echo:
+        if matched / len(words) >= ECHO_MATCH_RATIO:
             removed += 1
         else:
             kept.append(turn)

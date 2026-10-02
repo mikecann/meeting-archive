@@ -396,9 +396,10 @@ def run_processing(database: Path, processor=process_isolated, lease_seconds: fl
         return False
     if summaries_enabled():
         # Queued straight away, so the app keeps polling until the summary and
-        # its title land. The summary loop would also find it on its next pass.
+        # its title land. Only added if missing, since the summary loop may
+        # already have taken it.
         try:
-            SummaryQueue(database).request(job.id, job.archive_path)
+            SummaryQueue(database).reconcile([{"id": job.id, "archive_path": job.archive_path, "state": "succeeded"}])
         except Exception:
             _log("could not queue the summary:\n" + traceback.format_exc())
     return True

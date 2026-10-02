@@ -210,6 +210,10 @@ class WhisperPyannoteTranscriber:
                 raise
             print(f"Diarization on {self.diarizer_device} failed ({type(error).__name__}); retrying on the CPU.", file=sys.stderr)
             self._move_diarizer("cpu")
+            if self.diarizer_device != "cpu":
+                # Still on the device that just failed, so don't run it there
+                # again. The job retries with backoff in a fresh process.
+                raise
             return diarize_waveform(self.diarizer, waveform, 16000, **options)
 
     def _move_diarizer(self, device: str) -> None:
@@ -225,7 +229,8 @@ class WhisperPyannoteTranscriber:
             self.diarizer.to(target)
             self.diarizer_device = device
         except Exception as error:
-            # The CPU always works, just slower, so a GPU problem never fails a job.
+            # The CPU always works, just slower, so a GPU that won't take the
+            # pipeline never fails a job.
             print(f"Diarization stays on {self.diarizer_device} ({type(error).__name__}).", file=sys.stderr)
 
 

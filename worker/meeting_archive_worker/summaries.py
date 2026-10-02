@@ -252,11 +252,28 @@ def _duration_text(metadata: dict[str, Any]) -> str | None:
     return " ".join(parts)
 
 
-def _attendee_names(metadata: dict[str, Any]) -> list[str]:
-    from .cli import _matched_event_attendees
+def matched_event_attendees(metadata: dict[str, Any]) -> list[Any]:
+    """Attendees of the calendar event this recording matched.
 
+    The app writes them at the top level. Older bundles only list every nearby
+    event under "calendar", so one of those is used only when it is the sole
+    event. An empty top-level list means the app matched nobody. Speaker
+    review suggests names from the same list.
+    """
+    attendees = metadata.get("attendees")
+    if isinstance(attendees, list):
+        return attendees
+    events = metadata.get("calendar")
+    if isinstance(events, list) and len(events) == 1 and isinstance(events[0], dict):
+        attendees = events[0].get("attendees")
+        if isinstance(attendees, list):
+            return attendees
+    return []
+
+
+def _attendee_names(metadata: dict[str, Any]) -> list[str]:
     names: list[str] = []
-    for raw in _matched_event_attendees(metadata):
+    for raw in matched_event_attendees(metadata):
         name = raw if isinstance(raw, str) else raw.get("name") if isinstance(raw, dict) else None
         if isinstance(name, str):
             name = " ".join(name.split())
@@ -723,10 +740,13 @@ class SummaryQueue:
         delay_seconds: float = 0.0,
         create: bool = True,
     ) -> bool:
-        """Ask for a summary of the current transcript. Returns whether a job exists.
+        """Ask for a summary of the current transcript. Returns whether it was asked for.
 
         Without create, only a meeting that already has a summary job is asked
-        again, so nothing is queued while summaries are off.
+        again, so nothing is queued while summaries are off. A summary that
+        failed is left alone, keeping its attempts, error and backoff: its next
+        try reads the transcript afresh anyway, and only `retry` releases a
+        permanent failure.
         """
         now = self.clock()
         available_at = now + max(0.0, delay_seconds)
@@ -745,7 +765,7 @@ class SummaryQueue:
                 "attempts=CASE WHEN state='summarizing' THEN attempts ELSE 0 END, "
                 "last_error=CASE WHEN state='summarizing' THEN last_error ELSE NULL END, "
                 "refresh_requested=CASE WHEN state='summarizing' THEN 1 ELSE 0 END "
-                "WHERE processing_job_id=?",
+                "WHERE processing_job_id=? AND state IN ('ready','summarizing','succeeded')",
                 (archive_path, available_at, processing_job_id),
             )
             connection.commit()
@@ -904,6 +924,7 @@ __all__ = [
     "TransientSummaryError",
     "UnusableAnswerError",
     "build_prompt",
+    "matched_event_attendees",
     "read_summary",
     "summaries_disabled_reason",
     "summaries_enabled",

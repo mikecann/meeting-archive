@@ -117,6 +117,36 @@ class MicrophoneSpeakerTests(unittest.TestCase):
         self.assertTrue(microphone_is_one_speaker(call, source_app="us.zoom.xos"))
         self.assertFalse(microphone_is_one_speaker(call, source_app="manual"))
 
+    def test_record_now_with_a_call_on_the_speakers_is_diarized_without_the_echo(self) -> None:
+        # A meeting in the room with someone joining through the Mac's
+        # speakers: the mic hears everyone, plus its own copy of the call.
+        files = (
+            VerifiedFile("microphone.m4a", 1, "0" * 64, "microphone_audio"),
+            VerifiedFile("incoming.m4a", 1, "0" * 64, "incoming_audio"),
+        )
+        manifest = SimpleNamespace(files=files, metadata={"source_app": "manual"}, meeting_id="meeting", revision=1)
+        said = {
+            "incoming": [(0.0, 40.0, "Can everyone in the room hear me all right?")],
+            "microphone": [
+                (0.3, 40.0, "Can everyone in the room hear me alright?"),
+                (41.0, 43.0, "Yes, we can hear you fine."),
+            ],
+        }
+        calls = []
+
+        class RecordingTranscriber:
+            def transcribe(self, _path, channel_origin, *, single_speaker=False):
+                calls.append((channel_origin, single_speaker))
+                return [{"start": start, "end": end, "text": text} for start, end, text in said[channel_origin]]
+
+        result = TranscriptProcessor(RecordingTranscriber()).process(Path("archive"), manifest)
+
+        self.assertEqual(calls, [("incoming", False), ("microphone", False)])
+        self.assertEqual(
+            [(turn["channel_origin"], turn["text"]) for turn in result["turns"]],
+            [("incoming", "Can everyone in the room hear me all right?"), ("microphone", "Yes, we can hear you fine.")],
+        )
+
     def test_incoming_is_transcribed_first_and_decides_the_microphone(self) -> None:
         # The app lists the microphone before incoming in its manifest.
         files = (
@@ -280,10 +310,6 @@ class VoiceEmbeddingTests(unittest.TestCase):
             self.assertTrue(transcript["processing"]["speaker_observations_committed"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class DiarizationDeviceTests(unittest.TestCase):
     def test_the_gpu_is_used_when_there_is_one_unless_the_cpu_is_asked_for(self) -> None:
         from meeting_archive_worker.model_processor import diarization_device
@@ -318,6 +344,27 @@ class DiarizationDeviceTests(unittest.TestCase):
         self.assertEqual(transcriber._run_diarizer(object(), num_speakers=1), "diarized")
         self.assertEqual(transcriber.diarizer.calls, ["mps", "cpu"])
         self.assertEqual(transcriber.diarizer_device, "cpu")
+
+    def test_a_pipeline_that_wont_move_to_the_cpu_is_not_run_again_on_the_gpu(self) -> None:
+        class Pipeline:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def to(self, device) -> None:
+                raise RuntimeError("MPS device lost")
+
+            def __call__(self, audio, **options):
+                self.calls += 1
+                raise RuntimeError("MPS backend out of memory")
+
+        transcriber = object.__new__(WhisperPyannoteTranscriber)
+        transcriber.diarizer = Pipeline()
+        transcriber.diarizer_device = "mps"
+
+        with self.assertRaisesRegex(RuntimeError, "out of memory"):
+            transcriber._run_diarizer(object())
+        self.assertEqual(transcriber.diarizer.calls, 1)
+        self.assertEqual(transcriber.diarizer_device, "mps")
 
     def test_a_cpu_failure_is_not_retried(self) -> None:
         class Pipeline:
@@ -364,13 +411,19 @@ class EchoTests(unittest.TestCase):
         turns = [
             self.turn("incoming", 0.0, 5.0, "So the quote for the lights came in at five hundred dollars"),
             self.turn("microphone", 4.0, 7.0, "That sounds fine, let's go ahead with it"),
-            # A short reply only counts as echo when every word was just said.
+            # A one or two word reply always stays, even right after the call
+            # said the same word: it's as likely Mike agreeing as an echo.
             self.turn("incoming", 8.0, 9.0, "Okay great"),
             self.turn("microphone", 8.5, 9.0, "Yeah"),
+            self.turn("microphone", 9.2, 9.6, "Okay."),
             self.turn("microphone", 30.0, 32.0, "Five hundred dollars"),
         ]
 
         kept, removed = remove_echoed_microphone_turns(turns)
 
         self.assertEqual(removed, 0)
-        self.assertEqual(len(kept), 5)
+        self.assertEqual(len(kept), 6)
+
+
+if __name__ == "__main__":
+    unittest.main()
