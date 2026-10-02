@@ -216,7 +216,12 @@ class ViewerTests(unittest.TestCase):
             {"kind": "video", "path": "meeting-view.mov"},
             {"kind": "microphone_audio", "path": "microphone.m4a"},
         ]})
-        for content in (None, video_receipt, "not json", json.dumps({"sources": []})):
+        unknown_receipts = (
+            json.dumps({"sources": [{"kind": "screen_recording", "path": "screen.mov"}]}),
+            json.dumps({"sources": [{"path": "microphone.m4a"}]}),
+            json.dumps({"sources": [{"kind": ["microphone_audio"], "path": "microphone.m4a"}]}),
+        )
+        for content in (None, video_receipt, "not json", json.dumps({"sources": []}), *unknown_receipts):
             with self.subTest(receipt=content):
                 if content is None:
                     receipt.unlink(missing_ok=True)

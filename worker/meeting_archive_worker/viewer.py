@@ -29,6 +29,9 @@ DEFAULT_PORT = 8791
 DEFAULT_ALLOWED_LOGIN = "mike.cann@gmail.com"
 MAX_METADATA_BYTES = 1024 * 1024
 MAX_PLAYBACK_RECEIPT_BYTES = 64 * 1024
+# The manifest kinds of the audio tracks a playback receipt can list. A tuple,
+# so a malformed kind such as a list is compared rather than hashed.
+AUDIO_SOURCE_KINDS = ("microphone_audio", "incoming_audio")
 MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
 MAX_TRANSCRIPT_TURNS = 20_000
 STREAM_CHUNK_BYTES = 64 * 1024
@@ -356,7 +359,8 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
 
     def _playback_is_audio_only(self, acceptance: Acceptance) -> bool:
         # The worker's receipt lists what went into meeting.mp4. Without a
-        # readable one, keep the video player older meetings always had.
+        # readable one, or with a source that isn't known audio, keep the
+        # video player older meetings always had.
         try:
             receipt = _read_json(
                 self.viewer.open_generated(acceptance, ("playback", "meeting-playback.json")),
@@ -368,7 +372,7 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
         return (
             isinstance(sources, list)
             and bool(sources)
-            and all(isinstance(source, dict) and source.get("kind") != "video" for source in sources)
+            and all(isinstance(source, dict) and source.get("kind") in AUDIO_SOURCE_KINDS for source in sources)
         )
 
     def _landing_page(self, acceptance: Acceptance) -> tuple[bytes, str]:
