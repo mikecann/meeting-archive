@@ -153,8 +153,8 @@ private enum SpeakerReviewScenarios {
     static func main() async throws {
         let meetingID = UUID()
 
-        // Mike's 2 Oct Slack call: one person split into two voices, his own
-        // mic recognized, and one voice nobody knows.
+        // A call where one person was split into two voices, the mic's owner
+        // was recognized, and one voice is unknown.
         let slackCall = response(
             meetingID: meetingID,
             speakers: [
@@ -362,7 +362,9 @@ private enum SpeakerReviewScenarios {
         // A cold CI machine can be slow to start audio, so allow a few seconds
         // rather than one fixed pause, and say why if it never starts.
         let deadline = ContinuousClock.now + .seconds(5)
-        while player.currentTime().seconds <= 0, ContinuousClock.now < deadline {
+        // The time is NaN until the item is ready, so wait for a positive time
+        // rather than stopping at the first value that isn't zero or less.
+        while !(player.currentTime().seconds > 0), ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(50))
         }
         try require(

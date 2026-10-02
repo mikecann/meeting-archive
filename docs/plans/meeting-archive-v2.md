@@ -27,8 +27,9 @@ profiles) worked: 10 of 10 transfers verified, 9 of 10 processed and published.
    is traced back to its app, so a Meet or Teams call in Chrome counts as Chrome.
 2. **Records first, decides later.** As soon as an app that isn't ignored takes
    the mic, recording starts. When it ends, the recording is kept if it ran for
-   at least a minute and someone on the other end spoke (5 seconds of incoming
-   audio). Anything shorter or one-sided, like a voice memo, is quietly deleted.
+   at least a minute and either someone on the other end spoke (5 seconds of
+   incoming audio) or Mike talked for 30 seconds. Anything shorter or quieter,
+   like a quick voice note, is quietly deleted.
 3. **Stops when the app lets go.** Thirty seconds after the app releases the mic,
    the recording finishes. If a different app takes the mic, the current
    recording finishes and a new one starts straight away.
@@ -49,11 +50,14 @@ profiles) worked: 10 of 10 transfers verified, 9 of 10 processed and published.
    transcript, and it can be renamed any time. A notification says what was
    saved, and the menu offers Discard for the 90 seconds before upload.
 
-Ignored by default: Meeting Archive, Voice Type, Record It, Record Meeting,
-Telemprompit, Tandem, Apple dictation and Siri, AI voice apps (Claude, ChatGPT),
-dictation tools (Superwhisper, MacWhisper, Wispr Flow) and screen recorders
-(CleanShot, OBS, QuickTime). Browsers, Zoom, Teams, Slack, Discord, WhatsApp and
-FaceTime are recorded. Mike asked for personal calls to be included.
+Ignored by default: Mike's own tools (Meeting Archive, Voice Type, Record It,
+Record Meeting, Telemprompit, Tandem, Video HQ), Apple dictation, Siri, Voice
+Memos, Live Transcription and song recognition, AI voice apps (Claude,
+ChatGPT), dictation tools (Superwhisper, MacWhisper, Wispr Flow) and recorders
+(CleanShot, OBS, QuickTime, the Screenshot toolbar, Audio Hijack, GarageBand).
+`MicAppResolver.defaultIgnoredBundleIDs` has the full list. Browsers, Zoom,
+Teams, Slack, Discord, WhatsApp and FaceTime are recorded. Mike asked for
+personal calls to be included.
 
 ## Permissions
 
@@ -170,7 +174,7 @@ Each with headphones and once on speakers. Results so far (2 Oct 2026):
 | FaceTime audio call | Recorded, kept |
 | Slack huddle, audio only | Recorded, kept |
 | Voice Type dictation | Ignored |
-| Voice memo in another app | Recorded, then deleted (nobody else spoke) |
+| Short voice note in another app | Recorded, then deleted (under a minute, or under 30 s of talking) |
 | AirPods connect mid-call | Both tracks continue, gap filled |
 | Quit the app mid-call | Part 1 recovered on relaunch, part 2 starts |
 | Record now with no app on the mic | Recorded until Stop, always kept |

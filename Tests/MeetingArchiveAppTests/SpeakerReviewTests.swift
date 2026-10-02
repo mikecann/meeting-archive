@@ -112,7 +112,7 @@ final class SpeakerReviewTests: XCTestCase {
         XCTAssertEqual(SpeakerReviewCard.startingName(for: makeSpeaker(id: "d", name: "  ")), "")
     }
 
-    /// Mike's screenshot: pyannote split Micah in two, and each half needed
+    /// pyannote can split one person in two, and each half used to need
     /// its own Confirm. Voices with the same name are now one card.
     func testVoicesWithTheSameNameShareOneCardWhateverTheNameCameFrom() {
         let cards = SpeakerReviewCard.make(speakers: [
