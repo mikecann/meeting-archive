@@ -7,12 +7,13 @@ import AVFoundation
 /// below that; speech sits well above it. The controller uses the incoming
 /// total to tell a real call from a one-sided recording.
 struct ActivityMeter: Sendable {
-    static let windowFrames = 4_800
     /// -50 dBFS as an RMS amplitude, where 1.0 is full scale.
     static let threshold = pow(10.0, -50.0 / 20.0)
 
     let sampleRate: Double
     let channels: Int
+    /// 100 ms at `sampleRate`.
+    let windowFrames: Int
     private var sums: [Double]
     private var framesInWindow = 0
     private(set) var activeFrames: Int64 = 0
@@ -23,6 +24,7 @@ struct ActivityMeter: Sendable {
     init(sampleRate: Double = 48_000, channels: Int) {
         self.sampleRate = sampleRate
         self.channels = channels
+        windowFrames = max(1, Int((sampleRate / 10).rounded()))
         sums = Array(repeating: 0, count: channels)
     }
 
@@ -35,7 +37,7 @@ struct ActivityMeter: Sendable {
         let frames = Int(buffer.frameLength)
         var frame = 0
         while frame < frames {
-            let take = min(frames - frame, Self.windowFrames - framesInWindow)
+            let take = min(frames - frame, windowFrames - framesInWindow)
             for channel in 0..<channels {
                 var sum: Float = 0
                 vDSP_svesq(samples + frame * channels + channel, vDSP_Stride(channels), &sum, vDSP_Length(take))
@@ -43,7 +45,7 @@ struct ActivityMeter: Sendable {
             }
             framesInWindow += take
             frame += take
-            if framesInWindow == Self.windowFrames { closeWindow() }
+            if framesInWindow == windowFrames { closeWindow() }
         }
     }
 
@@ -52,10 +54,10 @@ struct ActivityMeter: Sendable {
     mutating func addSilence(frames: Int64) {
         var remaining = frames
         while remaining > 0 {
-            let take = min(remaining, Int64(Self.windowFrames - framesInWindow))
+            let take = min(remaining, Int64(windowFrames - framesInWindow))
             framesInWindow += Int(take)
             remaining -= take
-            if framesInWindow == Self.windowFrames { closeWindow() }
+            if framesInWindow == windowFrames { closeWindow() }
         }
     }
 
