@@ -19,7 +19,8 @@ final class MicrophoneSource: NSObject, AVCaptureAudioDataOutputSampleBufferDele
     private let delivery = DispatchQueue(label: "com.mikerosoft.meeting-archive.microphone.samples", qos: .userInteractive)
     private let clock = DeliveryClock()
     private let lock = NSLock()
-    // Guarded by `lock`. Sample buffers from any other output are stale.
+    // Guarded by `lock`, and set together once a session runs. Sample buffers
+    // from any other output are stale.
     private var liveOutput: AVCaptureAudioDataOutput?
     private var liveClock: CMClock?
     private var lastDevice: CapturedMicrophone?
@@ -97,11 +98,10 @@ final class MicrophoneSource: NSObject, AVCaptureAudioDataOutputSampleBufferDele
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        let (live, sessionClock) = lock.withLock { (output === liveOutput, liveClock) }
-        guard live else { return }
+        guard let sessionClock = lock.withLock({ output === liveOutput ? liveClock : nil }) else { return }
         clock.mark()
         var time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        if let sessionClock, time.isNumeric {
+        if time.isNumeric {
             // Buffers are stamped on the session's clock, which can be the
             // device's own rather than the host clock. Moved onto the host
             // clock, its drift shows up and is corrected like any other.
@@ -136,7 +136,6 @@ final class MicrophoneSource: NSObject, AVCaptureAudioDataOutputSampleBufferDele
             return error
         }
         output.setSampleBufferDelegate(self, queue: delivery)
-        lock.withLock { liveOutput = output }
         self.session = session
         observe(session, device: device)
         session.startRunning()
@@ -144,10 +143,12 @@ final class MicrophoneSource: NSObject, AVCaptureAudioDataOutputSampleBufferDele
             closeSession()
             return CaptureFailure.message("\(device.localizedName) did not start.")
         }
-        // The session has a clock once it runs. The first few buffers before
-        // this keep their own stamps, which are host time near enough.
+        // The session has a clock once it runs. The few buffers that arrive
+        // before this are dropped, so every stamp that is kept gets moved onto
+        // the host clock. A session without a clock is taken to stamp host time.
         lock.withLock {
-            liveClock = session.synchronizationClock
+            liveOutput = output
+            liveClock = session.synchronizationClock ?? CMClockGetHostTimeClock()
             lastDevice = CapturedMicrophone(uid: device.uniqueID, name: device.localizedName)
         }
         Log.capture.notice("Microphone capture started on \(device.localizedName, privacy: .public)")
