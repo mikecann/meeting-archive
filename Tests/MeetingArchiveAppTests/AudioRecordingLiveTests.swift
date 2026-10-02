@@ -47,8 +47,9 @@ final class AudioRecordingLiveTests: XCTestCase {
 
         for name in ["microphone.m4a", "incoming.m4a"] {
             let url = directory.appendingPathComponent(name)
+            // An unsigned tap hears silence, but still writes it.
             guard FileManager.default.fileExists(atPath: url.path) else {
-                print("[live audio] \(name): not written")
+                XCTFail("\(name) was not written")
                 continue
             }
             let duration = try await AVURLAsset(url: url).load(.duration).seconds
@@ -67,6 +68,8 @@ final class AudioRecordingLiveTests: XCTestCase {
         print("[live audio] after stop: \(after.description(comparedWith: before))")
 
         XCTAssertTrue(recording.hasCapturedSamples)
+        XCTAssertTrue(events.all.contains("started"))
+        XCTAssertEqual(Set(result.tracks.keys), ["microphone", "incoming"])
         XCTAssertNil(result.error)
         after.assertNothingLeftRunning(comparedWith: before)
     }
