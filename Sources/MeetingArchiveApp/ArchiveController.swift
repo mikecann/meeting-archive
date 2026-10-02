@@ -507,12 +507,13 @@ final class ArchiveController: ObservableObject {
             var meeting = makeRecord(entry, ended: ended, microphone: result.microphone)
             adoptDefaultCalendarsIfNeeded()
             let events = calendar.suggestions(start: entry.startedAt, end: callEnded, selectedCalendarIDs: settings.selectedCalendarIDs)
-            if let match = CalendarRanking.best(events, start: entry.startedAt, end: callEnded) {
+            let match = CalendarRanking.best(events, start: entry.startedAt, end: callEnded)
+            if let match {
                 meeting.title = entry.part > 1 ? "\(match.title) (part \(entry.part))" : match.title
                 // Bruce never gives a calendar title an AI one in its place.
                 meeting.titleSource = .calendar
             }
-            try ModelCodec.encoder.encode(events).write(to: directory.appendingPathComponent("calendar.json"), options: .atomic)
+            try SpoolBundle.saveCalendar(events, match: match, in: directory)
             try store?.insertMeeting(meeting)
             savedParts[entry.seriesID, default: []].append(entry.id)
             try? FileManager.default.removeItem(at: directory.appendingPathComponent("capture-journal.json"))

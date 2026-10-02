@@ -100,6 +100,44 @@ final class SpoolBundleTests: XCTestCase {
         XCTAssertEqual((metadata["attendees"] as? [Any])?.count, 0)
     }
 
+    /// The title came from the event that matched the call. The part's end
+    /// runs on through the 30 s release grace, so ranking against it again
+    /// can pick another event, or none.
+    func testAttendeesComeFromTheEventTheTitleCameFrom() throws {
+        let start = Date(timeIntervalSince1970: 1_790_000_000)
+        let callEnded = start.addingTimeInterval(60)
+        var meeting = record()
+        meeting.startedAt = start
+        meeting.endedAt = callEnded.addingTimeInterval(30)
+        func event(_ id: String, from: TimeInterval, to: TimeInterval, attendee: String) -> CalendarSuggestion {
+            CalendarSuggestion(id: id, title: id, start: start.addingTimeInterval(from), end: start.addingTimeInterval(to),
+                               attendees: [CalendarAttendee(name: attendee, email: nil, response: "2")])
+        }
+        // The call matched the first event, which a ranking to the part's end
+        // calls a tie. In the second pair the call was a tie, and the part's
+        // end would pick the later event.
+        let cases: [(events: [CalendarSuggestion], expected: [String])] = [
+            ([event("Design review", from: -1800, to: 45, attendee: "Riley Example"),
+              event("Hiring sync", from: 45, to: 1845, attendee: "Jordan Example")], ["Riley Example"]),
+            ([event("Standup", from: -1800, to: 30, attendee: "Casey Example"),
+              event("Planning", from: 30, to: 1830, attendee: "Morgan Example")], []),
+        ]
+
+        for (events, expected) in cases {
+            let directory = try bundle(with: ["microphone.m4a", "incoming.m4a"])
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let match = CalendarRanking.best(events, start: start, end: callEnded)
+            try SpoolBundle.saveCalendar(events, match: match, in: directory)
+
+            _ = try SpoolBundle.prepare(record: meeting, directory: directory)
+
+            let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("metadata.json"))) as! [String: Any]
+            let attendees = try XCTUnwrap(metadata["attendees"] as? [[String: Any]])
+            XCTAssertEqual(attendees.compactMap { $0["name"] as? String }, expected)
+            XCTAssertEqual((metadata["calendar"] as? [Any])?.count, 2)
+        }
+    }
+
     func testACaptureWithoutMicrophoneAudioIsArchivedWithTheTracksItHas() throws {
         let directory = try bundle(with: ["meeting-view.mov", "incoming.m4a"])
         defer { try? FileManager.default.removeItem(at: directory) }
