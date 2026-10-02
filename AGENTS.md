@@ -13,6 +13,9 @@ archive worker. All source paths and commands below are relative to this clone.
   actual app or script when its hardware and permission requirements are available.
   Report any checks you could not run rather than claiming live capture worked.
 - Keep writing direct, personal and conversational. Use no em dashes.
+- This repo is public. Use made-up names in tests, fixtures, docs and commit
+  messages, never the people, clients or meetings from Mike's recordings or
+  Bruce's data.
 - Avoid eyebrows or kickers in UI designs.
 - PRs start with `## Why`, explaining what prompted the change in plain language.
 

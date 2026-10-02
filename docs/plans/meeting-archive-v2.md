@@ -91,8 +91,8 @@ rename, Notion publishing and the login item.
 ## Speaker review without the chore (2 Oct 2026)
 
 Mike found the review window annoying: it popped up by itself, and on the
-2 Oct Slack call pyannote split Micah into two voices that each needed their
-own Confirm before Complete would work. He wants it to fade away as it learns
+2 Oct Slack call pyannote split one person into two voices that each needed
+their own Confirm before Complete would work. He wants it to fade away as it learns
 voices.
 
 - **No pop-ups.** The window only opens from the menu bar's **Review
@@ -131,17 +131,17 @@ above every different-person pair. The lowest gate with no wrong name was 0.66
 out in turn, the new rules named 7 of 22 automatically and all correctly; the
 old 0.82 gate named none, including Mike's own mic at 0.8199.
 
-Three saved names look wrong and are worth checking in review: on the 2 Oct
-Slack call, Call audio voice 3 is saved as Mike Cann but sounds like Micah
-(0.64 to his other voice, 0.29 at most to Mike's mic, and its lines are
-Micah's); on the 2 Oct 5:31am Zoom call, voice 4 is saved as Micah but scores
-0.05 to 0.08 against the Slack call's Micah while unnamed voice 3 matches him
-at 0.91; and on the 29 Sep 7:31am meeting, mic voice 1 is saved as Mike Cann
-but sounds more like someone else from the same call (0.61) than Mike (0.20 at
-most). The first two probably happened because
-review excerpts play both tracks mixed, so a voice that only says "yeah" over
-Mike sounds like Mike. Review now plays each voice's wordiest lines instead of
-its first ones.
+Three saved names look wrong and are worth checking in review (who they are
+is left out because this repo is public). On the 2 Oct Slack call, Call audio
+voice 3 is saved as Mike Cann but sounds like a colleague on that call: 0.64
+to his other voice, 0.29 at most to Mike's mic, and its lines are his. On the
+2 Oct 5:31am Zoom call, voice 4 is saved under that colleague's name but
+scores 0.05 to 0.08 against his voice from the Slack call, while unnamed
+voice 3 matches him at 0.91. On the 29 Sep 7:31am meeting, mic voice 1 is
+saved as Mike Cann but sounds more like someone else on the call (0.61) than
+Mike (0.20 at most). The first two probably happened because review excerpts
+play both tracks mixed, so a voice that only says "yeah" over Mike sounds like
+Mike. Review now plays each voice's wordiest lines instead of its first ones.
 
 Deploy the worker before the app: **Save names** needs `identify-speakers` on
 Bruce, and an older worker answers it with an error the window shows.
