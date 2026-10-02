@@ -817,6 +817,25 @@ class SummaryStageTests(unittest.TestCase):
 
         self.assertEqual(self.summary_job()["state"], "ready")
 
+    def test_completed_processing_leaves_a_summary_already_taken_alone(self) -> None:
+        from meeting_archive_worker.service import run_processing
+
+        summarized: list[Path] = []
+        complete = JobQueue.complete
+
+        def complete_and_summarize_straight_away(queue, job):
+            complete(queue, job)
+            # The summary thread can take the meeting the moment it succeeds.
+            self.assertTrue(run_summary(self.database, summarize=summarized.append))
+
+        with patch("meeting_archive_worker.service.summaries_enabled", return_value=True), \
+                patch.object(JobQueue, "complete", complete_and_summarize_straight_away):
+            self.assertTrue(run_processing(self.database, processor=lambda *_: None, lease_seconds=60))
+
+        self.assertEqual(self.summary_job()["state"], "succeeded")
+        self.assertFalse(run_summary(self.database, summarize=summarized.append), "not summarized twice")
+        self.assertEqual(summarized, [self.archive])
+
     def test_status_reports_display_titles_and_the_summary_stage(self) -> None:
         self.complete_processing()
         other_id = str(uuid.uuid4())
