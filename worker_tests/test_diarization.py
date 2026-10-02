@@ -117,6 +117,36 @@ class MicrophoneSpeakerTests(unittest.TestCase):
         self.assertTrue(microphone_is_one_speaker(call, source_app="us.zoom.xos"))
         self.assertFalse(microphone_is_one_speaker(call, source_app="manual"))
 
+    def test_record_now_with_a_call_on_the_speakers_is_diarized_without_the_echo(self) -> None:
+        # A meeting in the room with someone joining through the Mac's
+        # speakers: the mic hears everyone, plus its own copy of the call.
+        files = (
+            VerifiedFile("microphone.m4a", 1, "0" * 64, "microphone_audio"),
+            VerifiedFile("incoming.m4a", 1, "0" * 64, "incoming_audio"),
+        )
+        manifest = SimpleNamespace(files=files, metadata={"source_app": "manual"}, meeting_id="meeting", revision=1)
+        said = {
+            "incoming": [(0.0, 40.0, "Can everyone in the room hear me all right?")],
+            "microphone": [
+                (0.3, 40.0, "Can everyone in the room hear me alright?"),
+                (41.0, 43.0, "Yes, we can hear you fine."),
+            ],
+        }
+        calls = []
+
+        class RecordingTranscriber:
+            def transcribe(self, _path, channel_origin, *, single_speaker=False):
+                calls.append((channel_origin, single_speaker))
+                return [{"start": start, "end": end, "text": text} for start, end, text in said[channel_origin]]
+
+        result = TranscriptProcessor(RecordingTranscriber()).process(Path("archive"), manifest)
+
+        self.assertEqual(calls, [("incoming", False), ("microphone", False)])
+        self.assertEqual(
+            [(turn["channel_origin"], turn["text"]) for turn in result["turns"]],
+            [("incoming", "Can everyone in the room hear me all right?"), ("microphone", "Yes, we can hear you fine.")],
+        )
+
     def test_incoming_is_transcribed_first_and_decides_the_microphone(self) -> None:
         # The app lists the microphone before incoming in its manifest.
         files = (
