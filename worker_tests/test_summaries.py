@@ -792,6 +792,29 @@ class SummaryStageTests(unittest.TestCase):
         job = self.summary_job()
         self.assertEqual((job["state"], job["available_at"]), ("ready", 800.0))
 
+    def test_new_names_leave_a_failed_summary_to_its_own_retry(self) -> None:
+        self.complete_processing()
+        now = [1000.0]
+        summaries = SummaryQueue(self.database, clock=lambda: now[0])
+        summaries.reconcile(self.queue.status()["jobs"])
+
+        def outage(_archive):
+            raise TransientSummaryError("OpenRouter is unavailable (HTTP 503).")
+
+        def refused(_archive):
+            raise PermanentSummaryError("The model declined to summarize this meeting.")
+
+        for failure, state in ((outage, "retry_wait"), (refused, "permanent_failure")):
+            with self.subTest(state=state):
+                now[0] = self.summary_job()["available_at"]
+                self.assertFalse(summaries.run_one(failure))
+                failed = self.summary_job()
+                self.assertEqual(failed["state"], state)
+
+                self.assertFalse(summaries.request(self.job_id, str(self.archive), delay_seconds=300, create=False))
+
+                self.assertEqual(self.summary_job(), failed, "no fresh attempts, and the error stays in status")
+
     def test_an_interrupted_summary_counts_as_a_failed_attempt(self) -> None:
         self.complete_processing()
         now = [1000.0]

@@ -723,10 +723,13 @@ class SummaryQueue:
         delay_seconds: float = 0.0,
         create: bool = True,
     ) -> bool:
-        """Ask for a summary of the current transcript. Returns whether a job exists.
+        """Ask for a summary of the current transcript. Returns whether it was asked for.
 
         Without create, only a meeting that already has a summary job is asked
-        again, so nothing is queued while summaries are off.
+        again, so nothing is queued while summaries are off. A summary that
+        failed is left alone, keeping its attempts, error and backoff: its next
+        try reads the transcript afresh anyway, and only `retry` releases a
+        permanent failure.
         """
         now = self.clock()
         available_at = now + max(0.0, delay_seconds)
@@ -745,7 +748,7 @@ class SummaryQueue:
                 "attempts=CASE WHEN state='summarizing' THEN attempts ELSE 0 END, "
                 "last_error=CASE WHEN state='summarizing' THEN last_error ELSE NULL END, "
                 "refresh_requested=CASE WHEN state='summarizing' THEN 1 ELSE 0 END "
-                "WHERE processing_job_id=?",
+                "WHERE processing_job_id=? AND state IN ('ready','summarizing','succeeded')",
                 (archive_path, available_at, processing_job_id),
             )
             connection.commit()

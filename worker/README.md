@@ -225,7 +225,7 @@ reports, its `usage` (requests, tokens and `cost` in US dollars, added up
 across any retries) and an `input_sha256` of everything sent. A retry with the
 same transcript and model reuses it without calling OpenRouter. Confirming
 speaker names asks for a fresh summary five minutes after the last name, so it
-can use them.
+can use them. A summary that failed is left to its own backoff, or to `retry`.
 
 An OpenRouter outage never holds up transcription or Notion. The page is
 published without a summary and updated in place once one arrives. Rate limits
