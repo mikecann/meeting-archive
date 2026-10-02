@@ -364,13 +364,15 @@ class EchoTests(unittest.TestCase):
         turns = [
             self.turn("incoming", 0.0, 5.0, "So the quote for the lights came in at five hundred dollars"),
             self.turn("microphone", 4.0, 7.0, "That sounds fine, let's go ahead with it"),
-            # A short reply only counts as echo when every word was just said.
+            # A one or two word reply always stays, even right after the call
+            # said the same word: it's as likely Mike agreeing as an echo.
             self.turn("incoming", 8.0, 9.0, "Okay great"),
             self.turn("microphone", 8.5, 9.0, "Yeah"),
+            self.turn("microphone", 9.2, 9.6, "Okay."),
             self.turn("microphone", 30.0, 32.0, "Five hundred dollars"),
         ]
 
         kept, removed = remove_echoed_microphone_turns(turns)
 
         self.assertEqual(removed, 0)
-        self.assertEqual(len(kept), 5)
+        self.assertEqual(len(kept), 6)
