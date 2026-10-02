@@ -126,13 +126,11 @@ final class ArchiveController: ObservableObject {
     private var cleanedMeetingIDs = Set<UUID>()
     private var lockFD: Int32 = -1
     private var followUpWindow: NamingWindow?
-    private var attentionTracker = SpeakerAttentionTracker()
     private var refreshingWorkerStatuses = false
     private var workerRefreshRequested = false
     private var workerStatusFailures = 0
     private var pathMonitor: NWPathMonitor?
     private var lastPathSatisfied: Bool?
-    private var hasPolledMicrophone = false
     private var hotKey: GlobalHotKey?
     private let transfer = ArchiveTransfer()
     private let workerStatusClient = WorkerStatusClient(cacheDuration: 10)
@@ -161,17 +159,10 @@ final class ArchiveController: ObservableObject {
             failure = error.localizedDescription
         }
         isPaused = policy.state.isPaused
-        if let data = try? Data(contentsOf: AppPaths.root.appendingPathComponent("speaker-attention.json")),
-           let saved = try? JSONDecoder().decode(SpeakerAttentionTracker.self, from: data) {
-            attentionTracker = saved
-        }
         refresh()
         // The isolated UI verification harness uses the real controller and
         // views without polling devices, recording, uploading, or recovering.
-        guard startServices else {
-            hasPolledMicrophone = true
-            return
-        }
+        guard startServices else { return }
         Self.running = self
         monitor = MicActivityMonitor(ignoredBundleIDs: { [weak self] in
             self?.settings.ignoredBundleIDs ?? MicAppResolver.defaultIgnoredBundleIDs
@@ -250,7 +241,6 @@ final class ArchiveController: ObservableObject {
         let now = Date()
         let snapshot = monitor.snapshot()
         lastSnapshot = snapshot
-        hasPolledMicrophone = true
         rememberMicUsers(snapshot.users + snapshot.ignored)
         if let error = snapshot.error {
             // An unreadable second says nothing about who holds the mic, so it
@@ -275,7 +265,6 @@ final class ArchiveController: ObservableObject {
             lastWorkerStatusPoll = now
             Task { await refreshWorkerStatuses() }
         }
-        presentReadySpeakerReview()
     }
 
     private func updateStatus(now: Date) {
@@ -750,7 +739,6 @@ final class ArchiveController: ObservableObject {
             workerStatusFailure = nil
             workerStatusFailures = 0
             adoptArchivedTitles(fetched)
-            presentReadySpeakerReview()
         } catch {
             workerStatusFailure = error.localizedDescription
             workerStatusFailures += 1
@@ -807,7 +795,7 @@ final class ArchiveController: ObservableObject {
                   remote.manifestRevision == record.metadataRevision,
                   remote.processingState == .succeeded,
                   let count = remote.unconfirmedSpeakerCount, count > 0 else { return nil }
-            return SpeakerAttentionCandidate(meetingID: record.id, revision: record.metadataRevision, remainingCount: count)
+            return SpeakerAttentionCandidate(meetingID: record.id, remainingCount: count)
         }
     }
 
@@ -818,9 +806,9 @@ final class ArchiveController: ObservableObject {
 
     var speakersNeedingNames: Int { speakerAttentionCandidates.reduce(0) { $0 + $1.remainingCount } }
 
-    /// `activate` is for explicit clicks. Automatic presentation orders the
-    /// window in without taking keyboard focus from whatever the user is doing.
-    func showFollowUp(_ id: UUID, refreshStatus: Bool = true, activate: Bool = true) {
+    /// Only ever opened by a click: the menu bar, the library or the viewer's
+    /// link. Speaker review never pops up by itself.
+    func showFollowUp(_ id: UUID, refreshStatus: Bool = true) {
         guard let record = meetings.first(where: { $0.id == id }) else { return }
         if followUpMeetingID != id {
             closeFollowUp()
@@ -836,15 +824,8 @@ final class ArchiveController: ObservableObject {
             panel.center()
             followUpWindow = panel
         }
-        if let candidate = speakerAttentionCandidates.first(where: { $0.meetingID == id }) {
-            markSpeakerAttentionPresented(candidate)
-        }
-        if activate {
-            followUpWindow?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-        } else {
-            followUpWindow?.orderFrontRegardless()
-        }
+        followUpWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
         if refreshStatus, jobs.contains(where: { $0.meetingID == id && $0.status == .succeeded && $0.acknowledgement != nil }) {
             Task { await refreshWorkerStatuses(force: true) }
         }
@@ -852,24 +833,18 @@ final class ArchiveController: ObservableObject {
 
     func closeFollowUp() { followUpWindow?.close() }
 
-    func speakerReviewChanged() { Task { await refreshWorkerStatuses(force: true) } }
-
-    private func presentReadySpeakerReview() {
-        // Never put a window up while a call is going on, recorded or not.
-        // The menu indicator stays available.
-        let callInProgress = !hasPolledMicrophone || isRecording || recording != nil || !lastSnapshot.users.isEmpty
-        let blocked = !SpeakerAttentionTracker.interactionIsSafe(callInProgress: callInProgress)
-        let candidates = speakerAttentionCandidates.filter { followUpMeetingID == nil || $0.meetingID == followUpMeetingID }
-        guard let candidate = attentionTracker.nextPresentation(from: candidates, interactionBlocked: blocked) else { return }
-        showFollowUp(candidate.meetingID, activate: false)
+    /// Saving a name lets Bruce name the same voice in other meetings, which
+    /// it does in the background. Those meetings look finished to the routine
+    /// poll, so ask once more after that has had time to run.
+    func speakerReviewChanged() {
+        Task {
+            await refreshWorkerStatuses(force: true)
+            try? await Task.sleep(for: .seconds(Self.backgroundSpeakerRefreshDelay))
+            await refreshWorkerStatuses(force: true)
+        }
     }
 
-    private func markSpeakerAttentionPresented(_ candidate: SpeakerAttentionCandidate) {
-        attentionTracker.markPresented(candidate)
-        do {
-            try JSONEncoder().encode(attentionTracker).write(to: AppPaths.root.appendingPathComponent("speaker-attention.json"), options: .atomic)
-        } catch { fail("Could not save speaker prompt state: \(error.localizedDescription)") }
-    }
+    static let backgroundSpeakerRefreshDelay: TimeInterval = 45
 
     private func uploadNext() async {
         guard !uploading else { return }

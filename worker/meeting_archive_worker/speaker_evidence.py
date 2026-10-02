@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import math
-
-from .speakers import MATCH_MARGIN, STRONG_MATCH_THRESHOLD
+from .speakers import AUTOMATIC_KINDS, classify_match
 
 
 def refresh_speaker_matches(transcript: dict, registry) -> None:
@@ -12,16 +10,10 @@ def refresh_speaker_matches(transcript: dict, registry) -> None:
     meeting_id = transcript["meeting_id"]
     revision = transcript["manifest_revision"]
     assignments = registry.assignments(meeting_id, revision)
-    matches = {}
-    for speaker in sorted({turn["speaker"] for turn in transcript["turns"] if turn.get("speaker")}):
-        observation = registry.observation_record(meeting_id, revision, speaker)
-        if observation:
-            embedding, model = observation
-            # Exclude this recording, including other revisions of it. Otherwise
-            # a prior confirmation creates a misleading perfect self-match.
-            matches[speaker] = registry.review_match(
-                embedding, model_id=model, exclude_meeting_id=meeting_id,
-            )
+    speakers = sorted({turn["speaker"] for turn in transcript["turns"] if turn.get("speaker")})
+    # Matching excludes this recording, including other revisions of it.
+    # Otherwise a prior confirmation creates a misleading perfect self-match.
+    matches = registry.meeting_matches(meeting_id, revision, speakers)
     transcript["speaker_matches"] = matches
     for turn in transcript["turns"]:
         speaker = turn.get("speaker")
@@ -39,24 +31,20 @@ def refresh_speaker_matches(transcript: dict, registry) -> None:
 
 
 def automatic_names(transcript: dict) -> dict[str, str]:
-    """Only acknowledge strong matches already written to every affected turn."""
+    """Only acknowledge automatic names already written to every affected turn."""
     result = {}
     for speaker, match in transcript.get("speaker_matches", {}).items():
         if not isinstance(match, dict):
             continue
         name = match.get("automatic_name")
-        score = match.get("suggestion_score")
-        margin = match.get("suggestion_margin")
-        count = match.get("confirmation_count", 0)
-        if (
-            not isinstance(name, str) or not name.strip()
-            or match.get("suggestion_kind") != "strong"
-            or not isinstance(score, (int, float)) or not math.isfinite(score) or score < STRONG_MATCH_THRESHOLD
-            or not isinstance(count, int) or count < 1
-            or (margin is not None and (
-                not isinstance(margin, (int, float)) or not math.isfinite(margin) or margin < MATCH_MARGIN
-            ))
-        ):
+        kind = match.get("suggestion_kind")
+        if not isinstance(name, str) or not name.strip() or kind not in AUTOMATIC_KINDS:
+            continue
+        if kind == "strong" and classify_match(
+            match.get("suggestion_score"),
+            match.get("suggestion_margin"),
+            match.get("confirmation_count", 0),
+        ) != "automatic":
             continue
         turns = [turn for turn in transcript["turns"] if turn.get("speaker") == speaker]
         if turns and all(turn.get("name") == name and turn.get("name_source") == "voice_match" for turn in turns):

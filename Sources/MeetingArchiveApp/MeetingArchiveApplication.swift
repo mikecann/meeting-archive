@@ -295,7 +295,8 @@ struct MeetingFollowUpView: View {
                         meetingID: meetingID,
                         revision: record.metadataRevision,
                         configuration: controller.transferConfiguration,
-                        onComplete: { controller.closeFollowUp(); controller.speakerReviewChanged() },
+                        // A save that changed anything already refreshed Bruce's status.
+                        onComplete: { controller.closeFollowUp() },
                         onReviewChanged: { controller.speakerReviewChanged() },
                         onLater: { controller.closeFollowUp() }
                     )
@@ -319,7 +320,7 @@ struct MeetingFollowUpView: View {
                         else { Image(systemName: "clock.badge.exclamationmark").font(.largeTitle) }
                         Text(phase.detail).font(.headline)
                     }
-                    Text("Your recording is saved. You can close this window. It will open again when speaker names are ready to review, and the menu bar will show anything that still needs your attention.")
+                    Text("Your recording is saved. You can close this window. Once Bruce has worked out who spoke, any voices it doesn't recognize are listed in the menu bar to review whenever you like.")
                         .foregroundStyle(.secondary)
                     Spacer()
                     HStack {

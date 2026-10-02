@@ -9,7 +9,16 @@ import uuid
 from contextlib import closing
 from pathlib import Path
 
-from meeting_archive_worker.speakers import SpeakerRegistry
+from meeting_archive_worker.speakers import (
+    KNOWN_VOICE_MEETINGS,
+    MATCH_MARGIN,
+    OWN_MICROPHONE_THRESHOLD,
+    SAME_VOICE_THRESHOLD,
+    STRONG_MATCH_THRESHOLD,
+    TENTATIVE_MATCH_THRESHOLD,
+    SpeakerRegistry,
+    classify_match,
+)
 
 
 def embedding_with_cosine(score: float) -> list[float]:
@@ -32,10 +41,10 @@ class SpeakerReviewMatchingTests(unittest.TestCase):
         embedding: list[float],
         *,
         meeting_id: str | None = None,
+        speaker_id: str = "microphone:SPEAKER_00",
         model_id: str = "model@1",
     ) -> str:
         meeting_id = meeting_id or str(uuid.uuid4())
-        speaker_id = "microphone:SPEAKER_00"
         self.registry.save_observation(
             meeting_id,
             1,
@@ -48,39 +57,68 @@ class SpeakerReviewMatchingTests(unittest.TestCase):
         )
         return meeting_id
 
-    def test_review_thresholds_separate_tentative_and_strong_matches(self) -> None:
-        self._confirm("Mike Cann", embedding_with_cosine(0.63))
-        self._confirm("Mike Cann", embedding_with_cosine(0.62))
+    def test_thresholds_are_pinned_to_the_measured_voice_data(self) -> None:
+        # Different people scored at most 0.654 on Bruce. Changing these
+        # changes how often Mike is asked, and how often a name is wrong.
+        self.assertEqual(STRONG_MATCH_THRESHOLD, 0.82)
+        self.assertEqual(SAME_VOICE_THRESHOLD, 0.72)
+        self.assertEqual(KNOWN_VOICE_MEETINGS, 2)
+        self.assertEqual(TENTATIVE_MATCH_THRESHOLD, 0.65)
+        self.assertEqual(OWN_MICROPHONE_THRESHOLD, 0.65)
+        self.assertEqual(MATCH_MARGIN, 0.08)
 
-        below = self.registry.review_match(self.query, model_id="model@1")
+    def test_one_confirmed_meeting_names_only_a_strong_match(self) -> None:
+        meeting_id = self._confirm("Mike Cann", embedding_with_cosine(0.81))
         self.assertEqual(
-            below,
+            self.registry.review_match(self.query, model_id="model@1"),
             {
                 "suggested_name": None,
                 "automatic_name": None,
                 "suggestion_kind": None,
-                "suggestion_score": 0.63,
+                "suggestion_score": 0.81,
                 "suggestion_margin": None,
-                "confirmation_count": 2,
+                "confirmation_count": 1,
             },
         )
 
-        self._confirm("Mike Cann", embedding_with_cosine(0.72))
+        # Another of his voices from the same meeting is still one meeting.
+        self._confirm("Mike Cann", embedding_with_cosine(0.82), meeting_id=meeting_id, speaker_id="incoming:SPEAKER_01")
+        strong = self.registry.review_match(self.query, model_id="model@1")
+        self.assertEqual(strong["automatic_name"], "Mike Cann")
+        self.assertEqual(strong["suggestion_kind"], "strong")
+        self.assertEqual(strong["confirmation_count"], 1)
+
+    def test_two_confirmed_meetings_name_a_same_voice_and_suggest_a_close_one(self) -> None:
+        self._confirm("Mike Cann", embedding_with_cosine(0.63))
+        self._confirm("Mike Cann", embedding_with_cosine(0.64))
+        below = self.registry.review_match(self.query, model_id="model@1")
+        self.assertIsNone(below["suggested_name"])
+        self.assertEqual(below["confirmation_count"], 2)
+
+        self._confirm("Mike Cann", embedding_with_cosine(0.65))
         tentative = self.registry.review_match(self.query, model_id="model@1")
         self.assertEqual(tentative["suggested_name"], "Mike Cann")
         self.assertIsNone(tentative["automatic_name"])
         self.assertEqual(tentative["suggestion_kind"], "tentative")
-        self.assertAlmostEqual(tentative["suggestion_score"], 0.72)
-        self.assertIsNone(tentative["suggestion_margin"])
-        self.assertEqual(tentative["confirmation_count"], 3)
 
-        self._confirm("Mike Cann", embedding_with_cosine(0.82))
-        strong = self.registry.review_match(self.query, model_id="model@1")
-        self.assertEqual(strong["suggested_name"], "Mike Cann")
-        self.assertEqual(strong["automatic_name"], "Mike Cann")
-        self.assertEqual(strong["suggestion_kind"], "strong")
-        self.assertAlmostEqual(strong["suggestion_score"], 0.82)
-        self.assertEqual(strong["confirmation_count"], 4)
+        self._confirm("Mike Cann", embedding_with_cosine(0.719))
+        self.assertIsNone(self.registry.review_match(self.query, model_id="model@1")["automatic_name"])
+
+        self._confirm("Mike Cann", embedding_with_cosine(0.72))
+        known = self.registry.review_match(self.query, model_id="model@1")
+        self.assertEqual(known["automatic_name"], "Mike Cann")
+        self.assertEqual(known["suggestion_kind"], "strong")
+        self.assertAlmostEqual(known["suggestion_score"], 0.72)
+        self.assertEqual(known["confirmation_count"], 5)
+
+    def test_classification_rejects_missing_or_unusable_numbers(self) -> None:
+        self.assertEqual(classify_match(0.9, None, 1), "automatic")
+        self.assertIsNone(classify_match(0.9, 0.079, 5))
+        self.assertIsNone(classify_match(0.9, None, 0))
+        self.assertIsNone(classify_match(float("nan"), None, 3))
+        self.assertIsNone(classify_match(None, None, 3))
+        self.assertIsNone(classify_match(0.9, float("inf"), 3))
+        self.assertIsNone(classify_match(True, None, 3))
 
     def test_competing_candidate_must_clear_margin(self) -> None:
         self._confirm("Mike Cann", embedding_with_cosine(0.72))
@@ -99,7 +137,7 @@ class SpeakerReviewMatchingTests(unittest.TestCase):
     def test_tentative_match_counts_distinct_source_meetings_not_speakers(self) -> None:
         meeting_id = str(uuid.uuid4())
         for speaker_id, score in (
-            ("microphone:SPEAKER_00", 0.72),
+            ("microphone:SPEAKER_00", 0.71),
             ("microphone:SPEAKER_01", 0.70),
         ):
             self.registry.save_observation(
@@ -121,7 +159,7 @@ class SpeakerReviewMatchingTests(unittest.TestCase):
         match = self.registry.review_match(self.query, model_id="model@1")
 
         self.assertIsNone(match["suggested_name"])
-        self.assertAlmostEqual(match["suggestion_score"], 0.72)
+        self.assertAlmostEqual(match["suggestion_score"], 0.71)
         self.assertEqual(match["confirmation_count"], 1)
 
     def test_repeat_confirmation_deduplicates_and_rename_replaces_old_name(self) -> None:
@@ -297,6 +335,296 @@ class SpeakerReviewMatchingTests(unittest.TestCase):
                             len(embedding),
                         ),
                     )
+
+
+def unit(*values: float) -> list[float]:
+    norm = math.sqrt(sum(value * value for value in values))
+    return [value / norm for value in values]
+
+
+def turned(score: float) -> list[float]:
+    """A 3-D voice whose cosine with [1, 0, 0] is score."""
+    return [score, math.sqrt(1.0 - score * score), 0.0]
+
+
+class MeetingMatchTests(unittest.TestCase):
+    """Rules that need the rest of the meeting: the mic owner and split voices."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.database = Path(self.temporary.name) / "worker.sqlite"
+        self.registry = SpeakerRegistry(self.database)
+        self.meeting = str(uuid.uuid4())
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _observe(self, speaker_id: str, embedding: list[float], meeting_id: str | None = None) -> None:
+        self.registry.save_observation(meeting_id or self.meeting, 1, speaker_id, embedding, "model@1")
+
+    def _confirm_elsewhere(self, name: str, embedding: list[float], speaker_id: str = "microphone:SPEAKER_00") -> str:
+        meeting_id = str(uuid.uuid4())
+        self._observe(speaker_id, embedding, meeting_id)
+        self.registry.confirm_observation(meeting_id, 1, speaker_id, name)
+        return meeting_id
+
+    def _matches(self, *speaker_ids: str) -> dict:
+        return self.registry.meeting_matches(self.meeting, 1, list(speaker_ids))
+
+    def test_the_only_mic_speaker_is_named_as_its_owner_once_his_voice_is_saved(self) -> None:
+        self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
+        self._observe("microphone:SPEAKER_00", turned(OWN_MICROPHONE_THRESHOLD))
+        self._observe("incoming:SPEAKER_00", [0.0, 0.0, 1.0])
+
+        match = self._matches("microphone:SPEAKER_00", "incoming:SPEAKER_00")["microphone:SPEAKER_00"]
+
+        self.assertEqual(match["automatic_name"], "Mike Cann")
+        self.assertEqual(match["suggestion_kind"], "own_microphone")
+        self.assertEqual(match["confirmation_count"], 1)
+
+    def test_a_mic_voice_below_the_owner_gate_is_left_for_review(self) -> None:
+        self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
+        self._observe("microphone:SPEAKER_00", turned(0.64))
+
+        match = self._matches("microphone:SPEAKER_00")["microphone:SPEAKER_00"]
+
+        self.assertIsNone(match["automatic_name"])
+        self.assertIsNone(match["suggested_name"])
+
+    def test_a_diarized_mic_with_several_voices_has_no_owner_shortcut(self) -> None:
+        self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
+        self._observe("microphone:SPEAKER_00", turned(0.70))
+        self._observe("microphone:SPEAKER_01", [0.0, 0.0, 1.0])
+
+        matches = self._matches("microphone:SPEAKER_00", "microphone:SPEAKER_01")
+
+        self.assertIsNone(matches["microphone:SPEAKER_00"]["automatic_name"])
+
+    def test_the_owner_is_whoever_was_confirmed_on_the_mic_in_most_meetings(self) -> None:
+        self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
+        self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
+        # Heard through the speakers on an old diarized recording.
+        self._confirm_elsewhere("Gavin", [0.0, 0.0, 1.0], speaker_id="microphone:SPEAKER_01")
+        self._observe("microphone:SPEAKER_00", turned(0.66))
+
+        match = self._matches("microphone:SPEAKER_00")["microphone:SPEAKER_00"]
+
+        self.assertEqual(match["automatic_name"], "Mike Cann")
+
+    def test_no_owner_when_two_people_are_tied_on_the_mic(self) -> None:
+        self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
+        self._confirm_elsewhere("Gavin", [0.0, 1.0, 0.0])
+        self._observe("microphone:SPEAKER_00", unit(0.7, 0.0, 0.714))
+
+        match = self._matches("microphone:SPEAKER_00")["microphone:SPEAKER_00"]
+
+        self.assertIsNone(match["automatic_name"])
+
+    def test_the_owner_must_be_the_best_match_for_the_mic_voice(self) -> None:
+        self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
+        self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
+        self._confirm_elsewhere("Sean", unit(1.0, 1.0, 0.0), speaker_id="incoming:SPEAKER_00")
+        # 0.66 against Mike but 0.94 against Sean.
+        self._observe("microphone:SPEAKER_00", unit(0.66, 0.66, 0.3))
+
+        match = self._matches("microphone:SPEAKER_00")["microphone:SPEAKER_00"]
+
+        self.assertNotEqual(match["automatic_name"], "Mike Cann")
+        self.assertNotEqual(match["suggestion_kind"], "own_microphone")
+
+    def test_a_split_voice_takes_the_name_saved_for_its_twin_in_the_same_meeting(self) -> None:
+        self._observe("incoming:SPEAKER_00", [1.0, 0.0, 0.0])
+        self._observe("incoming:SPEAKER_01", turned(SAME_VOICE_THRESHOLD))
+        self._observe("incoming:SPEAKER_02", turned(0.71))
+        self.registry.confirm_observation(self.meeting, 1, "incoming:SPEAKER_00", "Micah")
+
+        matches = self._matches("incoming:SPEAKER_00", "incoming:SPEAKER_01", "incoming:SPEAKER_02")
+
+        self.assertEqual(matches["incoming:SPEAKER_01"]["automatic_name"], "Micah")
+        self.assertEqual(matches["incoming:SPEAKER_01"]["suggestion_kind"], "same_meeting")
+        self.assertIsNone(matches["incoming:SPEAKER_02"]["automatic_name"])
+        self.assertIsNone(matches["incoming:SPEAKER_00"]["automatic_name"])
+        # Automatic names are never confirmations or profiles.
+        self.assertEqual(self.registry.assignments(self.meeting, 1), {"incoming:SPEAKER_00": "Micah"})
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM voice_profiles").fetchone()[0], 1)
+
+    def test_a_split_voice_between_two_saved_people_is_left_alone(self) -> None:
+        self._observe("incoming:SPEAKER_00", [1.0, 0.0, 0.0])
+        self._observe("incoming:SPEAKER_01", [0.0, 1.0, 0.0])
+        self._observe("incoming:SPEAKER_02", unit(1.0, 0.9, 0.0))
+        self.registry.confirm_observations(
+            self.meeting, 1, {"incoming:SPEAKER_00": "Micah", "incoming:SPEAKER_01": "Sean"},
+        )
+
+        match = self._matches("incoming:SPEAKER_00", "incoming:SPEAKER_01", "incoming:SPEAKER_02")["incoming:SPEAKER_02"]
+
+        self.assertIsNone(match["automatic_name"])
+
+    def test_disagreeing_evidence_becomes_a_suggestion_not_a_name(self) -> None:
+        self._confirm_elsewhere("Sean", unit(1.0, 0.3, 0.0), speaker_id="incoming:SPEAKER_00")
+        self._observe("incoming:SPEAKER_00", unit(1.0, 0.0, 0.8))
+        self._observe("incoming:SPEAKER_01", [1.0, 0.0, 0.0])
+        self.registry.confirm_observation(self.meeting, 1, "incoming:SPEAKER_00", "Micah")
+
+        match = self._matches("incoming:SPEAKER_00", "incoming:SPEAKER_01")["incoming:SPEAKER_01"]
+
+        self.assertIsNone(match["automatic_name"])
+        self.assertEqual(match["suggested_name"], "Micah")
+        self.assertEqual(match["suggestion_kind"], "tentative")
+
+    def test_targets_limit_the_work_without_changing_the_answer(self) -> None:
+        self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
+        self._observe("microphone:SPEAKER_00", turned(0.9))
+        self._observe("incoming:SPEAKER_00", [0.0, 0.0, 1.0])
+        everyone = self._matches("microphone:SPEAKER_00", "incoming:SPEAKER_00")
+
+        with closing(sqlite3.connect(self.database.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+            targeted = SpeakerRegistry.meeting_matches_from_connection(
+                connection, self.meeting, 1, ["microphone:SPEAKER_00", "incoming:SPEAKER_00"],
+                targets=["microphone:SPEAKER_00"],
+            )
+
+        self.assertEqual(targeted, {"microphone:SPEAKER_00": everyone["microphone:SPEAKER_00"]})
+
+
+class SaveNamesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.database = Path(self.temporary.name) / "worker.sqlite"
+        from meeting_archive_worker.queue import JobQueue
+
+        JobQueue(self.database)
+        self.registry = SpeakerRegistry(self.database)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def _accept(self, meeting_id: str) -> None:
+        with closing(sqlite3.connect(self.database)) as connection:
+            with connection:
+                connection.execute(
+                    "INSERT INTO acceptances VALUES (?, 1, ?, ?, ?, ?)",
+                    (meeting_id, "a" * 64, "/archive/" + meeting_id, "{}", "2026-10-02T00:00:00Z"),
+                )
+
+    def _refreshes(self) -> set[str]:
+        with closing(sqlite3.connect(self.database)) as connection:
+            return {row[0] for row in connection.execute("SELECT meeting_id FROM speaker_refreshes")}
+
+    def test_names_for_several_speakers_are_saved_and_enrolled_together(self) -> None:
+        meeting = str(uuid.uuid4())
+        self.registry.save_observation(meeting, 1, "incoming:SPEAKER_00", [1.0, 0.0], "model@1")
+        self.registry.save_observation(meeting, 1, "incoming:SPEAKER_01", [0.9, 0.1], "model@1")
+
+        enrolled = self.registry.confirm_observations(meeting, 1, {
+            "incoming:SPEAKER_00": "Micah",
+            "incoming:SPEAKER_01": " Micah ",
+            "incoming:SPEAKER_02": "Sean",
+        })
+
+        self.assertEqual(enrolled, {"incoming:SPEAKER_00": True, "incoming:SPEAKER_01": True, "incoming:SPEAKER_02": False})
+        self.assertEqual(self.registry.assignments(meeting, 1), {
+            "incoming:SPEAKER_00": "Micah", "incoming:SPEAKER_01": "Micah", "incoming:SPEAKER_02": "Sean",
+        })
+        with closing(sqlite3.connect(self.database)) as connection:
+            profiles = connection.execute(
+                "SELECT display_name, source_speaker_id FROM voice_profiles ORDER BY source_speaker_id",
+            ).fetchall()
+            generation = connection.execute(
+                "SELECT generation FROM speaker_refreshes WHERE meeting_id=?", (meeting,),
+            ).fetchone()
+        self.assertEqual(profiles, [("Micah", "incoming:SPEAKER_00"), ("Micah", "incoming:SPEAKER_01")])
+        self.assertEqual(generation, (1,))
+
+    def test_one_blank_name_saves_nothing(self) -> None:
+        meeting = str(uuid.uuid4())
+        self.registry.save_observation(meeting, 1, "incoming:SPEAKER_00", [1.0, 0.0], "model@1")
+
+        for names in ({}, {"incoming:SPEAKER_00": "Micah", "incoming:SPEAKER_01": "  "}, {"": "Micah"}):
+            with self.subTest(names=names), self.assertRaises(ValueError):
+                self.registry.confirm_observations(meeting, 1, names)
+
+        self.assertEqual(self.registry.assignments(meeting, 1), {})
+        self.assertEqual(self._refreshes(), set())
+
+    def test_saving_a_voice_refreshes_other_meetings_with_that_voice_unnamed(self) -> None:
+        current, similar, different, named, unaccepted = (str(uuid.uuid4()) for _ in range(5))
+        for meeting in (similar, different, named):
+            self._accept(meeting)
+        self.registry.save_observation(current, 1, "incoming:SPEAKER_00", [1.0, 0.0], "model@1")
+        self.registry.save_observation(similar, 1, "incoming:SPEAKER_03", embedding_with_cosine(0.6), "model@1")
+        self.registry.save_observation(different, 1, "incoming:SPEAKER_00", embedding_with_cosine(0.5), "model@1")
+        self.registry.save_observation(named, 1, "incoming:SPEAKER_00", [1.0, 0.0], "model@1")
+        self.registry.confirm_observation(named, 1, "incoming:SPEAKER_00", "Micah")
+        self.registry.save_observation(unaccepted, 1, "incoming:SPEAKER_00", [1.0, 0.0], "model@1")
+        with closing(sqlite3.connect(self.database)) as connection:
+            with connection:
+                connection.execute("DELETE FROM speaker_refreshes")
+
+        self.registry.confirm_observation(current, 1, "incoming:SPEAKER_00", "Micah")
+
+        self.assertEqual(self._refreshes(), {current, similar})
+
+    def _clear_refreshes(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection:
+            with connection:
+                connection.execute("DELETE FROM speaker_refreshes")
+
+    def _confirm(self, meeting: str, speaker: str, embedding: list[float], name: str) -> None:
+        self.registry.save_observation(meeting, 1, speaker, embedding, "model@1")
+        self.registry.confirm_observation(meeting, 1, speaker, name)
+
+    def test_a_second_confirmed_meeting_refreshes_voices_close_to_the_first(self) -> None:
+        first, second, waiting = (str(uuid.uuid4()) for _ in range(3))
+        self._accept(waiting)
+        self._confirm(first, "incoming:SPEAKER_00", [1.0, 0.0, 0.0], "Alice")
+        # 0.75 to Alice's first sample: suggested at one meeting, named at two.
+        self.registry.save_observation(waiting, 1, "incoming:SPEAKER_00", turned(0.75), "model@1")
+        self._clear_refreshes()
+
+        # Her second sample sounds nothing like the waiting voice.
+        self._confirm(second, "incoming:SPEAKER_00", [0.0, 0.0, 1.0], "Alice")
+
+        self.assertEqual(self._refreshes(), {second, waiting})
+        match = self.registry.meeting_matches(waiting, 1, ["incoming:SPEAKER_00"])["incoming:SPEAKER_00"]
+        self.assertEqual(match["automatic_name"], "Alice")
+
+    def test_renaming_away_a_second_meeting_refreshes_what_it_named(self) -> None:
+        first, second, waiting = (str(uuid.uuid4()) for _ in range(3))
+        self._accept(waiting)
+        self._confirm(first, "incoming:SPEAKER_00", [1.0, 0.0, 0.0], "Alice")
+        self._confirm(second, "incoming:SPEAKER_00", [0.0, 0.0, 1.0], "Alice")
+        self.registry.save_observation(waiting, 1, "incoming:SPEAKER_00", turned(0.75), "model@1")
+        self._clear_refreshes()
+
+        self.registry.confirm_observation(second, 1, "incoming:SPEAKER_00", "Bob")
+
+        self.assertEqual(self._refreshes(), {second, waiting})
+        match = self.registry.meeting_matches(waiting, 1, ["incoming:SPEAKER_00"])["incoming:SPEAKER_00"]
+        self.assertIsNone(match["automatic_name"])
+
+    def test_a_new_mic_owner_refreshes_meetings_whose_mic_he_now_owns(self) -> None:
+        mike_a, mike_b, mike_c, gavin_a, gavin_b, waiting = (str(uuid.uuid4()) for _ in range(6))
+        self._accept(waiting)
+        self._confirm(mike_a, "microphone:SPEAKER_00", [1.0, 0.0, 0.0], "Mike Cann")
+        self._confirm(mike_b, "microphone:SPEAKER_00", [1.0, 0.0, 0.0], "Mike Cann")
+        self._confirm(gavin_a, "microphone:SPEAKER_00", [0.0, 0.0, 1.0], "Gavin")
+        self._confirm(gavin_b, "microphone:SPEAKER_00", [0.0, 0.0, 1.0], "Gavin")
+        # Tied on the mic, so nobody owns it and 0.66 is only a suggestion.
+        self.registry.save_observation(waiting, 1, "microphone:SPEAKER_00", turned(0.66), "model@1")
+        self.assertIsNone(
+            self.registry.meeting_matches(waiting, 1, ["microphone:SPEAKER_00"])["microphone:SPEAKER_00"]["automatic_name"],
+        )
+        self._clear_refreshes()
+
+        # A third Mike sample far from the waiting voice changes no count
+        # boundary, only who owns the mic.
+        self._confirm(mike_c, "microphone:SPEAKER_00", unit(0.0, -1.0, 0.2), "Mike Cann")
+
+        self.assertEqual(self._refreshes(), {mike_c, waiting})
+        match = self.registry.meeting_matches(waiting, 1, ["microphone:SPEAKER_00"])["microphone:SPEAKER_00"]
+        self.assertEqual(match["suggestion_kind"], "own_microphone")
 
 
 if __name__ == "__main__":

@@ -49,6 +49,8 @@ struct SpeakerReviewSpeaker: Codable, Equatable, Identifiable, Sendable {
     var embeddingAvailable: Bool
     var excerpts: [SpeakerReviewExcerpt]
     var automaticName: String? = nil
+    /// "strong", "own_microphone" or "same_meeting" for an automatic name,
+    /// "tentative" for a suggestion.
     var suggestionKind: String? = nil
     var confirmationCount: Int? = nil
 
@@ -65,6 +67,20 @@ struct SpeakerReviewSpeaker: Codable, Equatable, Identifiable, Sendable {
         case automaticName = "automatic_name"
         case suggestionKind = "suggestion_kind"
         case confirmationCount = "confirmation_count"
+    }
+
+    /// "Call audio, voice 2" for incoming:SPEAKER_01.
+    var voiceLabel: String {
+        let parts = speakerID.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2,
+              let number = Int(parts[1].replacingOccurrences(of: "SPEAKER_", with: ""))
+        else { return speakerID }
+        let channel = switch parts[0] {
+        case "incoming": "Call audio"
+        case "microphone": "Your mic"
+        default: parts[0]
+        }
+        return "\(channel), voice \(number + 1)"
     }
 }
 
@@ -98,23 +114,42 @@ struct SpeakerCalendarCandidate: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
-struct SpeakerIdentificationResponse: Codable, Equatable, Sendable {
+/// What identify-speakers saved: exactly the names it was sent.
+struct SavedSpeakerNamesResponse: Codable, Equatable, Sendable {
     var schemaVersion: Int
-    var confirmed: Bool
     var meetingID: UUID
     var manifestRevision: Int
-    var speakerID: String
-    var name: String
-    var voiceProfileEnrolled: Bool
+    var speakers: [Speaker]
+
+    struct Speaker: Codable, Equatable, Sendable {
+        var speakerID: String
+        var name: String
+        var voiceProfileEnrolled: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case speakerID = "speaker_id"
+            case name
+            case voiceProfileEnrolled = "voice_profile_enrolled"
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
-        case confirmed
         case meetingID = "meeting_id"
         case manifestRevision = "manifest_revision"
-        case speakerID = "speaker_id"
-        case name
-        case voiceProfileEnrolled = "voice_profile_enrolled"
+        case speakers
+    }
+
+    func validate(meetingID expectedMeetingID: UUID, revision expectedRevision: Int, names: [String: String]) throws {
+        let saved = Dictionary(speakers.map { ($0.speakerID, $0.name) }, uniquingKeysWith: { first, _ in first })
+        guard schemaVersion == 1,
+              meetingID == expectedMeetingID,
+              manifestRevision == expectedRevision,
+              speakers.count == names.count,
+              saved == names
+        else {
+            throw SpeakerReviewError.invalidResponse("identify-speakers returned different names from the ones sent")
+        }
     }
 }
 
@@ -193,26 +228,67 @@ struct SpeakerPlayerView: NSViewRepresentable {
     }
 }
 
-struct SpeakerReviewDraft: Equatable, Sendable {
+/// One person in the review. pyannote often splits one person into several
+/// voices; voices with the same name share a card, so naming it once names
+/// them all.
+struct SpeakerReviewCard: Identifiable, Equatable, Sendable {
+    let id: UUID
+    var speakerIDs: [String]
     var name: String
-    var isPredicted: Bool
 
-    static func make(speakers: [SpeakerReviewSpeaker]) -> [String: SpeakerReviewDraft] {
-        Dictionary(uniqueKeysWithValues: speakers.map { speaker in
-            if let name = speaker.name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
-                return (speaker.speakerID, SpeakerReviewDraft(name: name, isPredicted: false))
-            }
-            if let automaticName = speaker.automaticName?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !automaticName.isEmpty
-            {
-                return (speaker.speakerID, SpeakerReviewDraft(name: automaticName, isPredicted: false))
-            }
-            if let suggestion = speaker.suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines), !suggestion.isEmpty {
-                return (speaker.speakerID, SpeakerReviewDraft(name: suggestion, isPredicted: true))
-            }
-            return (speaker.speakerID, SpeakerReviewDraft(name: "", isPredicted: false))
-        })
+    init(id: UUID = UUID(), speakerIDs: [String], name: String) {
+        self.id = id
+        self.speakerIDs = speakerIDs
+        self.name = name
     }
+
+    /// A saved name first, then what Bruce recognized, then its suggestion.
+    static func startingName(for speaker: SpeakerReviewSpeaker) -> String {
+        for candidate in [speaker.name, speaker.automaticName, speaker.suggestedName] {
+            if let name = candidate?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+                return name
+            }
+        }
+        return ""
+    }
+
+    /// Names that only differ by case, accents or spacing are one person.
+    static func groupingKey(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+    }
+
+    /// One card per name, in the order Bruce listed the voices. Every voice
+    /// without a name gets a card of its own.
+    static func make(speakers: [SpeakerReviewSpeaker]) -> [SpeakerReviewCard] {
+        var cards: [SpeakerReviewCard] = []
+        var cardForKey: [String: Int] = [:]
+        for speaker in speakers {
+            let name = startingName(for: speaker)
+            let key = groupingKey(name)
+            if !key.isEmpty, let index = cardForKey[key] {
+                cards[index].speakerIDs.append(speaker.speakerID)
+                continue
+            }
+            if !key.isEmpty { cardForKey[key] = cards.count }
+            cards.append(SpeakerReviewCard(speakerIDs: [speaker.speakerID], name: name))
+        }
+        return cards
+    }
+}
+
+/// How sure a card's name is, which decides what the card says about it.
+enum SpeakerNameStatus: Equatable, Sendable {
+    /// No name. Saving leaves these voices unknown.
+    case unknown
+    /// Every voice is saved on Bruce with this name.
+    case saved
+    /// Bruce named these voices from what it has heard before.
+    case recognized
+    /// Bruce's guess, filled in for checking.
+    case suggested
+    /// Mike typed or chose it.
+    case typed
 }
 
 enum SpeakerReviewError: Error, Equatable, CustomStringConvertible, LocalizedError {
@@ -222,7 +298,7 @@ enum SpeakerReviewError: Error, Equatable, CustomStringConvertible, LocalizedErr
     var description: String {
         switch self {
         case .invalidResponse(let message): message
-        case .emptyName: "Enter a speaker name before confirming it."
+        case .emptyName: "A speaker name to save was empty."
         }
     }
 
@@ -278,27 +354,33 @@ enum SpeakerReviewCommandBuilder {
         )
     }
 
-    static func identify(
+    /// Saves every name in one call, so they are saved together or not at all.
+    static func saveNames(
         meetingID: UUID,
         revision: Int,
-        speakerID: String,
-        name: String,
+        names: [String: String],
         configuration: ArchiveTransferConfiguration
     ) throws -> ArchiveProcessRequest {
         try configuration.validate()
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard revision >= 1 else { throw SpeakerReviewError.invalidResponse("Revision must be at least one") }
-        guard !trimmedName.isEmpty else { throw SpeakerReviewError.emptyName }
+        let trimmed = names.mapValues { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !trimmed.isEmpty, trimmed.allSatisfy({ !$0.key.isEmpty && !$0.value.isEmpty }) else {
+            throw SpeakerReviewError.emptyName
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let json = String(decoding: try encoder.encode(trimmed), as: UTF8.self)
         return remoteRequest(
             arguments: workerPrefix(configuration) + [
-                "identify",
+                "identify-speakers",
                 "--meeting-id", meetingID.uuidString.lowercased(),
                 "--revision", String(revision),
-                "--speaker-id", speakerID,
-                "--name", trimmedName,
+                "--names", json,
                 "--db", configuration.workerDatabase,
             ],
-            timeout: configuration.commandTimeout,
+            // It rewrites the transcript like review-speakers does, so it
+            // gets the same allowance; keepalives still end a dead connection.
+            timeout: configuration.workerTimeout,
             configuration: configuration
         )
     }
@@ -330,13 +412,13 @@ protocol SpeakerReviewServing: Sendable {
         configuration: ArchiveTransferConfiguration
     ) async throws -> SpeakerReviewResponse
 
-    func identify(
+    /// Saves Mike's names, keyed by speaker ID, all together.
+    func saveNames(
         meetingID: UUID,
         revision: Int,
-        speakerID: String,
-        name: String,
+        names: [String: String],
         configuration: ArchiveTransferConfiguration
-    ) async throws -> SpeakerIdentificationResponse
+    ) async throws -> SavedSpeakerNamesResponse
 
     func fetchPlayback(
         meetingID: UUID,
@@ -390,37 +472,31 @@ actor SpeakerReviewClient: SpeakerReviewServing {
         }
     }
 
-    func identify(
+    func saveNames(
         meetingID: UUID,
         revision: Int,
-        speakerID: String,
-        name: String,
+        names: [String: String],
         configuration: ArchiveTransferConfiguration
-    ) async throws -> SpeakerIdentificationResponse {
+    ) async throws -> SavedSpeakerNamesResponse {
         let result = try await runChecked(
-            SpeakerReviewCommandBuilder.identify(
+            SpeakerReviewCommandBuilder.saveNames(
                 meetingID: meetingID,
                 revision: revision,
-                speakerID: speakerID,
-                name: name,
+                names: names,
                 configuration: configuration
             )
         )
-        let response: SpeakerIdentificationResponse
+        let response: SavedSpeakerNamesResponse
         do {
-            response = try ModelCodec.decoder.decode(SpeakerIdentificationResponse.self, from: result.stdout)
+            response = try ModelCodec.decoder.decode(SavedSpeakerNamesResponse.self, from: result.stdout)
         } catch {
-            throw SpeakerReviewError.invalidResponse("Could not read speaker confirmation: \(error.localizedDescription)")
+            throw SpeakerReviewError.invalidResponse("Could not read the saved names: \(error.localizedDescription)")
         }
-        guard response.schemaVersion == 1,
-              response.confirmed,
-              response.meetingID == meetingID,
-              response.manifestRevision == revision,
-              response.speakerID == speakerID,
-              response.name == name.trimmingCharacters(in: .whitespacesAndNewlines)
-        else {
-            throw SpeakerReviewError.invalidResponse("identify returned an unexpected confirmation")
-        }
+        try response.validate(
+            meetingID: meetingID,
+            revision: revision,
+            names: names.mapValues { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        )
         return response
     }
 
@@ -453,10 +529,12 @@ actor SpeakerReviewClient: SpeakerReviewServing {
 @MainActor
 final class SpeakerReviewModel: ObservableObject {
     @Published private(set) var response: SpeakerReviewResponse?
-    @Published private(set) var drafts: [String: SpeakerReviewDraft] = [:]
-    @Published private(set) var confirmedSpeakerIDs: Set<String> = []
-    @Published private(set) var confirmingSpeakerIDs: Set<String> = []
+    @Published private(set) var cards: [SpeakerReviewCard] = []
+    /// The name Bruce holds for each voice. Only a load or a successful save
+    /// changes it, so nothing shows as saved unless Bruce said so.
+    @Published private(set) var savedNames: [String: String] = [:]
     @Published private(set) var isLoading = false
+    @Published private(set) var isSaving = false
     @Published private(set) var playbackStatus: String?
     @Published var failure: String?
     @Published private(set) var player: AVPlayer?
@@ -472,14 +550,21 @@ final class SpeakerReviewModel: ObservableObject {
     private var playbackGeneration = 0
     @Published private(set) var isFetchingPlayback = false
 
-    var remainingUnconfirmedCount: Int {
-        guard let response else { return 0 }
-        return response.speakers.lazy.filter { !self.confirmedSpeakerIDs.contains($0.speakerID) }.count
+    /// The names Save names sends: every voice in a named card that Bruce
+    /// doesn't already hold under that name. Blank cards stay unknown.
+    var namesToSave: [String: String] {
+        var names: [String: String] = [:]
+        for card in cards {
+            let name = card.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { continue }
+            for speakerID in card.speakerIDs where savedNames[speakerID] != name {
+                names[speakerID] = name
+            }
+        }
+        return names
     }
 
-    var canComplete: Bool {
-        response != nil && !isLoading && confirmingSpeakerIDs.isEmpty && remainingUnconfirmedCount == 0
-    }
+    var canSave: Bool { response != nil && !isLoading && !isSaving }
 
     init(
         meetingID: UUID,
@@ -509,69 +594,131 @@ final class SpeakerReviewModel: ObservableObject {
                 configuration: configuration
             )
             self.response = response
-            drafts = SpeakerReviewDraft.make(speakers: response.speakers)
-            confirmedSpeakerIDs = Set(response.speakers.compactMap { speaker in
-                let explicitName = speaker.name?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let automaticName = speaker.automaticName?.trimmingCharacters(in: .whitespacesAndNewlines)
-                return explicitName?.isEmpty == false || automaticName?.isEmpty == false
-                    ? speaker.speakerID
-                    : nil
-            })
+            savedNames = Dictionary(
+                response.speakers.compactMap { speaker in
+                    speaker.name.map { (speaker.speakerID, $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                }.filter { !$0.1.isEmpty },
+                uniquingKeysWith: { first, _ in first }
+            )
+            // Whatever still needs Mike goes first. The order then stays put
+            // while he types.
+            let cards = SpeakerReviewCard.make(speakers: response.speakers)
+            self.cards = cards.enumerated().sorted { left, right in
+                let leftRank = Self.rank(status(of: left.element))
+                let rightRank = Self.rank(status(of: right.element))
+                return leftRank == rightRank ? left.offset < right.offset : leftRank < rightRank
+            }.map(\.element)
         } catch {
             failure = error.localizedDescription
         }
     }
 
-    func setName(_ name: String, for speakerID: String) {
-        guard response?.speakers.contains(where: { $0.speakerID == speakerID }) == true else { return }
-        drafts[speakerID] = SpeakerReviewDraft(name: name, isPredicted: false)
-        confirmedSpeakerIDs.remove(speakerID)
+    func speaker(_ speakerID: String) -> SpeakerReviewSpeaker? {
+        response?.speakers.first { $0.speakerID == speakerID }
     }
 
-    @discardableResult
-    func confirm(_ speakerID: String) async -> Bool {
-        guard response?.speakers.contains(where: { $0.speakerID == speakerID }) == true,
-              !confirmedSpeakerIDs.contains(speakerID),
-              let draft = drafts[speakerID],
-              confirmingSpeakerIDs.insert(speakerID).inserted
-        else { return false }
-        let name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else {
-            failure = SpeakerReviewError.emptyName.description
-            confirmingSpeakerIDs.remove(speakerID)
-            return false
+    func card(containing speakerID: String) -> SpeakerReviewCard? {
+        cards.first { $0.speakerIDs.contains(speakerID) }
+    }
+
+    func status(of card: SpeakerReviewCard) -> SpeakerNameStatus {
+        let name = card.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return .unknown }
+        let unsaved = card.speakerIDs.filter { savedNames[$0] != name }
+        guard !unsaved.isEmpty else { return .saved }
+        let speakers = unsaved.compactMap(speaker)
+        let trimmed = { (value: String?) in value?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if speakers.count == unsaved.count, speakers.allSatisfy({ trimmed($0.automaticName) == name }) {
+            return .recognized
         }
+        if speakers.contains(where: { trimmed($0.suggestedName) == name && trimmed($0.automaticName) != name }) {
+            return .suggested
+        }
+        return .typed
+    }
+
+    /// Changes a card's name while Mike types. Cards merge once he's done.
+    func setName(_ name: String, forCard cardID: SpeakerReviewCard.ID) {
+        guard let index = cards.firstIndex(where: { $0.id == cardID }) else { return }
+        cards[index].name = name
+    }
+
+    /// Once a name is finished, a card with the same name as another is the
+    /// same person, so the two become one card under the name already there.
+    func commitName(forCard cardID: SpeakerReviewCard.ID) {
+        guard let index = cards.firstIndex(where: { $0.id == cardID }) else { return }
+        let key = SpeakerReviewCard.groupingKey(cards[index].name)
+        guard !key.isEmpty,
+              let other = cards.firstIndex(where: { $0.id != cardID && SpeakerReviewCard.groupingKey($0.name) == key })
+        else { return }
+        var merged = cards[other]
+        merged.speakerIDs = index < other
+            ? cards[index].speakerIDs + cards[other].speakerIDs
+            : cards[other].speakerIDs + cards[index].speakerIDs
+        let position = min(index, other)
+        cards.removeAll { $0.id == cardID || $0.id == merged.id }
+        cards.insert(merged, at: position)
+    }
+
+    func chooseName(_ name: String, forCard cardID: SpeakerReviewCard.ID) {
+        setName(name, forCard: cardID)
+        commitName(forCard: cardID)
+    }
+
+    /// Takes a voice out of its card when it isn't that person after all. It
+    /// starts without a name.
+    func separate(_ speakerID: String) {
+        guard let index = cards.firstIndex(where: { $0.speakerIDs.contains(speakerID) }),
+              cards[index].speakerIDs.count > 1
+        else { return }
+        cards[index].speakerIDs.removeAll { $0 == speakerID }
+        cards.insert(SpeakerReviewCard(speakerIDs: [speakerID], name: ""), at: index + 1)
+    }
+
+    /// Saves every filled-in name in one go: typed, chosen, suggested or
+    /// recognized. Returns true once nothing is left to save.
+    @discardableResult
+    func save() async -> Bool {
+        guard response != nil, !isLoading, !isSaving else { return false }
+        mergeCardsWithTheSameName()
+        let names = namesToSave
+        guard !names.isEmpty else {
+            failure = nil
+            return true
+        }
+        isSaving = true
         failure = nil
-        defer { confirmingSpeakerIDs.remove(speakerID) }
+        defer { isSaving = false }
         do {
-            _ = try await client.identify(
+            let saved = try await client.saveNames(
                 meetingID: meetingID,
                 revision: revision,
-                speakerID: speakerID,
-                name: name,
+                names: names,
                 configuration: configuration
             )
+            for speaker in saved.speakers {
+                savedNames[speaker.speakerID] = speaker.name
+            }
             onReviewChanged()
-            let currentName = drafts[speakerID]?.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard currentName == name else {
-                // The remote confirmation succeeded, but the user typed a
-                // newer draft while it was in flight. Keep that draft pending.
-                return false
-            }
-            if var updatedResponse = response,
-               let index = updatedResponse.speakers.firstIndex(where: { $0.speakerID == speakerID })
-            {
-                // Record that this session made an explicit confirmation so
-                // an edited automatic match is no longer presented as merely recognized.
-                updatedResponse.speakers[index].name = name
-                response = updatedResponse
-            }
-            drafts[speakerID] = SpeakerReviewDraft(name: name, isPredicted: false)
-            confirmedSpeakerIDs.insert(speakerID)
-            return true
+            // A name edited while this was in flight is still waiting.
+            return namesToSave.isEmpty
         } catch {
             failure = error.localizedDescription
             return false
+        }
+    }
+
+    private func mergeCardsWithTheSameName() {
+        for card in cards where cards.contains(where: { $0.id == card.id }) {
+            commitName(forCard: card.id)
+        }
+    }
+
+    private static func rank(_ status: SpeakerNameStatus) -> Int {
+        switch status {
+        case .unknown, .suggested: 0
+        case .typed, .recognized: 1
+        case .saved: 2
         }
     }
 
@@ -595,7 +742,8 @@ final class SpeakerReviewModel: ObservableObject {
             await player.seek(to: CMTime(seconds: range.start, preferredTimescale: 600))
             guard generation == playbackGeneration else { return }
             player.play()
-            playbackStatus = "Playing \(speakerID) from \(formatTime(range.start)) to \(formatTime(range.end))"
+            let voice = speaker(speakerID)?.voiceLabel ?? speakerID
+            playbackStatus = "Playing \(voice) from \(formatTime(range.start)) to \(formatTime(range.end))"
             playbackTask = Task { [weak self, weak player] in
                 try? await Task.sleep(for: .seconds(range.end - range.start))
                 guard !Task.isCancelled, self?.playbackGeneration == generation else { return }
@@ -660,6 +808,7 @@ final class SpeakerReviewModel: ObservableObject {
 struct SpeakerReviewView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model: SpeakerReviewModel
+    @FocusState private var focusedCard: SpeakerReviewCard.ID?
     private let onComplete: () -> Void
     private let onLater: () -> Void
 
@@ -713,26 +862,38 @@ struct SpeakerReviewView: View {
                     if model.response == nil && !model.isLoading {
                         Button("Try again") { Task { await model.load() } }
                     }
-                    Button("Complete") {
-                        model.stopPlayback()
-                        onComplete()
-                        dismiss()
+                    if model.isSaving {
+                        ProgressView().controlSize(.small)
                     }
-                    .disabled(!model.canComplete)
+                    Button("Save names") {
+                        focusedCard = nil
+                        Task {
+                            guard await model.save() else { return }
+                            model.stopPlayback()
+                            onComplete()
+                            dismiss()
+                        }
+                    }
+                    .disabled(!model.canSave)
+                    .help("Saves every name filled in. Anyone left blank stays unknown.")
                 }
             }
         }
         .frame(minWidth: 620, minHeight: 560)
         .task { if model.response == nil { await model.load() } }
         .onDisappear { model.stopPlayback() }
+        .onChange(of: focusedCard) { previous, _ in
+            if let previous { model.commitName(forCard: previous) }
+        }
     }
 
     private func reviewList(_ response: SpeakerReviewResponse) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 16) {
-                Text("Strong voice matches are filled in automatically; suggestions still need your confirmation.")
+                Text("Check the names and fill in anyone you know, then choose Save names. Voices with the same name are saved as one person, and anyone left blank stays unknown.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 if let failure = model.failure {
                     Label(failure, systemImage: "exclamationmark.triangle")
@@ -758,8 +919,8 @@ struct SpeakerReviewView: View {
                     )
                 }
 
-                ForEach(response.speakers) { speaker in
-                    speakerCard(speaker, candidates: response.calendarCandidates)
+                ForEach(model.cards) { card in
+                    speakerCard(card, candidates: response.calendarCandidates)
                 }
             }
             .padding(20)
@@ -767,36 +928,95 @@ struct SpeakerReviewView: View {
     }
 
     private func speakerCard(
-        _ speaker: SpeakerReviewSpeaker,
+        _ card: SpeakerReviewCard,
         candidates: [SpeakerCalendarCandidate]
     ) -> some View {
-        let draft = model.drafts[speaker.speakerID] ?? SpeakerReviewDraft(name: "", isPredicted: false)
+        let status = model.status(of: card)
+        let name = card.name.trimmingCharacters(in: .whitespacesAndNewlines)
         return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text(speaker.speakerID).font(.headline)
-                if model.confirmedSpeakerIDs.contains(speaker.speakerID) {
-                    Label(
-                        automaticNameIsCurrentAndConfirmed(speaker, draft: draft) ? "Recognized" : "Confirmed",
-                        systemImage: "checkmark.circle.fill"
-                    )
-                        .font(.caption)
-                        .foregroundStyle(.green)
+            HStack(alignment: .firstTextBaseline) {
+                Text(name.isEmpty ? "Unknown voice" : name).font(.headline)
+                if card.speakerIDs.count > 1 {
+                    Text("· \(card.speakerIDs.count) voices").foregroundStyle(.secondary)
                 }
+                statusBadge(status)
                 Spacer()
-                if speaker.embeddingAvailable {
-                    Text("Voice sample available").font(.caption).foregroundStyle(.secondary)
-                }
             }
 
-            if speaker.excerpts.isEmpty {
-                Text("No excerpt is available for this speaker.")
-                    .font(.callout)
+            TextField(
+                "Name",
+                text: Binding(
+                    get: { model.cards.first { $0.id == card.id }?.name ?? "" },
+                    set: { model.setName($0, forCard: card.id) }
+                )
+            )
+            .focused($focusedCard, equals: card.id)
+            .onSubmit { model.commitName(forCard: card.id) }
+            .disabled(model.isSaving)
+
+            if let caption = caption(for: card, status: status) {
+                Text(caption)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-            } else {
-                ForEach(speaker.excerpts) { excerpt in
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Attendees help with a voice nobody has named yet. A saved or
+            // recognized name can still be typed over.
+            if !candidates.isEmpty, status != .saved, status != .recognized {
+                Menu("Choose a calendar attendee") {
+                    ForEach(candidates) { candidate in
+                        Button(candidateLabel(candidate)) {
+                            model.chooseName(candidate.name, forCard: card.id)
+                        }
+                    }
+                }
+                .disabled(model.isSaving)
+            }
+
+            ForEach(card.speakerIDs, id: \.self) { speakerID in
+                voiceSamples(speakerID, in: card)
+            }
+        }
+        .padding(14)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    @ViewBuilder
+    private func statusBadge(_ status: SpeakerNameStatus) -> some View {
+        switch status {
+        case .saved:
+            Label("Saved", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(.green)
+        case .recognized:
+            Label("Recognized", systemImage: "checkmark.circle").font(.caption).foregroundStyle(.green)
+        case .suggested:
+            Label("Suggested", systemImage: "questionmark.circle").font(.caption).foregroundStyle(.orange)
+        case .typed, .unknown:
+            EmptyView()
+        }
+    }
+
+    private func voiceSamples(_ speakerID: String, in card: SpeakerReviewCard) -> some View {
+        let speaker = model.speaker(speakerID)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(speaker?.voiceLabel ?? speakerID)
+                    .font(.subheadline.weight(.semibold))
+                    .help(speakerID)
+                Spacer()
+                if card.speakerIDs.count > 1 {
+                    let name = card.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    Button(name.isEmpty ? "Separate" : "Not \(name)") { model.separate(speakerID) }
+                        .buttonStyle(.link)
+                        .disabled(model.isSaving)
+                        .help("Gives this voice a card of its own")
+                }
+            }
+            if let excerpts = speaker?.excerpts, !excerpts.isEmpty {
+                ForEach(excerpts) { excerpt in
                     HStack(alignment: .top, spacing: 10) {
                         Button {
-                            Task { await model.play(excerpt, speakerID: speaker.speakerID) }
+                            Task { await model.play(excerpt, speakerID: speakerID) }
                         } label: {
                             Image(systemName: "play.circle.fill").font(.title2)
                         }
@@ -806,81 +1026,51 @@ struct SpeakerReviewView: View {
 
                         VStack(alignment: .leading, spacing: 3) {
                             Text(excerpt.text).textSelection(.enabled)
-                            Text("\(formatTime(excerpt.start))–\(formatTime(excerpt.end)) · \(excerpt.channelOrigin)")
+                            Text("\(formatTime(excerpt.start))–\(formatTime(excerpt.end))")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                     }
                 }
-            }
-
-            TextField(
-                "Speaker name",
-                text: Binding(
-                    get: { model.drafts[speaker.speakerID]?.name ?? "" },
-                    set: { model.setName($0, for: speaker.speakerID) }
-                )
-            )
-            if draft.isPredicted {
-                Text(predictionLabel(speaker))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else if automaticNameIsCurrentAndConfirmed(speaker, draft: draft) {
-                Text(automaticNameLabel(speaker))
-                    .font(.caption)
+            } else {
+                Text("No excerpt is available for this voice.")
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             }
+        }
+        .padding(.top, 4)
+    }
 
-            if !candidates.isEmpty {
-                Menu("Choose a calendar attendee") {
-                    ForEach(candidates) { candidate in
-                        Button(candidateLabel(candidate)) {
-                            model.setName(candidate.name, for: speaker.speakerID)
-                        }
-                    }
-                }
+    private func caption(for card: SpeakerReviewCard, status: SpeakerNameStatus) -> String? {
+        let name = card.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let unsaved = card.speakerIDs.filter { model.savedNames[$0] != name }.compactMap(model.speaker)
+        switch status {
+        case .unknown:
+            if let saved = card.speakerIDs.compactMap({ model.savedNames[$0] }).first {
+                return "Saved as \(saved). Type another name to change it."
             }
-
-            HStack {
-                Spacer()
-                Button("Confirm") { Task { await model.confirm(speaker.speakerID) } }
-                    .disabled(
-                        draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                            || model.confirmingSpeakerIDs.contains(speaker.speakerID)
-                            || model.confirmedSpeakerIDs.contains(speaker.speakerID)
-                    )
+            return "Leave it blank if you don't know who this is."
+        case .saved:
+            return nil
+        case .recognized:
+            let kinds = Set(unsaved.compactMap(\.suggestionKind))
+            if kinds == ["own_microphone"] {
+                return "Your mic, recognized from your voice."
             }
+            if kinds == ["same_meeting"] {
+                return "Sounds like the \(name) you saved in this meeting."
+            }
+            let count = unsaved.compactMap(\.confirmationCount).max() ?? 0
+            return count > 0
+                ? "Recognized from \(count) earlier \(count == 1 ? "meeting" : "meetings")."
+                : "Recognized from a voice you saved before."
+        case .suggested:
+            let count = unsaved.compactMap(\.confirmationCount).max() ?? 0
+            let evidence = count > 1 ? ", going by \(count) earlier meetings" : ""
+            return "Possibly \(name)\(evidence). Change it or clear it if that's wrong."
+        case .typed:
+            return "Saved when you choose Save names."
         }
-        .padding(14)
-        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private func predictionLabel(_ speaker: SpeakerReviewSpeaker) -> String {
-        if let name = speaker.suggestedName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
-            return "Possibly \(name). Confirm or replace it."
-        }
-        return "Possible name. Confirm or replace it."
-    }
-
-    private func automaticNameIsCurrentAndConfirmed(
-        _ speaker: SpeakerReviewSpeaker,
-        draft: SpeakerReviewDraft
-    ) -> Bool {
-        let explicitName = speaker.name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard explicitName.isEmpty,
-              let automaticName = speaker.automaticName?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !automaticName.isEmpty
-        else { return false }
-        return model.confirmedSpeakerIDs.contains(speaker.speakerID)
-            && draft.name.trimmingCharacters(in: .whitespacesAndNewlines) == automaticName
-    }
-
-    private func automaticNameLabel(_ speaker: SpeakerReviewSpeaker) -> String {
-        if let count = speaker.confirmationCount, count > 0 {
-            let noun = count == 1 ? "confirmation" : "confirmations"
-            return "Recognized from \(count) prior voice \(noun)."
-        }
-        return "Recognized from a previously confirmed voice."
     }
 
     private func candidateLabel(_ candidate: SpeakerCalendarCandidate) -> String {

@@ -12,7 +12,7 @@ import tempfile
 import unittest
 import uuid
 import time
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1399,6 +1399,69 @@ class CliTests(unittest.TestCase):
             status = json.loads(status_output.getvalue())
             self.assertEqual(status["publication"]["phase"], "ready")
             self.assertIsNone(status["publication"]["last_error"])
+
+    def test_identify_speakers_saves_every_name_at_once_and_updates_the_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            incoming, _ = write_bundle(root)
+            archive = root / "archive"
+            archive.mkdir()
+            database = root / "worker.sqlite3"
+            acknowledgement = ArchiveStore(archive, database).accept(incoming)
+            meeting_id = acknowledgement["meeting_id"]
+            transcript_directory = Path(acknowledgement["archive_path"]) / "transcripts" / "v1"
+            transcript_directory.mkdir(parents=True)
+            turns = [
+                {"start": float(index), "end": index + 1.0, "speaker": speaker,
+                 "channel_origin": "incoming", "text": "Hello"}
+                for index, speaker in enumerate(("incoming:SPEAKER_00", "incoming:SPEAKER_01", "incoming:SPEAKER_02"))
+            ]
+            (transcript_directory / "transcript.json").write_text(json.dumps({
+                "schema_version": 1, "meeting_id": meeting_id, "manifest_revision": 1, "turns": turns,
+            }), encoding="utf-8")
+            registry = SpeakerRegistry(database)
+            registry.save_observation(meeting_id, 1, "incoming:SPEAKER_00", [1.0, 0.0])
+            registry.save_observation(meeting_id, 1, "incoming:SPEAKER_01", [0.0, 1.0])
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = cli_main([
+                    "identify-speakers",
+                    "--meeting-id", meeting_id,
+                    "--revision", "1",
+                    "--names", json.dumps({"incoming:SPEAKER_00": "Micah", "incoming:SPEAKER_01": " Micah "}),
+                    "--db", str(database),
+                ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue()), {
+                "schema_version": 1,
+                "meeting_id": meeting_id,
+                "manifest_revision": 1,
+                "speakers": [
+                    {"speaker_id": "incoming:SPEAKER_00", "name": "Micah", "voice_profile_enrolled": True},
+                    {"speaker_id": "incoming:SPEAKER_01", "name": "Micah", "voice_profile_enrolled": True},
+                ],
+            })
+            updated = json.loads((transcript_directory / "transcript.json").read_text(encoding="utf-8"))
+            self.assertEqual([turn.get("name") for turn in updated["turns"]], ["Micah", "Micah", None])
+            self.assertEqual(PublicationQueue(database).status()["phase"], "ready")
+
+    def test_identify_speakers_rejects_bad_names_and_saves_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "worker.sqlite3"
+            meeting_id = str(uuid.uuid4())
+            for names in ("not json", "[]", "{}", '{"incoming:SPEAKER_00": 3}', '{"incoming:SPEAKER_00": " "}'):
+                with self.subTest(names=names):
+                    error = io.StringIO()
+                    with redirect_stdout(io.StringIO()), redirect_stderr(error):
+                        code = cli_main([
+                            "identify-speakers", "--meeting-id", meeting_id, "--revision", "1",
+                            "--names", names, "--db", str(database),
+                        ])
+                    self.assertEqual(code, 2)
+                    self.assertEqual(json.loads(error.getvalue())["error"], "ValueError")
+            self.assertEqual(SpeakerRegistry(database).assignments(meeting_id, 1), {})
 
     def test_accept_validate_media_flag_is_forwarded_to_archive_store(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
