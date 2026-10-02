@@ -228,6 +228,30 @@ final class AudioTrackWriterTests: XCTestCase {
         XCTAssertEqual(warnings.all.count, 1)
     }
 
+    func testAnEncoderThatNeverCatchesUpIsAnErrorWhenTheTrackFinishes() async throws {
+        let writer = AudioTrackWriter.microphone(directory: directory, origin: origin)
+        let encoder = FakeEncoder()
+        writer.encoderIsBusy = { encoder.busy }
+        writer.uptime = { encoder.uptime }
+        let input = try format(.pcmFormatFloat32, rate: 48_000, channels: 1)
+        feed(writer, signal(input, from: 0, seconds: 1, value: sine(440, amplitude: 0.1)))
+        await writer.sync()
+        // The encoder takes the first second and nothing after it, however
+        // long finishing waits.
+        encoder.busy = true
+        feed(writer, signal(input, from: 1, seconds: 0.5, value: sine(440, amplitude: 0.1)))
+        await writer.sync()
+        encoder.step = 1
+
+        let summary = await writer.finish()
+
+        let error = try XCTUnwrap(summary.error)
+        XCTAssertTrue(error.localizedDescription.contains("never caught up"), error.localizedDescription)
+        // What reached the file is kept.
+        XCTAssertEqual(try ReadBack(writer.url).duration, 1, accuracy: 0.05)
+        XCTAssertEqual(try XCTUnwrap(summary.progress).endOffset, 1, accuracy: 0.05)
+    }
+
     func testADeviceClockThatDriftsStaysWithinToleranceOfTheHostClock() async throws {
         let input = try format(.pcmFormatFloat32, rate: 48_000, channels: 1)
         // 0.1% either way over two minutes, far worse than a real device, so
@@ -371,17 +395,23 @@ private final class Messages: @unchecked Sendable {
     func add(_ message: String) { lock.withLock { messages.append(message) } }
 }
 
-/// An encoder that can be held busy, and a clock that moves only when told.
+/// An encoder that can be held busy, and a clock that moves only when told:
+/// set, or by `step` every time it is read.
 private final class FakeEncoder: @unchecked Sendable {
     private let lock = NSLock()
     private var isBusy = false
     private var now: TimeInterval = 0
+    private var perRead: TimeInterval = 0
     var busy: Bool {
         get { lock.withLock { isBusy } }
         set { lock.withLock { isBusy = newValue } }
     }
     var uptime: TimeInterval {
-        get { lock.withLock { now } }
+        get { lock.withLock { now += perRead; return now } }
         set { lock.withLock { now = newValue } }
+    }
+    var step: TimeInterval {
+        get { lock.withLock { perRead } }
+        set { lock.withLock { perRead = newValue } }
     }
 }

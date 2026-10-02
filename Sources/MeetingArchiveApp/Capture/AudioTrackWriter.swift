@@ -437,18 +437,20 @@ final class AudioTrackWriter: @unchecked Sendable {
         guard !finishing else { return }
         finishing = true
         endSegment()
-        drainForFinish(until: ProcessInfo.processInfo.systemUptime + Self.finishPatience)
+        drainForFinish(until: uptime() + Self.finishPatience)
     }
 
     private func drainForFinish(until deadline: TimeInterval) {
         drain()
-        if failure == nil, !pending.isEmpty, ProcessInfo.processInfo.systemUptime < deadline {
+        if failure == nil, !pending.isEmpty, uptime() < deadline {
             queue.asyncAfter(deadline: .now() + .milliseconds(20)) { self.drainForFinish(until: deadline) }
             return
         }
         if !pending.isEmpty {
+            // The file ends early, so the summary says so rather than looking
+            // like a clean finish.
             let lost = Double(pending.reduce(0) { $0 + $1.frames }) / Self.sampleRate
-            Log.capture.error("The \(self.name, privacy: .public) encoder never caught up; the last \(lost, privacy: .public)s were not written")
+            record(CaptureFailure.message("The \(name) encoder never caught up, so the last \(String(format: "%.2f", lost)) s were not written."))
             pending.removeAll()
         }
         close()
