@@ -679,8 +679,18 @@ final class SpeakerReviewModel: ObservableObject {
         commitName(forCard: cardID)
     }
 
+    /// The name Bruce gave one of a card's voices itself. It stays on the
+    /// transcript until another name is saved, even when the card is cleared
+    /// or the voice is separated here, since Bruce can't forget a name yet.
+    func recognizedName(for card: SpeakerReviewCard) -> String? {
+        card.speakerIDs.lazy
+            .compactMap { self.speaker($0)?.automaticName?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+    }
+
     /// Takes a voice out of its card when it isn't that person after all. It
-    /// starts without a name.
+    /// starts without a name, and keeps any name Bruce saved or recognized
+    /// for it until another one is saved.
     func separate(_ speakerID: String) {
         guard let index = cards.firstIndex(where: { $0.speakerIDs.contains(speakerID) }),
               cards[index].speakerIDs.count > 1
@@ -1062,6 +1072,10 @@ struct SpeakerReviewView: View {
         case .unknown:
             if let saved = card.speakerIDs.compactMap({ model.savedNames[$0] }).first {
                 return "Saved as \(saved). Type another name to change it."
+            }
+            // Leaving it blank keeps Bruce's name on the transcript.
+            if let recognized = model.recognizedName(for: card) {
+                return "Recognized as \(recognized). Type another name to change it."
             }
             return "Leave it blank if you don't know who this is."
         case .saved:

@@ -460,6 +460,35 @@ final class SpeakerReviewTests: XCTestCase {
         XCTAssertEqual(calls, [["a": "Sean"]])
     }
 
+    /// Bruce can't forget a name yet, so a voice taken out of its card keeps
+    /// a name Bruce gave it until another is saved, and its card says so.
+    @MainActor
+    func testASeparatedVoiceKnowsTheNameBruceKeepsForIt() async throws {
+        let meetingID = UUID()
+        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: makeResponse(
+            meetingID: meetingID,
+            speakers: [
+                makeSpeaker(id: "saved", name: "Robin Example"),
+                makeSpeaker(id: "recognized", automaticName: "Robin Example", suggestionKind: "strong", confirmationCount: 2),
+                makeSpeaker(id: "suggested", suggestion: "Robin Example", suggestionKind: "tentative"),
+            ]
+        )))
+        await model.load()
+        XCTAssertEqual(model.cards.count, 1)
+
+        model.separate("recognized")
+        model.separate("suggested")
+
+        let recognized = try XCTUnwrap(model.card(containing: "recognized"))
+        XCTAssertEqual(model.status(of: recognized), .unknown)
+        XCTAssertEqual(model.recognizedName(for: recognized), "Robin Example")
+        XCTAssertNil(
+            model.recognizedName(for: try XCTUnwrap(model.card(containing: "suggested"))),
+            "a suggestion never reaches the transcript"
+        )
+        XCTAssertEqual(model.namesToSave, [:])
+    }
+
     @MainActor
     func testFailedSaveMarksNothingSavedAndTheSameClickRetries() async throws {
         let meetingID = UUID()
