@@ -622,13 +622,15 @@ final class WorkerStatusPollingTests: XCTestCase {
             speakerReview: .available, retryStage: nil, lastError: nil, manifestRevision: 1
         )
         XCTAssertTrue(WorkerStatusPolling.isSettled(status, revision: 1), "no summary stage, as on an older worker")
-        for pending in [WorkerSummaryState.ready, .summarizing, .retryWait] {
-            status.summaryState = pending
-            XCTAssertFalse(WorkerStatusPolling.isSettled(status, revision: 1), "\(pending) brings a title later")
+        for underway in [WorkerSummaryState.ready, .summarizing] {
+            status.summaryState = underway
+            XCTAssertFalse(WorkerStatusPolling.isSettled(status, revision: 1), "\(underway) brings a title within minutes")
         }
-        for finished in [WorkerSummaryState.succeeded, .permanentFailure] {
-            status.summaryState = finished
-            XCTAssertTrue(WorkerStatusPolling.isSettled(status, revision: 1))
+        // A retry can be an hour or more away, or never run once summaries
+        // are turned off, so the half-hourly full refresh picks that title up.
+        for settled in [WorkerSummaryState.retryWait, .succeeded, .permanentFailure] {
+            status.summaryState = settled
+            XCTAssertTrue(WorkerStatusPolling.isSettled(status, revision: 1), "\(settled)")
         }
     }
 

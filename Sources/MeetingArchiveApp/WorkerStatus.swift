@@ -16,7 +16,7 @@ enum WorkerPublicationState: String, Codable, Equatable, Sendable {
 }
 
 /// Bruce's AI summary stage. It is optional, so it never makes a meeting
-/// need attention; a pending one only keeps the meeting polled for its title.
+/// need attention; one underway only keeps the meeting polled for its title.
 enum WorkerSummaryState: String, Equatable, Sendable {
     case ready
     case summarizing
@@ -24,8 +24,11 @@ enum WorkerSummaryState: String, Equatable, Sendable {
     case succeeded
     case permanentFailure = "permanent_failure"
 
-    var isPending: Bool {
-        self == .ready || self == .summarizing || self == .retryWait
+    /// Queued or being written, so its title is minutes away. One waiting to
+    /// retry can be an hour or more off, or never run if summaries are turned
+    /// off, so the full refresh picks that title up instead.
+    var isUnderway: Bool {
+        self == .ready || self == .summarizing
     }
 }
 
@@ -691,7 +694,7 @@ enum WorkerStatusPolling {
         guard let status, status.manifestRevision == revision else { return false }
         if status.processingState == .permanentFailure { return true }
         // A summary on its way brings an AI title, so keep asking until it lands.
-        if status.summaryState?.isPending == true { return false }
+        if status.summaryState?.isUnderway == true { return false }
         return status.processingState == .succeeded && status.publicationState == .succeeded
     }
 
