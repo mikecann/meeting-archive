@@ -191,6 +191,21 @@ class SpeakerReviewMatchingTests(unittest.TestCase):
             {"microphone:SPEAKER_00": "Mike Cann"},
         )
 
+    def test_an_all_zero_profile_from_an_older_worker_counts_for_nothing(self) -> None:
+        self._confirm("Alex", embedding_with_cosine(0.75))
+        # pyannote pads a voice it could not cluster with zeros. Before the
+        # worker dropped those, saving that voice's name enrolled them.
+        self.registry.enroll_confirmed(
+            "Alex", [0.0, 0.0], "model@1",
+            source_meeting_id=str(uuid.uuid4()), source_revision=1, source_speaker_id="incoming:SPEAKER_00",
+        )
+
+        match = self.registry.review_match(self.query, model_id="model@1")
+
+        # One real meeting, so 0.75 isn't enough to name Alex.
+        self.assertIsNone(match["automatic_name"])
+        self.assertEqual(match["confirmation_count"], 1)
+
     def test_excluding_current_meeting_prevents_self_match(self) -> None:
         meeting_id = self._confirm("Mike Cann", self.query)
 
@@ -423,14 +438,14 @@ class MeetingMatchTests(unittest.TestCase):
     def test_the_owner_must_be_the_best_match_for_the_mic_voice(self) -> None:
         self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
         self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
-        self._confirm_elsewhere("Sean", unit(1.0, 1.0, 0.0), speaker_id="incoming:SPEAKER_00")
-        # 0.66 against Mike but 0.94 against Sean.
+        self._confirm_elsewhere("Blake", unit(1.0, 1.0, 0.0), speaker_id="incoming:SPEAKER_00")
+        # 0.67 against Mike but 0.95 against Blake.
         self._observe("microphone:SPEAKER_00", unit(0.66, 0.66, 0.3))
 
         match = self._matches("microphone:SPEAKER_00")["microphone:SPEAKER_00"]
 
-        self.assertNotEqual(match["automatic_name"], "Mike Cann")
-        self.assertNotEqual(match["suggestion_kind"], "own_microphone")
+        self.assertEqual(match["automatic_name"], "Blake")
+        self.assertEqual(match["suggestion_kind"], "strong")
 
     def test_a_split_voice_takes_the_name_saved_for_its_twin_in_the_same_meeting(self) -> None:
         self._observe("incoming:SPEAKER_00", [1.0, 0.0, 0.0])
@@ -462,16 +477,43 @@ class MeetingMatchTests(unittest.TestCase):
         self.assertIsNone(match["automatic_name"])
 
     def test_disagreeing_evidence_becomes_a_suggestion_not_a_name(self) -> None:
-        self._confirm_elsewhere("Sean", unit(1.0, 0.3, 0.0), speaker_id="incoming:SPEAKER_00")
+        self._confirm_elsewhere("Blake", unit(1.0, 0.3, 0.0), speaker_id="incoming:SPEAKER_00")
         self._observe("incoming:SPEAKER_00", unit(1.0, 0.0, 0.8))
         self._observe("incoming:SPEAKER_01", [1.0, 0.0, 0.0])
-        self.registry.confirm_observation(self.meeting, 1, "incoming:SPEAKER_00", "Micah")
+        self.registry.confirm_observation(self.meeting, 1, "incoming:SPEAKER_00", "Alex")
 
         match = self._matches("incoming:SPEAKER_00", "incoming:SPEAKER_01")["incoming:SPEAKER_01"]
 
+        # 0.96 to Blake beats 0.78 to the Alex saved here, so Blake is filled in.
         self.assertIsNone(match["automatic_name"])
-        self.assertEqual(match["suggested_name"], "Micah")
+        self.assertEqual(match["suggested_name"], "Blake")
         self.assertEqual(match["suggestion_kind"], "tentative")
+
+    def test_disagreeing_evidence_suggests_whichever_voice_is_closer(self) -> None:
+        self._confirm_elsewhere("Blake", unit(1.0, 0.0, 0.9), speaker_id="incoming:SPEAKER_00")
+        self._confirm_elsewhere("Blake", unit(1.0, 0.0, 0.9), speaker_id="incoming:SPEAKER_00")
+        self._observe("incoming:SPEAKER_00", unit(1.0, 0.3, 0.0))
+        self._observe("incoming:SPEAKER_01", [1.0, 0.0, 0.0])
+        self.registry.confirm_observation(self.meeting, 1, "incoming:SPEAKER_00", "Alex")
+
+        match = self._matches("incoming:SPEAKER_00", "incoming:SPEAKER_01")["incoming:SPEAKER_01"]
+
+        # 0.96 to the Alex saved here beats 0.74 to Blake from two meetings.
+        self.assertIsNone(match["automatic_name"])
+        self.assertEqual(match["suggested_name"], "Alex")
+        self.assertEqual(match["suggestion_kind"], "tentative")
+
+    def test_a_saved_name_hides_any_other_name_for_that_voice(self) -> None:
+        self._confirm_elsewhere("Blake", [1.0, 0.0, 0.0], speaker_id="incoming:SPEAKER_00")
+        self._observe("incoming:SPEAKER_00", turned(0.95))
+        self.registry.confirm_observation(self.meeting, 1, "incoming:SPEAKER_00", "Alex")
+
+        match = self._matches("incoming:SPEAKER_00")["incoming:SPEAKER_00"]
+
+        # 0.95 to Blake would name him, but Mike saved this voice as Alex.
+        self.assertIsNone(match["automatic_name"])
+        self.assertIsNone(match["suggested_name"])
+        self.assertIsNone(match["suggestion_kind"])
 
     def test_targets_limit_the_work_without_changing_the_answer(self) -> None:
         self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
@@ -536,6 +578,25 @@ class SaveNamesTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(profiles, [("Micah", "incoming:SPEAKER_00"), ("Micah", "incoming:SPEAKER_01")])
         self.assertEqual(generation, (1,))
+
+    def test_an_all_zero_voice_is_named_but_never_enrolled(self) -> None:
+        meeting = str(uuid.uuid4())
+        # An older worker could save pyannote's zero padding as a voice.
+        self.registry.save_observation(meeting, 1, "incoming:SPEAKER_00", [0.0, 0.0], "model@1")
+        self.registry.save_observation(meeting, 1, "incoming:SPEAKER_01", [1.0, 0.0], "model@1")
+
+        enrolled = self.registry.confirm_observations(meeting, 1, {
+            "incoming:SPEAKER_00": "Alex",
+            "incoming:SPEAKER_01": "Blake",
+        })
+
+        self.assertEqual(enrolled, {"incoming:SPEAKER_00": False, "incoming:SPEAKER_01": True})
+        self.assertEqual(self.registry.assignments(meeting, 1), {
+            "incoming:SPEAKER_00": "Alex", "incoming:SPEAKER_01": "Blake",
+        })
+        with closing(sqlite3.connect(self.database)) as connection:
+            profiles = connection.execute("SELECT display_name FROM voice_profiles").fetchall()
+        self.assertEqual(profiles, [("Blake",)])
 
     def test_one_blank_name_saves_nothing(self) -> None:
         meeting = str(uuid.uuid4())

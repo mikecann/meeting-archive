@@ -73,8 +73,11 @@ class MockTransport:
                 anchor = next(index for index, item in enumerate(children)
                               if item["id"] == position["after_block"]["id"])
                 children[anchor + 1:anchor + 1] = blocks
-            else:
+            elif position["type"] == "end":
                 children.extend(blocks)
+            else:
+                # Notion rejects any other position, so an ordering bug fails here.
+                return 400, {}, {"message": f"unknown position type {position['type']!r}"}
             if self.fail_append_once:
                 self.fail_append_once = False
                 raise OSError("connection reset after append")

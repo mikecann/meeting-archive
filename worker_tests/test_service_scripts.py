@@ -88,10 +88,14 @@ class ServiceScriptContractTests(unittest.TestCase):
 
     def test_worker_wrapper_takes_secrets_only_from_the_protected_file(self) -> None:
         wrapper = (WORKER_ROOT / "run-service-bruce.sh").read_text(encoding="utf-8")
-        unset = re.search(r"^unset ([^|\n]+)\|\| true$", wrapper, re.M)
-
-        self.assertIsNotNone(unset)
-        cleared = set(unset.group(1).split())  # type: ignore[union-attr]
+        # Every unset before the worker starts counts, however it is split.
+        script = wrapper.replace("\\\n", " ")
+        before_start = script[:script.index("meeting_archive_worker.credentials")]
+        cleared = {
+            variable
+            for unset in re.finditer(r"^\s*unset\s+([^|;&#\n]+)", before_start, re.M)
+            for variable in unset.group(1).split()
+        }
         # A key inherited from launchd or a login shell must never reach the
         # worker. The old Anthropic variables stay cleared as well.
         for variable in (
@@ -99,7 +103,6 @@ class ServiceScriptContractTests(unittest.TestCase):
             "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
         ):
             self.assertIn(variable, cleared)
-        self.assertLess(unset.start(), wrapper.index("meeting_archive_worker.credentials"))  # type: ignore[union-attr]
 
     def test_worker_wrapper_failures_reach_stderr_and_unified_logging(self) -> None:
         wrapper = (WORKER_ROOT / "run-service-bruce.sh").read_text(encoding="utf-8")

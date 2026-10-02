@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import stat
 import tempfile
@@ -72,14 +73,28 @@ def exclusive_lock(path: Path, *, timeout_seconds: float = 30.0) -> Iterator[Non
     to serialize a read-then-write of the same derived file.
     """
 
+    if (
+        not isinstance(timeout_seconds, (int, float))
+        or isinstance(timeout_seconds, bool)
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds < 0
+    ):
+        raise ValueError("Lock timeout must be finite and nonnegative.")
     descriptor = os.open(
         path,
         os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
         0o600,
     )
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
             raise ValueError(f"{path.name} must be a regular file.")
+        # O_CREAT's mode only applies to a new file, so an existing one is
+        # checked and made owner-only, as the speaker refresh lock is.
+        if hasattr(os, "geteuid") and opened.st_uid != os.geteuid():
+            raise ValueError(f"{path.name} must be owned by the worker user.")
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
         if fcntl is None:
             yield
             return
@@ -89,9 +104,10 @@ def exclusive_lock(path: Path, *, timeout_seconds: float = 30.0) -> Iterator[Non
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
-                if time.monotonic() >= deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     raise TimeoutError(f"Timed out waiting for {path.name}.") from None
-                time.sleep(0.05)
+                time.sleep(min(0.05, remaining))
         try:
             yield
         finally:
