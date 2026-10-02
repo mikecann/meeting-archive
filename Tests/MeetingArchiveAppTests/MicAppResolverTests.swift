@@ -78,11 +78,16 @@ final class MicAppResolverTests: XCTestCase {
         )
     }
 
-    func testRealFaceTimeApp() {
-        XCTAssertEqual(
-            MicAppResolver.owningApp(processBundleID: "com.apple.FaceTime", executablePath: "/System/Applications/FaceTime.app/Contents/MacOS/FaceTime", pid: 0),
-            faceTime
-        )
+    func testRealFaceTimeApp() throws {
+        let app = "/System/Applications/FaceTime.app"
+        try XCTSkipUnless(FileManager.default.fileExists(atPath: app), "FaceTime isn't installed on this Mac.")
+
+        // No process bundle ID, so only reading the real bundle finds it.
+        let user = try XCTUnwrap(MicAppResolver.owningApp(processBundleID: nil, executablePath: app + "/Contents/MacOS/FaceTime", pid: 0))
+        XCTAssertEqual(user.bundleIdentifier, faceTime.bundleIdentifier)
+        // The name follows the Mac's language, so just check it isn't the file name.
+        XCTAssertFalse(user.displayName.isEmpty)
+        XCTAssertFalse(user.displayName.hasSuffix(".app"))
     }
 
     // MARK: System processes
