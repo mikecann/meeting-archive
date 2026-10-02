@@ -764,7 +764,8 @@ class SpeakerRegistry:
         someone confirmed in other meetings; it is the only voice on the
         microphone and sounds like the microphone's usual owner; or it sounds
         like a voice Mike saved in this meeting, which pyannote split off. When
-        those disagree it is only a suggestion. Nothing here is ever enrolled.
+        those disagree it is only a suggestion. A speaker he has named gets no
+        other name. Nothing here is ever enrolled.
         """
         speakers = sorted(set(speaker_ids))
         assignments = dict(connection.execute(
@@ -790,7 +791,10 @@ class SpeakerRegistry:
             embedding, model_id = records[speaker]
             ranked = cls._ranked_names(connection, embedding, model_id, meeting_id)
             match = cls._match_from_ranking(ranked)
-            if speaker not in assignments:
+            if speaker in assignments:
+                # Mike's saved name wins. Any other name would only contradict it.
+                match.update(suggested_name=None, automatic_name=None, suggestion_kind=None)
+            else:
                 candidates: list[tuple[str, str]] = []
                 sibling = cls._same_meeting_name(speaker, records, assignments)
                 if sibling is not None:

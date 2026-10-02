@@ -473,6 +473,18 @@ class MeetingMatchTests(unittest.TestCase):
         self.assertEqual(match["suggested_name"], "Micah")
         self.assertEqual(match["suggestion_kind"], "tentative")
 
+    def test_a_saved_name_hides_any_other_name_for_that_voice(self) -> None:
+        self._confirm_elsewhere("Blake", [1.0, 0.0, 0.0], speaker_id="incoming:SPEAKER_00")
+        self._observe("incoming:SPEAKER_00", turned(0.95))
+        self.registry.confirm_observation(self.meeting, 1, "incoming:SPEAKER_00", "Alex")
+
+        match = self._matches("incoming:SPEAKER_00")["incoming:SPEAKER_00"]
+
+        # 0.95 to Blake would name him, but Mike saved this voice as Alex.
+        self.assertIsNone(match["automatic_name"])
+        self.assertIsNone(match["suggested_name"])
+        self.assertIsNone(match["suggestion_kind"])
+
     def test_targets_limit_the_work_without_changing_the_answer(self) -> None:
         self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
         self._observe("microphone:SPEAKER_00", turned(0.9))
