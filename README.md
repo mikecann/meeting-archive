@@ -245,18 +245,19 @@ blank stays unknown, and you can save and close with blanks. If the save
 fails, the window stays open with the error and nothing is marked saved, so
 **Save names** again retries. **Later** closes without saving.
 
-Bruce asks less as it hears people again. Your own mic is named for you once
-your voice has been saved once, a voice that matches someone saved in two
-earlier meetings is named automatically, and a voice split off from one you
-saved in the same meeting gets that name too. Saving a name also names the
+Bruce asks less as it hears people again. Your own mic is named for you as
+soon as you've saved your voice in one meeting, a voice that matches someone
+saved in two earlier meetings is named automatically, and a voice split off
+from one you saved in the same meeting gets that name too. Saving a name also names the
 same voice in other meetings still waiting for review, in the background.
 Automatic names never train the voice profiles; only names you save do.
 Similarity scores are not confidence percentages.
 
 The library supports playback, transcript access, and speaker review after a
 processed archive is available. Calendar attendees are only offered as names
-to choose; they never fill in a name by themselves. Keep the app’s minimal settings explicit: selected
-calendars, Bruce host and archive path, and the backup-coverage confirmation.
+to choose; they never fill in a name by themselves. Keep the app’s minimal
+settings explicit: selected calendars, Bruce host and archive path, and the
+backup-coverage confirmation.
 
 Do not describe the app as production-ready until a representative live run has
 verified recording, transfer, retries, and review on your installation.

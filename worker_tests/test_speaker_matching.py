@@ -566,6 +566,66 @@ class SaveNamesTests(unittest.TestCase):
 
         self.assertEqual(self._refreshes(), {current, similar})
 
+    def _clear_refreshes(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection:
+            with connection:
+                connection.execute("DELETE FROM speaker_refreshes")
+
+    def _confirm(self, meeting: str, speaker: str, embedding: list[float], name: str) -> None:
+        self.registry.save_observation(meeting, 1, speaker, embedding, "model@1")
+        self.registry.confirm_observation(meeting, 1, speaker, name)
+
+    def test_a_second_confirmed_meeting_refreshes_voices_close_to_the_first(self) -> None:
+        first, second, waiting = (str(uuid.uuid4()) for _ in range(3))
+        self._accept(waiting)
+        self._confirm(first, "incoming:SPEAKER_00", [1.0, 0.0, 0.0], "Alice")
+        # 0.75 to Alice's first sample: suggested at one meeting, named at two.
+        self.registry.save_observation(waiting, 1, "incoming:SPEAKER_00", turned(0.75), "model@1")
+        self._clear_refreshes()
+
+        # Her second sample sounds nothing like the waiting voice.
+        self._confirm(second, "incoming:SPEAKER_00", [0.0, 0.0, 1.0], "Alice")
+
+        self.assertEqual(self._refreshes(), {second, waiting})
+        match = self.registry.meeting_matches(waiting, 1, ["incoming:SPEAKER_00"])["incoming:SPEAKER_00"]
+        self.assertEqual(match["automatic_name"], "Alice")
+
+    def test_renaming_away_a_second_meeting_refreshes_what_it_named(self) -> None:
+        first, second, waiting = (str(uuid.uuid4()) for _ in range(3))
+        self._accept(waiting)
+        self._confirm(first, "incoming:SPEAKER_00", [1.0, 0.0, 0.0], "Alice")
+        self._confirm(second, "incoming:SPEAKER_00", [0.0, 0.0, 1.0], "Alice")
+        self.registry.save_observation(waiting, 1, "incoming:SPEAKER_00", turned(0.75), "model@1")
+        self._clear_refreshes()
+
+        self.registry.confirm_observation(second, 1, "incoming:SPEAKER_00", "Bob")
+
+        self.assertEqual(self._refreshes(), {second, waiting})
+        match = self.registry.meeting_matches(waiting, 1, ["incoming:SPEAKER_00"])["incoming:SPEAKER_00"]
+        self.assertIsNone(match["automatic_name"])
+
+    def test_a_new_mic_owner_refreshes_meetings_whose_mic_he_now_owns(self) -> None:
+        mike_a, mike_b, mike_c, gavin_a, gavin_b, waiting = (str(uuid.uuid4()) for _ in range(6))
+        self._accept(waiting)
+        self._confirm(mike_a, "microphone:SPEAKER_00", [1.0, 0.0, 0.0], "Mike Cann")
+        self._confirm(mike_b, "microphone:SPEAKER_00", [1.0, 0.0, 0.0], "Mike Cann")
+        self._confirm(gavin_a, "microphone:SPEAKER_00", [0.0, 0.0, 1.0], "Gavin")
+        self._confirm(gavin_b, "microphone:SPEAKER_00", [0.0, 0.0, 1.0], "Gavin")
+        # Tied on the mic, so nobody owns it and 0.66 is only a suggestion.
+        self.registry.save_observation(waiting, 1, "microphone:SPEAKER_00", turned(0.66), "model@1")
+        self.assertIsNone(
+            self.registry.meeting_matches(waiting, 1, ["microphone:SPEAKER_00"])["microphone:SPEAKER_00"]["automatic_name"],
+        )
+        self._clear_refreshes()
+
+        # A third Mike sample far from the waiting voice changes no count
+        # boundary, only who owns the mic.
+        self._confirm(mike_c, "microphone:SPEAKER_00", unit(0.0, -1.0, 0.2), "Mike Cann")
+
+        self.assertEqual(self._refreshes(), {mike_c, waiting})
+        match = self.registry.meeting_matches(waiting, 1, ["microphone:SPEAKER_00"])["microphone:SPEAKER_00"]
+        self.assertEqual(match["suggestion_kind"], "own_microphone")
+
 
 if __name__ == "__main__":
     unittest.main()

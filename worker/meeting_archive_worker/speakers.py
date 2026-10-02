@@ -398,6 +398,16 @@ class SpeakerRegistry:
             lambda: sqlite3.connect(self.database, timeout=30, isolation_level=None),
         ) as connection:
             connection.execute("BEGIN IMMEDIATE")
+            previous = dict(connection.execute(
+                "SELECT speaker_id, display_name FROM speaker_assignments "
+                "WHERE meeting_id=? AND manifest_revision=?",
+                (meeting_id, revision),
+            ).fetchall())
+            touched = set(cleaned.values()) | {
+                previous[speaker_id] for speaker_id in cleaned if speaker_id in previous
+            }
+            counts_before = self._confirmed_meeting_counts(connection, touched)
+            owners_before = self._microphone_owners(connection)
             for speaker_id, name in sorted(cleaned.items()):
                 record = connection.execute(
                     "SELECT embedding_json, model_id FROM observed_voices WHERE "
@@ -432,9 +442,96 @@ class SpeakerRegistry:
                 revision,
                 confirmed,
             )
-            self._request_refresh_for_similar_voices(connection, voices, meeting_id, confirmed)
+            # Besides voices near the new samples, a save changes names that
+            # rest on how many meetings confirmed someone, or on who owns the
+            # mic. Those voices sit near that person's other samples.
+            counts_after = self._confirmed_meeting_counts(connection, touched)
+            people = {
+                person for person in counts_before.keys() | counts_after.keys()
+                if (counts_before.get(person, 0) >= KNOWN_VOICE_MEETINGS)
+                != (counts_after.get(person, 0) >= KNOWN_VOICE_MEETINGS)
+            }
+            owners_after = self._microphone_owners(connection)
+            for model in owners_before.keys() | owners_after.keys():
+                if owners_before.get(model) != owners_after.get(model):
+                    people.update(
+                        (owner, *model)
+                        for owner in (owners_before.get(model), owners_after.get(model))
+                        if owner is not None
+                    )
+            self._request_refresh_for_similar_voices(
+                connection,
+                voices + self._samples_of(connection, people),
+                meeting_id,
+                confirmed,
+            )
             connection.commit()
         return enrolled
+
+    @staticmethod
+    def _confirmed_meeting_counts(
+        connection: sqlite3.Connection,
+        names: set[str],
+    ) -> dict[tuple[str, str, int], int]:
+        """How many meetings confirmed each name, per embedding model."""
+        if not names:
+            return {}
+        placeholders = ",".join("?" for _ in names)
+        rows = connection.execute(
+            "SELECT display_name, model_id, dimension, COUNT(DISTINCT source_meeting_id) "
+            "FROM voice_profiles WHERE source_meeting_id IS NOT NULL "
+            "AND source_revision IS NOT NULL AND source_speaker_id IS NOT NULL "
+            f"AND display_name IN ({placeholders}) GROUP BY display_name, model_id, dimension",
+            sorted(names),
+        ).fetchall()
+        return {(name, model_id, dimension): count for name, model_id, dimension, count in rows}
+
+    @classmethod
+    def _samples_of(
+        cls,
+        connection: sqlite3.Connection,
+        people: set[tuple[str, str, int]],
+    ) -> list[tuple[list[float], str]]:
+        samples: list[tuple[list[float], str]] = []
+        for name, model_id, dimension in sorted(people):
+            for (raw,) in connection.execute(
+                "SELECT embedding_json FROM voice_profiles WHERE display_name=? "
+                "AND model_id=? AND dimension=? AND source_meeting_id IS NOT NULL",
+                (name, model_id, dimension),
+            ):
+                embedding = cls._finite_embedding(raw)
+                if embedding is not None:
+                    samples.append((embedding, model_id))
+        return samples
+
+    @staticmethod
+    def _microphone_owners(
+        connection: sqlite3.Connection,
+        exclude_meeting_id: str | None = None,
+    ) -> dict[tuple[str, int], str | None]:
+        """Per embedding model, whoever was confirmed on the microphone in the
+        most meetings, or None when two people are tied."""
+        query = (
+            "SELECT model_id, dimension, display_name, COUNT(DISTINCT source_meeting_id) "
+            "FROM voice_profiles WHERE source_meeting_id IS NOT NULL "
+            "AND source_revision IS NOT NULL AND source_speaker_id LIKE 'microphone:%'"
+        )
+        parameters: list[object] = []
+        if exclude_meeting_id is not None:
+            query += " AND source_meeting_id<>?"
+            parameters.append(exclude_meeting_id)
+        ranked: dict[tuple[str, int], list[tuple[int, str]]] = {}
+        for model_id, dimension, name, meetings in connection.execute(
+            query + " GROUP BY model_id, dimension, display_name",
+            parameters,
+        ):
+            ranked.setdefault((model_id, dimension), []).append((meetings, name))
+        owners: dict[tuple[str, int], str | None] = {}
+        for model, counts in ranked.items():
+            counts.sort(key=lambda item: (-item[0], item[1]))
+            tied = len(counts) > 1 and counts[1][0] == counts[0][0]
+            owners[model] = None if tied else counts[0][1]
+        return owners
 
     @classmethod
     def _request_refresh_for_similar_voices(
@@ -737,8 +834,9 @@ class SpeakerRegistry:
             return None
         return ranked[0][1]
 
-    @staticmethod
+    @classmethod
     def _sounds_like_microphone_owner(
+        cls,
         connection: sqlite3.Connection,
         ranked: list[tuple[float, str, int]],
         model_id: str,
@@ -756,16 +854,8 @@ class SpeakerRegistry:
         margin = score - ranked[1][0] if len(ranked) > 1 else None
         if score < OWN_MICROPHONE_THRESHOLD or (margin is not None and margin < MATCH_MARGIN):
             return False
-        owners = connection.execute(
-            "SELECT display_name, COUNT(DISTINCT source_meeting_id) FROM voice_profiles "
-            "WHERE model_id=? AND dimension=? AND source_meeting_id IS NOT NULL "
-            "AND source_revision IS NOT NULL AND source_speaker_id LIKE 'microphone:%' "
-            "AND source_meeting_id<>? GROUP BY display_name ORDER BY 2 DESC, display_name",
-            (model_id, dimension, exclude_meeting_id),
-        ).fetchall()
-        if not owners or (len(owners) > 1 and owners[1][1] == owners[0][1]):
-            return False
-        return owners[0][0] == name
+        owner = cls._microphone_owners(connection, exclude_meeting_id).get((model_id, dimension))
+        return owner is not None and owner == name
 
     def ranked_suggestions(self, embedding: list[float], model_id: str = "test") -> list[tuple[float, str]]:
         with closing_connection(lambda: sqlite3.connect(self.database)) as connection:

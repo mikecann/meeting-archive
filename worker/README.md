@@ -159,7 +159,7 @@ Matching gates come from Mike's own voices on Bruce on 2 Oct 2026: 22 confirmed
 voices from 9 meetings. Two different people scored at most 0.654 against each
 other across meetings and 0.640 within one meeting; the same person scored
 anywhere from 0.04 to 0.82, because short and split voices give noisy
-embeddings. So nothing is named below 0.72:
+embeddings. So only the mic's single voice is ever named below 0.72:
 
 | Rule | Gate | Result |
 | --- | --- | --- |
@@ -183,14 +183,15 @@ Automatic names are written as transcript names with `name_source` set to
 `voice_match` and count as reviewed; they are recomputed on every refresh and
 never enrolled. Explicit corrections use `confirmed`. Tentative matches stay in
 the review evidence. Saving a name also queues a refresh of every other accepted
-meeting with an unnamed voice within 0.57 of it, so the service names that
-voice there in the background. When the matching rules change
+meeting with an unnamed voice within 0.57 of the saved voice, or of any sample
+of someone whose confirmed meetings crossed two or who became or stopped being
+the mic's owner, so the service updates those names in the background. When the matching rules change
 (`MATCHING_RULES_VERSION`), the service queues one refresh of every meeting
 with an unnamed voice, so older meetings get the new rules without being
-opened. On 2 Oct that takes Bruce from 12 voices needing names to 9. The service retries durable speaker refresh
-requests so interrupted transcript or Notion updates recover without
-retranscribing or enrolling predictions. Per-meeting locks serialize
-review/confirmation writes.
+opened. On 2 Oct that takes Bruce from 12 voices needing names to 9. The
+service retries durable speaker refresh requests so interrupted transcript or
+Notion updates recover without retranscribing or enrolling predictions.
+Per-meeting locks serialize review/confirmation writes.
 
 The worker no longer reads names off video frames. `review-speakers` still
 returns `evidence_labels` for each speaker, always as an empty list, because
