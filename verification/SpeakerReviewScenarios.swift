@@ -359,12 +359,34 @@ private enum SpeakerReviewScenarios {
         window.contentView = view
         try require(view.player === player, "native player view did not retain the player")
         player.play()
-        try await Task.sleep(for: .milliseconds(350))
-        try require(player.currentTime().seconds > 0, "valid local media did not begin playback")
+        // A cold CI machine can be slow to start audio, so allow a few seconds
+        // rather than one fixed pause, and say why if it never starts.
+        let deadline = ContinuousClock.now + .seconds(5)
+        while player.currentTime().seconds <= 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try require(
+            player.currentTime().seconds > 0,
+            "valid local media did not begin playback (\(playbackState(player)))"
+        )
 
         SpeakerPlayerSurface.dismantle(view)
         window.contentView = nil
         try require(view.player == nil && player.rate == 0, "native player teardown did not stop playback")
+    }
+
+    @MainActor
+    private static func playbackState(_ player: AVPlayer) -> String {
+        let item = player.currentItem
+        let error = item?.error ?? player.error
+        return [
+            "rate \(player.rate)",
+            "time control \(player.timeControlStatus.rawValue)",
+            "waiting for \(player.reasonForWaitingToPlay?.rawValue ?? "nothing")",
+            "player status \(player.status.rawValue)",
+            "item status \(item.map { String($0.status.rawValue) } ?? "no item")",
+            "error \(error.map { String(describing: $0) } ?? "none")",
+        ].joined(separator: ", ")
     }
 
     private static func writeValidAudio(to url: URL) throws {
