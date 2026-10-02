@@ -644,7 +644,9 @@ final class SpeakerReviewModel: ObservableObject {
     }
 
     /// Once a name is finished, a card with the same name as another is the
-    /// same person, so the two become one card under the name already there.
+    /// same person, so the two become one card. Bruce matches people by their
+    /// exact name, so the other card keeps a spelling Bruce already holds for
+    /// one of its voices. Otherwise the name just typed wins.
     func commitName(forCard cardID: SpeakerReviewCard.ID) {
         guard let index = cards.firstIndex(where: { $0.id == cardID }) else { return }
         let key = SpeakerReviewCard.groupingKey(cards[index].name)
@@ -652,12 +654,24 @@ final class SpeakerReviewModel: ObservableObject {
               let other = cards.firstIndex(where: { $0.id != cardID && SpeakerReviewCard.groupingKey($0.name) == key })
         else { return }
         var merged = cards[other]
+        if !hasBrucesSpelling(merged) { merged.name = cards[index].name }
         merged.speakerIDs = index < other
             ? cards[index].speakerIDs + cards[other].speakerIDs
             : cards[other].speakerIDs + cards[index].speakerIDs
         let position = min(index, other)
         cards.removeAll { $0.id == cardID || $0.id == merged.id }
         cards.insert(merged, at: position)
+    }
+
+    /// Whether Bruce saved, recognized or suggested a card's exact name for
+    /// any of its voices.
+    private func hasBrucesSpelling(_ card: SpeakerReviewCard) -> Bool {
+        let name = card.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return card.speakerIDs.contains { speakerID in
+            let voice = speaker(speakerID)
+            return [savedNames[speakerID], voice?.automaticName, voice?.suggestedName]
+                .contains { $0?.trimmingCharacters(in: .whitespacesAndNewlines) == name }
+        }
     }
 
     func chooseName(_ name: String, forCard cardID: SpeakerReviewCard.ID) {

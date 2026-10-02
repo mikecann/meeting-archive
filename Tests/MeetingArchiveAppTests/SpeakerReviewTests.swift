@@ -387,6 +387,42 @@ final class SpeakerReviewTests: XCTestCase {
         XCTAssertEqual(model.namesToSave, ["b": "Micah"])
     }
 
+    /// Bruce matches people by their exact name, so a spelling it already
+    /// holds wins a merge. Between two names Mike typed, the newer one does.
+    @MainActor
+    func testAMergeKeepsBrucesSpellingOtherwiseTheNameJustTyped() async throws {
+        let meetingID = UUID()
+        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: makeResponse(
+            meetingID: meetingID,
+            speakers: [
+                makeSpeaker(id: "suggested", suggestion: "Avery Example", suggestionKind: "tentative"),
+                makeSpeaker(id: "recognized", automaticName: "Zoë Example", suggestionKind: "strong", confirmationCount: 2),
+                makeSpeaker(id: "a"),
+                makeSpeaker(id: "b"),
+                makeSpeaker(id: "c"),
+                makeSpeaker(id: "d"),
+            ]
+        )))
+        await model.load()
+        func type(_ name: String, into speakerID: String) throws {
+            let card = try XCTUnwrap(model.card(containing: speakerID))
+            model.setName(name, forCard: card.id)
+            model.commitName(forCard: card.id)
+        }
+
+        try type("AVERY EXAMPLE", into: "a")
+        try type("zoe example", into: "b")
+        try type("drew example", into: "c")
+        try type("Drew Example", into: "d")
+
+        XCTAssertEqual(model.card(containing: "a")?.speakerIDs, ["suggested", "a"])
+        XCTAssertEqual(model.card(containing: "a")?.name, "Avery Example")
+        XCTAssertEqual(model.card(containing: "b")?.speakerIDs, ["b", "recognized"])
+        XCTAssertEqual(model.card(containing: "b")?.name, "Zoë Example")
+        XCTAssertEqual(model.card(containing: "d")?.speakerIDs, ["c", "d"])
+        XCTAssertEqual(model.card(containing: "d")?.name, "Drew Example", "Mike's correction stands")
+    }
+
     @MainActor
     func testChoosingACalendarAttendeeMergesStraightAway() async throws {
         let meetingID = UUID()
