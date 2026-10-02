@@ -71,6 +71,18 @@ class CredentialTests(unittest.TestCase):
             "OPENROUTER_API_KEY": "private-openrouter",
         })
 
+    def test_an_exported_openrouter_key_is_not_replaced(self):
+        self.path.write_text(json.dumps({
+            "huggingFaceToken": "private-hf",
+            "notionToken": "private-notion",
+            "openRouterApiKey": "private-openrouter",
+        }))
+        environment = {"OPENROUTER_API_KEY": "explicit"}
+
+        load_credentials(self.path, environment)
+
+        self.assertEqual(environment["OPENROUTER_API_KEY"], "explicit")
+
     def test_without_an_openrouter_key_summaries_stay_off(self):
         environment = {}
 
