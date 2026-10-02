@@ -37,6 +37,34 @@ final class RecordingNoticeTests: XCTestCase {
         XCTAssertNil(NotificationRouter.action(identifier: UNNotificationDefaultActionIdentifier, userInfo: [:]))
     }
 
+    /// macOS may stop an app it woke for a button once the response is
+    /// marked handled, so that only happens after the button has done its work.
+    @MainActor
+    func testAButtonIsMarkedHandledOnlyAfterItsActionRuns() async {
+        let router = NotificationRouter()
+        let steps = Steps()
+        router.handler = { _ in steps.add("acted") }
+        let handled = expectation(description: "response handled")
+
+        router.respond(to: .discardSaved(UUID())) {
+            steps.add("handled")
+            handled.fulfill()
+        }
+
+        await fulfillment(of: [handled], timeout: 5)
+        XCTAssertEqual(steps.all, ["acted", "handled"])
+    }
+
+    @MainActor
+    func testClickingTheBannerItselfIsStillMarkedHandled() async {
+        let router = NotificationRouter()
+        let handled = expectation(description: "response handled")
+
+        router.respond(to: nil) { handled.fulfill() }
+
+        await fulfillment(of: [handled], timeout: 5)
+    }
+
     func testIgnoreListChangesSurviveNewDefaults() {
         let defaults: Set<String> = ["com.mikerosoft.voice-type", "com.apple.VoiceMemos"]
         let ignored = AppSettings.ignoredBundleIDs(defaults: defaults, extra: ["com.hnc.Discord"], recordedDefaults: ["com.apple.VoiceMemos"])
@@ -45,4 +73,11 @@ final class RecordingNoticeTests: XCTestCase {
         let grown = AppSettings.ignoredBundleIDs(defaults: defaults.union(["com.example.new-dictation"]), extra: [], recordedDefaults: [])
         XCTAssertTrue(grown.contains("com.example.new-dictation"))
     }
+}
+
+private final class Steps: @unchecked Sendable {
+    private let lock = NSLock()
+    private var steps: [String] = []
+    var all: [String] { lock.withLock { steps } }
+    func add(_ step: String) { lock.withLock { steps.append(step) } }
 }
