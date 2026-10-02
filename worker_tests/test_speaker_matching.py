@@ -191,6 +191,21 @@ class SpeakerReviewMatchingTests(unittest.TestCase):
             {"microphone:SPEAKER_00": "Mike Cann"},
         )
 
+    def test_an_all_zero_profile_from_an_older_worker_counts_for_nothing(self) -> None:
+        self._confirm("Alex", embedding_with_cosine(0.75))
+        # pyannote pads a voice it could not cluster with zeros. Before the
+        # worker dropped those, saving that voice's name enrolled them.
+        self.registry.enroll_confirmed(
+            "Alex", [0.0, 0.0], "model@1",
+            source_meeting_id=str(uuid.uuid4()), source_revision=1, source_speaker_id="incoming:SPEAKER_00",
+        )
+
+        match = self.registry.review_match(self.query, model_id="model@1")
+
+        # One real meeting, so 0.75 isn't enough to name Alex.
+        self.assertIsNone(match["automatic_name"])
+        self.assertEqual(match["confirmation_count"], 1)
+
     def test_excluding_current_meeting_prevents_self_match(self) -> None:
         meeting_id = self._confirm("Mike Cann", self.query)
 
@@ -563,6 +578,25 @@ class SaveNamesTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(profiles, [("Micah", "incoming:SPEAKER_00"), ("Micah", "incoming:SPEAKER_01")])
         self.assertEqual(generation, (1,))
+
+    def test_an_all_zero_voice_is_named_but_never_enrolled(self) -> None:
+        meeting = str(uuid.uuid4())
+        # An older worker could save pyannote's zero padding as a voice.
+        self.registry.save_observation(meeting, 1, "incoming:SPEAKER_00", [0.0, 0.0], "model@1")
+        self.registry.save_observation(meeting, 1, "incoming:SPEAKER_01", [1.0, 0.0], "model@1")
+
+        enrolled = self.registry.confirm_observations(meeting, 1, {
+            "incoming:SPEAKER_00": "Alex",
+            "incoming:SPEAKER_01": "Blake",
+        })
+
+        self.assertEqual(enrolled, {"incoming:SPEAKER_00": False, "incoming:SPEAKER_01": True})
+        self.assertEqual(self.registry.assignments(meeting, 1), {
+            "incoming:SPEAKER_00": "Alex", "incoming:SPEAKER_01": "Blake",
+        })
+        with closing(sqlite3.connect(self.database)) as connection:
+            profiles = connection.execute("SELECT display_name FROM voice_profiles").fetchall()
+        self.assertEqual(profiles, [("Blake",)])
 
     def test_one_blank_name_saves_nothing(self) -> None:
         meeting = str(uuid.uuid4())

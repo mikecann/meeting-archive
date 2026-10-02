@@ -374,9 +374,9 @@ class SpeakerRegistry:
     def confirm_observations(self, meeting_id: str, revision: int, names: dict[str, str]) -> dict[str, bool]:
         """Save Mike's names for several speakers of one meeting together.
 
-        Every name is an explicit confirmation, so each saved voice is enrolled
-        as a profile. Nothing is written unless all of them are. Returns, per
-        speaker, whether a voice was enrolled.
+        Every name is an explicit confirmation, so each saved voice with a
+        usable embedding is enrolled as a profile. Nothing is written unless
+        all of them are. Returns, per speaker, whether a voice was enrolled.
         """
         self._validate_refresh_identity(meeting_id, revision)
         if not isinstance(names, dict) or not names:
@@ -422,8 +422,10 @@ class SpeakerRegistry:
                     "confirmed_at=excluded.confirmed_at",
                     (meeting_id, revision, speaker_id, name, confirmed),
                 )
-                if record is not None:
-                    embedding = json.loads(record[0])
+                # An older worker could save pyannote's zero padding as a
+                # voice. It matches nobody, so only the name is saved.
+                embedding = self._finite_embedding(record[0]) if record is not None else None
+                if embedding is not None:
                     self._enroll_confirmed_with_connection(
                         connection,
                         name,
@@ -435,7 +437,7 @@ class SpeakerRegistry:
                         source_speaker_id=speaker_id,
                     )
                     voices.append((embedding, record[1]))
-                enrolled[speaker_id] = record is not None
+                enrolled[speaker_id] = embedding is not None
             self._request_refresh_with_connection(
                 connection,
                 meeting_id,
@@ -894,7 +896,8 @@ class SpeakerRegistry:
 
     @staticmethod
     def _finite_embedding(raw: object) -> list[float] | None:
-        """A stored embedding as floats, or None when it is unreadable."""
+        """A stored embedding as floats, or None when it is unreadable or all
+        zeros, which is how pyannote pads a voice it could not cluster."""
         try:
             values = json.loads(raw)
         except (TypeError, json.JSONDecodeError):
@@ -908,6 +911,7 @@ class SpeakerRegistry:
                 or not math.isfinite(value)
                 for value in values
             )
+            or not any(values)
         ):
             return None
         return [float(value) for value in values]
