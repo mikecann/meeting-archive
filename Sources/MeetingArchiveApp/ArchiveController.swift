@@ -675,6 +675,9 @@ final class ArchiveController: ObservableObject {
                     // Saved like any other part, so it gets the same window to be discarded.
                     let record = makeRecord(entry, ended: entry.startedAt.addingTimeInterval(part.duration), microphone: nil)
                     try store?.insertMeeting(record)
+                    // The call carries on as the next part of this series, so
+                    // discarding it discards this part too while it's pending.
+                    savedParts[entry.seriesID, default: []].append(entry.id)
                     try FileManager.default.removeItem(at: path)
                     let notice = CaptureNotice.recovered(title: record.title)
                     notify(notice.title, body: notice.body, id: record.id.uuidString + "-finish", category: NotificationRouter.savedCategory, meetingID: record.id)
