@@ -130,7 +130,10 @@ struct CoreAudioInputReader: AudioInputReading {
         guard let devices = try? CoreAudioProperty.objectIDs(kAudioHardwarePropertyDevices, of: AudioObjectID(kAudioObjectSystemObject)) else {
             return nil
         }
-        for device in devices where CoreAudioProperty.hasInputStreams(device) {
+        // Any read that fails makes the answer unknown, which only costs a scan.
+        for device in devices {
+            guard let hasInput = CoreAudioProperty.hasInputStreams(device) else { return nil }
+            guard hasInput else { continue }
             guard let running = try? CoreAudioProperty.uint32(kAudioDevicePropertyDeviceIsRunningSomewhere, of: device) else { return nil }
             if running != 0 { return true }
         }
@@ -206,14 +209,16 @@ private enum CoreAudioProperty {
         return value?.takeRetainedValue() as String?
     }
 
-    static func hasInputStreams(_ device: AudioObjectID) -> Bool {
+    /// Nil if Core Audio couldn't say.
+    static func hasInputStreams(_ device: AudioObjectID) -> Bool? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreams,
             mScope: kAudioObjectPropertyScopeInput,
             mElement: kAudioObjectPropertyElementMain
         )
         var size: UInt32 = 0
-        return AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr && size > 0
+        guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr else { return nil }
+        return size > 0
     }
 
     private static func globalAddress(_ selector: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {
