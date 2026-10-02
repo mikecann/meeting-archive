@@ -13,6 +13,9 @@ archive worker. All source paths and commands below are relative to this clone.
   actual app or script when its hardware and permission requirements are available.
   Report any checks you could not run rather than claiming live capture worked.
 - Keep writing direct, personal and conversational. Use no em dashes.
+- This repo is public. Use made-up names in tests, fixtures, docs and commit
+  messages, never the people, clients or meetings from Mike's recordings or
+  Bruce's data.
 - Avoid eyebrows or kickers in UI designs.
 - PRs start with `## Why`, explaining what prompted the change in plain language.
 
@@ -27,13 +30,15 @@ archive worker. All source paths and commands below are relative to this clone.
   runs as plain `meeting-archive-app --background`, so a path match misses it.
   Finish recording and quit from the menu before rebuilding.
 - Verify capture through the signed app bundle, not the SwiftPM executable.
-  macOS permissions depend on app identity. Preserve the existing bundle,
-  LaunchAgent and log identifiers unless explicitly migrating them.
+  macOS permissions depend on app identity, and the system audio tap only
+  prompts for a signed app. Preserve the existing bundle, LaunchAgent and log
+  identifiers unless explicitly migrating them.
 - Preserve original meeting media and archive data. Cleanup requires a verified
   durable worker acknowledgement and the user's backup-coverage setting.
-- Camera/window signals alone do not prove live support for an application.
-  Zoom is preview-tested; Chrome automatic capture is blocked, and Teams/Slack
-  still need live validation.
+- v2 is audio only and starts when an app takes the mic (see
+  `docs/plans/meeting-archive-v2.md`). Don't bring back video or per-app window
+  detection without asking. Fail open: a broken capture saves its part and a
+  new part starts; nothing suppresses the rest of a call.
 - Startup commands must exit before creating a recording controller.
 
 ## Worker
@@ -66,9 +71,7 @@ PYTHONPATH=worker python3 -W error::ResourceWarning -m unittest discover -s work
 bash verification/run-contract-roundtrip.sh
 bash verification/run-offline-regressions.sh
 bash verification/run-rebuild-guard-tests.sh
-bash diagnostics/run-tests.sh
 bash worker/launcher/run-tests.sh
-bash worker/vision/run-tests.sh
 ```
 
 Use ffmpeg for the synthetic media checks. Keep CI offline, with no model

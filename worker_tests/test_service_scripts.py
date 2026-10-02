@@ -64,12 +64,45 @@ class ServiceScriptContractTests(unittest.TestCase):
         self.assertIn("<key>StandardOutPath</key>", installer)
         self.assertIn("<string>/dev/null</string>", installer)
 
+    def test_installer_does_not_build_the_removed_ocr_helper(self) -> None:
+        installer = (WORKER_ROOT / "install-bruce.sh").read_text(encoding="utf-8")
+
+        self.assertNotIn("vision", installer)
+
+    def test_summaries_need_no_sdk(self) -> None:
+        # OpenRouter is called with the standard library.
+        installer = (WORKER_ROOT / "install-bruce.sh").read_text(encoding="utf-8")
+        requirements = (WORKER_ROOT / "requirements.txt").read_text(encoding="utf-8")
+
+        self.assertNotIn("anthropic", installer)
+        self.assertNotIn("anthropic", requirements)
+
     def test_worker_wrapper_does_not_print_loaded_credentials(self) -> None:
         wrapper = (WORKER_ROOT / "run-service-bruce.sh").read_text(encoding="utf-8")
 
         self.assertNotIn("echo \"${HF_TOKEN}", wrapper)
         self.assertNotIn("echo \"${MEETING_ARCHIVE_NOTION_TOKEN}", wrapper)
+        self.assertNotIn("OPENROUTER_API_KEY}", wrapper)
+        self.assertNotIn("ANTHROPIC_API_KEY}", wrapper)
         self.assertNotIn("set -x", wrapper)
+
+    def test_worker_wrapper_takes_secrets_only_from_the_protected_file(self) -> None:
+        wrapper = (WORKER_ROOT / "run-service-bruce.sh").read_text(encoding="utf-8")
+        # Every unset before the worker starts counts, however it is split.
+        script = wrapper.replace("\\\n", " ")
+        before_start = script[:script.index("meeting_archive_worker.credentials")]
+        cleared = {
+            variable
+            for unset in re.finditer(r"^\s*unset\s+([^|;&#\n]+)", before_start, re.M)
+            for variable in unset.group(1).split()
+        }
+        # A key inherited from launchd or a login shell must never reach the
+        # worker. The old Anthropic variables stay cleared as well.
+        for variable in (
+            "HF_TOKEN", "MEETING_ARCHIVE_NOTION_TOKEN", "OPENROUTER_API_KEY",
+            "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+        ):
+            self.assertIn(variable, cleared)
 
     def test_worker_wrapper_failures_reach_stderr_and_unified_logging(self) -> None:
         wrapper = (WORKER_ROOT / "run-service-bruce.sh").read_text(encoding="utf-8")

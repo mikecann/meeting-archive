@@ -1,6 +1,6 @@
 # <img src="icons/meeting-archive.png" width="24" alt=""> meeting-archive
 
-Records your calls when the camera comes on and files them away for later
+Records your calls whenever an app picks up the mic and files them away for later
 
 macOS
 
@@ -12,9 +12,11 @@ macOS
 
 ## What it is
 
-This is still very much a preview. It's a menu-bar app that starts recording a meeting window when the meeting app turns the camera on, and stops once the camera's been off for 20 seconds or the window closes. I've only properly tested it with Zoom so far.
+This is still very much a preview. It's a menu-bar app that notices when an app on my Mac starts using the microphone, so Zoom, Teams or Meet in Chrome, Slack, FaceTime, WhatsApp and so on, and records the call as two audio tracks: my mic and whatever the Mac plays. When the app lets go of the mic it stops, and if the call was under a minute or nobody else spoke it just throws it away.
 
-When a call ends it asks for a title, then sends the recording off to my home server for transcription and speaker review, and it can end up in Notion too.
+The first version recorded the meeting window as video when the camera came on, but that missed most of my calls (camera off, anything in the browser, phone calls) so now it's audio only.
+
+When a call ends it gets a title from my calendar if there's a matching event, then goes off to my home server for transcription and speaker review, and it can end up in Notion too.
 
 The home server is called Bruce in the scripts. Its worker is included in this
 repo, but the disk paths and volume identity are specific to my setup. Read
@@ -78,23 +80,31 @@ when one is available, so the signature stays stable across rebuilds.
 
 ## Using it
 
-Open Settings from the menu bar, grant the capture permissions and select the
-calendars you want to use. Set the worker host and archive path to match your
-worker installation. Join a Zoom call and turn the camera on to begin recording.
-Turning the camera off for 20 seconds or closing the meeting window ends it.
+Open Settings from the menu bar, allow the microphone, call audio and
+notifications, and select the calendars you want to use. Allowing call audio
+records a second of nothing so macOS asks you there and then, rather than in
+the middle of your first call. Set the worker host and archive path to match
+your worker installation, and enable launch at login if you want it running
+after a restart.
 
-If a recording can't get started it has another go after 10, 30 and 60 seconds,
-then gives up on that call and shows Needs attention in the menu bar. Anything
-it caught before that is still saved, it just won't ask you for a title.
+After that you shouldn't need to do anything. When a call starts you get a
+notification with Stop and Discard buttons, and the menu bar icon goes red.
+**Record now** (⌃⌥⌘R) is there for anything it can't hear about, like a meeting
+in the room, and **Never record** adds an app to the ignore list. Dictation
+apps, AI voice apps and screen recorders are ignored out of the box, and you
+can change that list in Settings.
 
-Give the call a title when prompted. The library shows transfer and processing
-progress, then lets you play the recording and review the speaker names. Enable
-launch at login from Settings if you want the app available after a restart.
+If something goes wrong mid-call, like the mic stalling or AirPods switching
+mode, it rebuilds that source and carries on with a bit of silence over the
+gap. If the whole recording breaks it saves what it has and starts a new part.
+I'd rather end up with two parts than lose the end of a meeting, which is what
+happened with the first version.
 
-Chrome automatic capture is blocked pending a choice between a dedicated Meet
-window and manual tab capture. Teams and Slack adapters are implemented but
-live-unverified. Remote speech, shared-screen readability and the broader app
-matrix still need validation.
+The library shows transfer and processing progress, then lets you play the
+recording and review the speaker names.
+
+So far I've tested the pieces on my Mac but not a full real call on every app,
+so treat it as a preview.
 
 ## Adapting the worker
 
@@ -131,15 +141,13 @@ PYTHONPATH=worker python3 -W error::ResourceWarning -m unittest discover -s work
 bash verification/run-contract-roundtrip.sh
 bash verification/run-offline-regressions.sh
 bash verification/run-rebuild-guard-tests.sh
-bash diagnostics/run-tests.sh
 bash worker/launcher/run-tests.sh
-bash worker/vision/run-tests.sh
 ```
 
 The Python tests use the standard library and synthetic media. Install ffmpeg
 to include the playback tests. These commands do not download models, use
-credentials or start the capture app. The Vision helper's real image fixture is
-optional. GUI harnesses, live transfer and real-media validation in
+credentials or start the capture app. GUI harnesses, live transfer and
+real-media validation in
 `verification/` are separate manual checks that need permissions, fixtures or
 your worker host. CI runs the offline checks on macOS.
 
@@ -151,12 +159,17 @@ unchanged so settings, permissions and login items keep their identity.
 Open the staged app yourself, then use Settings to request the permissions it
 needs. macOS may require reopening the app after granting them:
 
-- Accessibility, for meeting-window detection
-- Screen & System Audio Recording, for the meeting window and incoming audio
-- Microphone, which remains active even when the call is muted
-- Notifications, for recording prompts
+- Microphone, for your side of the call. It keeps recording even when you're
+  muted in the call app
+- System Audio Recording Only, for everyone else on the call. There's no way
+  for the app to check it, so if a call ever comes out with only your side, it
+  tells you to look in System Settings
+- Notifications, so you can see when it's recording and stop or discard it
+  from the banner
 - Calendar access, after adding your accounts in macOS Internet Accounts;
-  select the calendars to use for title and speaker suggestions
+  select the calendars to use for titles and speaker suggestions
+
+It doesn't need Screen Recording, Accessibility or camera access anymore.
 
 The app can register or unregister its login item from Settings. The standalone
 `uninstall-startup.sh` does the same startup-only unregister through Apple’s
@@ -172,8 +185,8 @@ worker validates every declared media stream, rechecks the manifest, and saves
 its durable processing job.
 
 Until that toggle is on, every recording stays in the local spool after Bruce
-has verified it. That is the intended safe default, but it adds up: eight
-calls took about 1 GB.
+has verified it. That is the intended safe default. Audio only is a lot
+smaller than the old video recordings, at roughly 100 MB an hour.
 
 Transfers and Notion publication are retryable and recorded in durable local
 state. Retries back off while Bruce is unreachable and are released as soon as
@@ -190,29 +203,23 @@ actual reboot.
 
 ## Recording and naming
 
-Recording follows the meeting app's camera. Turning video off for up to 20
-seconds keeps the same recording; the session ends once the camera stays off
-for 20 seconds or the meeting window closes. Nothing is polled through
-Accessibility while no camera is in use.
+Recording follows the app holding the mic. It checks about once a second with
+Core Audio, which doesn't need any permission, and helper processes are traced
+back to their app, so a Meet call in Chrome shows up as Google Chrome. Once the
+app has let go of the mic for 30 seconds the recording ends. If a different app
+picks up the mic, that becomes a new recording straight away.
 
-When a recording ends, a small floating panel asks for a title. It takes
-typing without pulling focus from the call, stays above a full-screen meeting,
-and saves on its own after 90 seconds. Typing adds time. Return saves, Esc
-saves with the current title, and Discard asks before deleting anything.
-Calendar suggestions only appear once calendars are selected in Settings.
+There's no naming prompt anymore. The title comes from a matching calendar
+event, otherwise it's something like "Zoom call 1 Oct 2026 at 11:02 am". You
+get 90 seconds to discard it from the menu or the notification before it goes
+to Bruce, and you can rename it from the library.
 
 An archived meeting can be renamed from the library with **Rename…**. Bruce
 stores the new title next to the archive and republishes Notion; nothing is
 re-uploaded or re-transcribed.
 
-If the meeting window stops producing frames (hidden, dragged, or static), the
-recorder repeats the last frame so the video stays as long as the audio. A
-microphone that drops out mid-call is restarted rather than ending the whole
-recording.
-
-If the mic never starts, the recording is still archived with the meeting video
-and audio it did catch, just without your voice. A recording that caught
-nothing at all isn't sent to Bruce, and the library shows it as **Not archived**.
+If the mic never starts, the call audio is still recorded, and the other way
+round. A recording that caught nothing at all isn't kept.
 
 The app logs capture, detection and transfer events to the unified log:
 
@@ -222,43 +229,43 @@ log show --predicate 'subsystem == "com.mikerosoft.meeting-archive"' --last 1d
 
 ## Review and current limits
 
-After naming a meeting, a progress window shows transfer and processing on
-Bruce. It can be closed while that work continues. When speaker analysis is
-ready, the app brings up speaker review once per meeting revision, deferring
-the popup while another call is recording or its title prompt is open. The
-menu bar retains a count and direct review actions for speakers needing names,
-including after a review is dismissed or the app restarts. Notifications do
-not need to be enabled for this window and menu-bar flow.
+Speaker review never pops up. When Bruce has worked out who spoke, the menu
+bar shows how many voices still need a name, with a **Review speakers** entry
+for each meeting, and the library has a **Name speakers…** button. Review
+whenever you like; archiving and later recordings don't wait for it.
 
-Strong voice matches are filled in automatically and marked **Recognized**.
-Weaker matches can show **Possibly Mike Cann** after at least two different
-meetings were explicitly confirmed. These still require **Confirm**. Editing
-an automatic name also requires confirmation. Repeatedly confirming the same
-recording does not add extra evidence, and predictions never train themselves.
+The review window has one card per person. pyannote often splits one person
+into several voices, so voices with the same name share a card, like
+**Micah · 2 voices** with samples from each. Typing or choosing a name another
+card already has merges the two, and **Not Micah** takes a voice back out.
+Voices Bruce recognized are filled in and marked **Recognized**; its guesses
+are filled in and marked **Suggested**. **Save names** saves every name that's
+filled in, whether you typed it, chose it or Bruce did, in one go. A voice
+nobody has named stays unknown if you leave it blank, and you can save and
+close with blanks. Blanking a name Bruce already saved or recognized doesn't
+remove it, so type the right name over it instead. If the save
+fails, the window stays open with the error and nothing is marked saved, so
+**Save names** again retries. **Later** closes without saving.
+
+Bruce asks less as it hears people again. Your own mic is named for you as
+soon as you've saved your voice in one meeting, a voice that matches someone
+saved in two earlier meetings is named automatically, and a voice split off
+from one you saved in the same meeting gets that name too. Saving a name also names the
+same voice in other meetings still waiting for review, in the background.
+Automatic names never train the voice profiles; only names you save do.
 Similarity scores are not confidence percentages.
 
-Bruce also reads known participant names from a few video frames using local
-Apple Vision OCR. Visible names and explicit “Talking:” / “Speaking:” labels
-appear separately with timestamps. Selecting one only fills the draft; it
-does not confirm the speaker. Gallery names do not prove who was speaking.
-This analysis makes no external model requests and does not recognise faces.
-
-Confirm any remaining names, then choose **Complete**. **Later** closes review
-without marking unresolved speakers complete. Confirmed names remain saved
-when reopening review. Archiving and subsequent recordings do not wait for
-speaker review.
-
 The library supports playback, transcript access, and speaker review after a
-processed archive is available. Calendar candidates are suggestions and need
-manual confirmation. Keep the app’s minimal settings explicit: selected
-calendars, Bruce host and archive path, and the backup-coverage confirmation.
+processed archive is available. Calendar attendees are only offered as names
+to choose; they never fill in a name by themselves. Keep the app’s minimal
+settings explicit: selected calendars, Bruce host and archive path, and the
+backup-coverage confirmation.
 
 Do not describe the app as production-ready until a representative live run has
 verified recording, transfer, retries, and review on your installation.
 
-The catalog icon reuses the film icon from
-[Mark James’s famfamfam silk set](https://www.famfamfam.com/lab/icons/silk/),
-licensed under CC BY 2.5.
+The app icon is drawn in `icons/meeting-archive.svg`, with `icons/meeting-archive.png`
+rendered from it.
 
 ## More tools
 

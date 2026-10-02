@@ -4,6 +4,7 @@ import ServiceManagement
 import SwiftUI
 
 struct MeetingArchiveApplication: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var controller = ArchiveController()
     var body: some Scene {
         MenuBarExtra {
@@ -12,7 +13,23 @@ struct MeetingArchiveApplication: App {
                 Text(failure).lineLimit(3)
                 Button("Clear warning") { controller.clearFailure() }
             }
-            if controller.isRecording { Button("Skip this meeting") { controller.skip() } }
+            if controller.isRecording {
+                if let started = controller.recordingStartedAt {
+                    Text("Started \(started.formatted(date: .omitted, time: .shortened))")
+                }
+                Button("Stop and save") { controller.stopRecording() }
+                Button("Discard this recording…") { controller.confirmDiscardCurrentRecording() }
+                if let app = controller.recordingApp {
+                    Button("Never record \(app.displayName)…") { controller.confirmNeverRecord(app) }
+                }
+            } else if controller.isRetrying {
+                Button("Stop trying to record") { controller.stopRecording() }
+            } else {
+                Button("Record now (\(GlobalHotKey.recordToggleDescription))") { controller.recordNow() }
+            }
+            ForEach(controller.pendingMeetings, id: \.id) { meeting in
+                Button("Discard \u{201C}\(meeting.title)\u{201D}…") { controller.confirmDiscardSaved(meeting.id) }
+            }
             Button(controller.isPaused ? "Resume automatic recording" : "Pause automatic recording") { controller.togglePause() }
             Divider()
             if !controller.meetingsNeedingSpeakerNames.isEmpty {
@@ -31,15 +48,15 @@ struct MeetingArchiveApplication: App {
             WindowButton()
             SettingsLink { Text("Settings…") }
             Divider()
-            Button("Quit Meeting Archive") { Task { await controller.quit() } }.keyboardShortcut("q")
+            Button("Quit Meeting Archive") { controller.quit() }.keyboardShortcut("q")
         } label: {
             HStack(spacing: 3) {
-                Image(systemName: controller.isRecording ? "record.circle.fill" : controller.speakersNeedingNames > 0 ? "person.crop.circle.badge.exclamationmark" : controller.failure != nil ? "exclamationmark.circle" : controller.isPaused ? "pause.circle" : "video.badge.waveform")
+                Image(systemName: controller.isRecording ? "record.circle.fill" : controller.speakersNeedingNames > 0 ? "person.crop.circle.badge.exclamationmark" : controller.failure != nil ? "exclamationmark.circle" : controller.isPaused ? "pause.circle" : "waveform.circle")
                 if controller.speakersNeedingNames > 0 { Text("\(controller.speakersNeedingNames)") }
                 else if !controller.processingMeetings.isEmpty { Image(systemName: "hourglass") }
             }
             .foregroundStyle(controller.isRecording ? .red : .primary)
-            .accessibilityLabel(controller.speakersNeedingNames > 0 ? "Meeting Archive: \(controller.speakersNeedingNames) speakers need names" : "Meeting Archive")
+            .accessibilityLabel(controller.isRecording ? "Meeting Archive: recording" : controller.speakersNeedingNames > 0 ? "Meeting Archive: \(controller.speakersNeedingNames) speakers need names" : "Meeting Archive")
         }
         Window("Meeting Archive", id: "library") {
             LibraryView(controller: controller)
@@ -51,60 +68,36 @@ struct MeetingArchiveApplication: App {
                 }
         }.defaultSize(width: 820, height: 540)
             .defaultLaunchBehavior(CommandLine.arguments.contains("--background") ? .suppressed : .presented)
-        Settings { ArchiveSettingsView(controller: controller, settings: controller.settings).frame(width: 600, height: 580) }
+        Settings { ArchiveSettingsView(controller: controller, settings: controller.settings).frame(width: 600, height: 660) }
+    }
+}
+
+/// Names for bundle IDs in Settings, from the installed app.
+enum AppNames {
+    @MainActor
+    static func installedName(for bundleIdentifier: String) -> String? {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else { return nil }
+        let name = FileManager.default.displayName(atPath: url.path)
+        return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
+    }
+}
+
+/// Quitting, logging out and shutting down all come through here, so the part
+/// being recorded is always saved properly before the app goes.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let controller = ArchiveController.running else { return .terminateNow }
+        Task { @MainActor in
+            await controller.shutDown()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 }
 
 private struct WindowButton: View {
     @Environment(\.openWindow) private var openWindow
     var body: some View { Button("Open meeting library") { openWindow(id: "library"); NSApp.activate(ignoringOtherApps: true) } }
-}
-
-struct NamingView: View {
-    @ObservedObject var controller: ArchiveController
-    @FocusState private var titleFocused: Bool
-    @State private var confirmingDiscard = false
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("What was this meeting about?").font(.title3)
-            TextField("Meeting title", text: $controller.titleDraft)
-                .focused($titleFocused)
-                .onChange(of: controller.titleDraft) { controller.titleDraftEdited() }
-                .onSubmit { save() }
-            if !controller.calendarChoices.isEmpty {
-                Menu("Use a calendar event") {
-                    ForEach(controller.calendarChoices) { event in Button(event.title) { controller.titleDraft = event.title } }
-                }
-            } else if controller.settings.selectedCalendarIDs.isEmpty {
-                Text("Select calendars in Settings to get title suggestions.").font(.caption).foregroundStyle(.secondary)
-            }
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                Text(countdown(at: context.date)).font(.caption).foregroundStyle(.secondary).monospacedDigit()
-            }
-            HStack {
-                Button("Discard recording", role: .destructive) { confirmingDiscard = true }
-                    .confirmationDialog("Delete this recording?", isPresented: $confirmingDiscard) {
-                        Button("Delete recording", role: .destructive) {
-                            if let pending = controller.pending { controller.resolve(pending.id, resolution: .discard) }
-                        }
-                    } message: { Text("The video and audio are removed from this Mac and never sent to Bruce.") }
-                Spacer()
-                Button("Save recording") { save() }.keyboardShortcut(.defaultAction)
-            }
-        }
-        .padding(20)
-        .onAppear { titleFocused = true }
-    }
-
-    private func save() {
-        if let pending = controller.pending { controller.resolve(pending.id, resolution: .accept(trigger: .keepButton)) }
-    }
-
-    private func countdown(at now: Date) -> String {
-        guard let deadline = controller.promptDeadline else { return "" }
-        let seconds = max(0, Int(deadline.timeIntervalSince(now).rounded(.up)))
-        return "Saves automatically in \(seconds)s. Typing gives you more time; Esc saves as is."
-    }
 }
 
 private struct RenameMeetingSheet: View {
@@ -120,7 +113,7 @@ private struct RenameMeetingSheet: View {
             Text("\(record.startedAt.formatted(date: .abbreviated, time: .shortened)) · \(record.sourceApplication.displayName)")
                 .font(.caption).foregroundStyle(.secondary)
             TextField("Meeting title", text: $title).onSubmit(save)
-            Text("Updates the title on Bruce and in Notion. Nothing is re-uploaded or re-transcribed.")
+            Text(record.acceptance.isPending ? "Saved with this title when it goes to Bruce." : "Updates the title on Bruce and in Notion. Nothing is re-uploaded or re-transcribed.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Spacer()
@@ -224,7 +217,7 @@ struct LibraryView: View {
                                 Button("Rename…") { renaming = record }
                             }
                             Button("Open") { controller.openInViewer(record.id) }
-                                .help("Watch with the transcript in Bruce's viewer")
+                                .help("Listen with the transcript in Bruce's viewer")
                             Button("Transcript") { controller.openTranscript(record.id) }
                                 .help("Download the transcript as Markdown")
                             Button(currentWorkerStatus(record)?.unconfirmedSpeakerCount ?? 0 > 0 ? "Name speakers…" : "Speakers…") { controller.showFollowUp(record.id) }
@@ -239,7 +232,7 @@ struct LibraryView: View {
                 RenameMeetingSheet(controller: controller, record: record)
             }
             .overlay {
-                if controller.meetings.isEmpty { ContentUnavailableView("No meetings yet", systemImage: "video", description: Text("Grant the permissions in Settings. Eligible calls will appear here after recording.")) }
+                if controller.meetings.isEmpty { ContentUnavailableView("No meetings yet", systemImage: "waveform", description: Text("Calls appear here once they're recorded. Check the permissions in Settings first.")) }
             }
         }.padding(20)
     }
@@ -302,7 +295,8 @@ struct MeetingFollowUpView: View {
                         meetingID: meetingID,
                         revision: record.metadataRevision,
                         configuration: controller.transferConfiguration,
-                        onComplete: { controller.closeFollowUp(); controller.speakerReviewChanged() },
+                        // A save that changed anything already refreshed Bruce's status.
+                        onComplete: { controller.closeFollowUp() },
                         onReviewChanged: { controller.speakerReviewChanged() },
                         onLater: { controller.closeFollowUp() }
                     )
@@ -326,7 +320,7 @@ struct MeetingFollowUpView: View {
                         else { Image(systemName: "clock.badge.exclamationmark").font(.largeTitle) }
                         Text(phase.detail).font(.headline)
                     }
-                    Text("Your recording is saved. You can close this window. It will open again when speaker names are ready to review, and the menu bar will show anything that still needs your attention.")
+                    Text("Your recording is saved. You can close this window. Once Bruce has worked out who spoke, any voices it doesn't recognize are listed in the menu bar to review whenever you like.")
                         .foregroundStyle(.secondary)
                     Spacer()
                     HStack {
@@ -362,17 +356,41 @@ struct ArchiveSettingsView: View {
                 }
             }
             Section("Recording") {
-                Text("Meeting window at 1080p, up to 15 fps. Your system-default microphone at recording start stays active even while muted in the call.")
-                Text("Preview: automatic Google Meet recording is not enabled yet. Chrome audio can include other tabs; browser capture still needs validation.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("Whenever an app uses the microphone, Meeting Archive records your mic and everything your Mac plays as two audio tracks. Recordings under a minute, or where nobody else spoke, are deleted automatically. Record now (\(GlobalHotKey.recordToggleDescription)) covers anything else, like a meeting in the room.")
                 ForEach([
-                    AppPermissionKind.accessibility,
-                    .screenRecording,
-                    .microphone,
+                    AppPermissionKind.microphone,
+                    .systemAudio,
                     .notifications,
                 ]) { permission in
                     PermissionRow(permission: permission, status: permissions.status(for: permission)) {
                         Task { await permissions.performAction(for: permission, calendar: controller.calendar) }
+                    }
+                }
+            }
+            Section("Never record these apps") {
+                let ignored = settings.ignoredBundleIDs.filter { !AppSettings.isMeetingArchive($0) }
+                let named = ignored.compactMap { id in AppNames.installedName(for: id).map { (id: id, name: $0) } }
+                    .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                ForEach(named, id: \.id) { app in
+                    HStack {
+                        Text(app.name)
+                        Spacer()
+                        Button("Record it") { settings.stopIgnoring(app.id) }
+                    }
+                }
+                if ignored.count > named.count {
+                    Text("Also ignored: Siri, dictation and other system listeners, plus dictation and recording apps you don't have installed.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                let seen = controller.recentMicUsers.filter { !settings.isIgnored($0.bundleIdentifier) }
+                if !seen.isEmpty {
+                    Text("Recently used the mic").font(.caption).foregroundStyle(.secondary)
+                    ForEach(seen, id: \.self) { user in
+                        HStack {
+                            Text(user.displayName)
+                            Spacer()
+                            Button("Never record") { settings.ignore(user.bundleIdentifier) }
+                        }
                     }
                 }
             }
@@ -452,8 +470,6 @@ private struct PermissionRow: View {
         switch status {
         case .notRequested:
             return permission == .calendar ? "Not requested · Connect" : "Not requested · Allow"
-        case .needsAccess:
-            return "Needs access · Open Settings"
         case .granted:
             return "Granted"
         case .denied:
@@ -462,6 +478,8 @@ private struct PermissionRow: View {
             return "Restricted · Open Settings"
         case .unknown:
             return "Unknown · Open Settings"
+        case .cannotCheck:
+            return "Can't be checked · Open Settings"
         }
     }
 }

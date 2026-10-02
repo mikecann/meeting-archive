@@ -8,6 +8,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import uuid
 from importlib.metadata import PackageNotFoundError, version
@@ -19,7 +20,7 @@ from .manifest import verify_incoming
 from .processing import TranscriptProcessor, timeline_offset
 from .queue import Job
 from .speakers import SpeakerRegistry
-from .speaker_evidence import refresh_speaker_matches, video_label_evidence
+from .speaker_evidence import refresh_speaker_matches
 
 
 PLAYBACK_PATH = "playback/meeting.mp4"
@@ -88,6 +89,7 @@ class WhisperPyannoteTranscriber:
             cpu_threads=cpu_threads,
         )
         self.diarizer = None
+        self.diarizer_device = "cpu"
         self.diarization_enabled = bool(token)
         self.embeddings: dict[str, list[float]] = {}
         if token:
@@ -99,8 +101,15 @@ class WhisperPyannoteTranscriber:
                 os.environ.get("MEETING_ARCHIVE_DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1"),
                 token=token,
             )
+            self._move_diarizer(diarization_device(os.environ.get("MEETING_ARCHIVE_DIARIZATION_DEVICE"), _mps_available()))
 
-    def transcribe(self, path: Path, channel_origin: str) -> list[dict[str, Any]]:
+    def transcribe(
+        self,
+        path: Path,
+        channel_origin: str,
+        *,
+        single_speaker: bool = False,
+    ) -> list[dict[str, Any]]:
         segments, _ = self.whisper.transcribe(str(path), vad_filter=True)
         turns = [
             {"start": float(item.start), "end": float(item.end), "text": item.text.strip()}
@@ -110,6 +119,8 @@ class WhisperPyannoteTranscriber:
         # decoding it again and loading audio for pyannote.
         if self.diarizer is None or not turns:
             return turns
+        if single_speaker:
+            return self._label_one_speaker(path, channel_origin, turns)
         output = self._diarize_without_torchcodec(path)
         annotation = getattr(output, "exclusive_speaker_diarization", None) or getattr(
             output, "speaker_diarization", output,
@@ -139,7 +150,30 @@ class WhisperPyannoteTranscriber:
                 turn["speaker"] = f"{channel_origin}:{max(overlaps)[1]}"
         return turns
 
-    def _diarize_without_torchcodec(self, path: Path):
+    def _label_one_speaker(
+        self,
+        path: Path,
+        channel_origin: str,
+        turns: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        speaker = f"{channel_origin}:SPEAKER_00"
+        # pyannote runs once, held to one speaker, only for that speaker's
+        # centroid. It is the same kind of embedding the voice profiles were
+        # enrolled from, so matching can still name the speaker. Its timeline
+        # is not used: every transcribed turn belongs to the one speaker.
+        output = self._diarize_without_torchcodec(path, num_speakers=1)
+        embeddings = list(extract_speaker_embeddings(
+            getattr(output, "speaker_embeddings", {}),
+            getattr(output, "speaker_diarization", output),
+            channel_origin,
+        ).values())
+        if len(embeddings) == 1:
+            self.embeddings[speaker] = embeddings[0]
+        for turn in turns:
+            turn["speaker"] = speaker
+        return turns
+
+    def _diarize_without_torchcodec(self, path: Path, **options):
         """Decode with ffmpeg 8, then pass a waveform so pyannote skips torchcodec."""
         ffmpeg = find_executable("ffmpeg")
         if ffmpeg is None:
@@ -163,13 +197,65 @@ class WhisperPyannoteTranscriber:
             torch.set_num_threads(max(1, min(4, int(os.environ.get("MEETING_ARCHIVE_TORCH_THREADS", "2")))))
             samples = np.memmap(raw_path, mode="c", dtype="<i2")
             waveform = torch.from_numpy(samples).to(torch.float32).div_(32768.0).unsqueeze(0)
-            return diarize_waveform(self.diarizer, waveform, 16000)
+            return self._run_diarizer(waveform, **options)
         finally:
             raw_path.unlink(missing_ok=True)
 
+    def _run_diarizer(self, waveform, **options):
+        """Diarize on the chosen device, falling back to the CPU once if the GPU fails."""
+        try:
+            return diarize_waveform(self.diarizer, waveform, 16000, **options)
+        except Exception as error:
+            if self.diarizer_device == "cpu":
+                raise
+            print(f"Diarization on {self.diarizer_device} failed ({type(error).__name__}); retrying on the CPU.", file=sys.stderr)
+            self._move_diarizer("cpu")
+            if self.diarizer_device != "cpu":
+                # Still on the device that just failed, so don't run it there
+                # again. The job retries with backoff in a fresh process.
+                raise
+            return diarize_waveform(self.diarizer, waveform, 16000, **options)
 
-def diarize_waveform(pipeline, waveform, sample_rate: int):
-    return pipeline({"waveform": waveform, "sample_rate": sample_rate})
+    def _move_diarizer(self, device: str) -> None:
+        if device == self.diarizer_device:
+            return
+        try:
+            try:
+                import torch
+
+                target = torch.device(device)
+            except ImportError:
+                target = device
+            self.diarizer.to(target)
+            self.diarizer_device = device
+        except Exception as error:
+            # The CPU always works, just slower, so a GPU that won't take the
+            # pipeline never fails a job.
+            print(f"Diarization stays on {self.diarizer_device} ({type(error).__name__}).", file=sys.stderr)
+
+
+def diarization_device(preference: str | None, mps_available: bool) -> str:
+    """Where pyannote runs. On Bruce's M1 the GPU gave identical turns about 8x
+    faster than two CPU threads: a 20 minute track took 3.3 minutes instead of
+    23.5, which was most of a meeting's processing time.
+    """
+    choice = (preference or "auto").strip().lower()
+    if choice in ("auto", "mps") and mps_available:
+        return "mps"
+    return "cpu"
+
+
+def _mps_available() -> bool:
+    try:
+        import torch
+
+        return bool(torch.backends.mps.is_available())
+    except Exception:
+        return False
+
+
+def diarize_waveform(pipeline, waveform, sample_rate: int, **options):
+    return pipeline({"waveform": waveform, "sample_rate": sample_rate}, **options)
 
 
 def process(archive_directory: Path, job: Job) -> None:
@@ -206,8 +292,6 @@ def process(archive_directory: Path, job: Job) -> None:
         _refresh_confirmed_names(existing, os.environ.get("MEETING_ARCHIVE_WORKER_DB"))
         _write_transcript_artifacts(output, existing)
         create_playback(archive_directory, manifest)
-        if os.environ.get("MEETING_ARCHIVE_WORKER_DB"):
-            video_label_evidence(archive_directory, existing, SpeakerRegistry(os.environ["MEETING_ARCHIVE_WORKER_DB"]))
         return
     if os.environ.get("HF_TOKEN", "").strip():
         # Fail an over-budget track in seconds, not after a full Whisper pass.
@@ -223,7 +307,10 @@ def process(archive_directory: Path, job: Job) -> None:
         if origin:
             first = TranscriptProcessor.metadata_offset(manifest, origin)
             offsets[origin] = timeline_offset(first, probe_start_time(archive_directory / item.path))
-    result = TranscriptProcessor(transcriber, offsets).process(archive_directory, manifest)
+    processor = TranscriptProcessor(transcriber, offsets)
+    result = processor.process(archive_directory, manifest)
+    if processor.echo_turns_removed:
+        print(f"Removed {processor.echo_turns_removed} microphone lines that echoed the call audio.", file=sys.stderr)
     result["processing"] = {
         "manifest_sha256": manifest.manifest_sha256,
         "whisper_model": os.environ.get("MEETING_ARCHIVE_WHISPER_MODEL", "small.en"),
@@ -244,7 +331,11 @@ def process(archive_directory: Path, job: Job) -> None:
     worker_db = os.environ.get("MEETING_ARCHIVE_WORKER_DB")
     if worker_db:
         registry = SpeakerRegistry(worker_db)
+        # A speaker whose every line was echo isn't anyone to name.
+        heard = {turn.get("speaker") for turn in result["turns"]}
         for speaker_id, embedding in transcriber.embeddings.items():
+            if speaker_id not in heard:
+                continue
             registry.save_observation(
                 manifest.meeting_id,
                 manifest.revision,
@@ -258,13 +349,11 @@ def process(archive_directory: Path, job: Job) -> None:
         result["processing"]["speaker_observations_committed"] = True
     else:
         result["processing"]["speaker_observations_committed"] = False
-    # OCR needs no speech model. Release those before optional frame analysis
-    # so Bruce does not keep both workloads resident on its 8 GB machine.
+    # The playback encode needs no speech model. Release those first so Bruce
+    # does not keep both workloads resident on its 8 GB machine.
     del transcriber
     _write_transcript_artifacts(output, result)
     create_playback(archive_directory, manifest)
-    if worker_db:
-        video_label_evidence(archive_directory, result, registry)
 
 
 def _refresh_confirmed_names(result: dict[str, Any], worker_db: str | None) -> None:
@@ -296,6 +385,19 @@ def _write_transcript_artifacts(output: Path, result: dict[str, Any]) -> None:
         atomic_write_bytes(json_path, encoded)
 
 
+def usable_embedding(values: list[float]) -> bool:
+    """Whether a speaker embedding is a real voice sample.
+
+    pyannote gives a speaker heard too briefly to keep any chunk embedding a
+    NaN centroid, and pads a speaker it could not cluster with zeros. That
+    speaker then has no embedding, as with very short speech, rather than
+    failing the whole job.
+    """
+    return bool(values) and all(math.isfinite(value) for value in values) and any(
+        value != 0 for value in values
+    )
+
+
 def extract_speaker_embeddings(raw_embeddings, annotation, channel_origin: str) -> dict[str, list[float]]:
     labels = annotation.labels() if hasattr(annotation, "labels") else []
     items = raw_embeddings.items() if isinstance(raw_embeddings, dict) else zip(
@@ -307,87 +409,94 @@ def extract_speaker_embeddings(raw_embeddings, annotation, channel_origin: str) 
         values = raw.tolist() if hasattr(raw, "tolist") else list(raw)
         while values and isinstance(values[0], list):
             values = values[0]
-        result[f"{channel_origin}:{speaker}"] = [float(value) for value in values]
+        embedding = [float(value) for value in values]
+        if usable_embedding(embedding):
+            result[f"{channel_origin}:{speaker}"] = embedding
     return result
 
 
 def create_playback(archive_directory: Path, manifest) -> Path | None:
-    """Build browser-compatible playback without touching preserved sources."""
+    """Build browser-compatible playback without touching preserved sources.
+
+    A bundle with video gets H.264 video. An audio-only bundle, as every v2
+    recording is, gets an AAC-only MP4, so review excerpts and the viewer can
+    still play it.
+    """
     _assert_generated_namespaces_unowned(manifest)
     video = next((item for item in manifest.files if item.kind == "video"), None)
     audio = [item for item in manifest.files if item.kind in ("microphone_audio", "incoming_audio")]
-    if video is None or not audio:
+    if not audio:
         return None
     playback_directory = _ensure_real_generated_directory(archive_directory, ("playback",))
     output = playback_directory / "meeting.mp4"
     receipt_path = playback_directory / "meeting-playback.json"
     recipe = _playback_recipe(manifest, video, audio)
-    if _is_regular_non_symlink(output) and _playback_receipt_matches(receipt_path, recipe) and _playback_is_h264(output):
+    playback_is_current = _playback_is_aac if video is None else _playback_is_h264
+    if _is_regular_non_symlink(output) and _playback_receipt_matches(receipt_path, recipe) and playback_is_current(output):
         return output
     ffmpeg = find_executable("ffmpeg")
     if ffmpeg is None:
         raise RuntimeError("ffmpeg is required to create the playback asset.")
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.parent / f".{output.name}.{uuid.uuid4().hex}.part.mp4"
-    command = [
-        ffmpeg, "-hide_banner", "-loglevel", "error", "-threads", "2",
-        "-i", str(archive_directory / video.path),
-    ]
-    for item in audio:
+    inputs = audio if video is None else [video, *audio]
+    command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-threads", "2"]
+    for item in inputs:
         command.extend(["-i", str(archive_directory / item.path)])
 
     # AVAssetWriter uses a shared host-clock origin, recorded as firstOffset in
     # metadata. Decode away each file's independent AAC priming/edit list,
     # normalize that decoded track to zero, then apply the capture offset once.
-    video_offset = _playback_track_offset(manifest, "video")
-    filters = [f"[0:v:0]setpts=PTS-STARTPTS+{_ffmpeg_number(video_offset)}/TB[v]"]
-    audio_labels = []
-    for index, item in enumerate(audio, start=1):
-        origin = TranscriptProcessor.CHANNEL_KINDS[item.kind]
-        offset = _playback_track_offset(manifest, origin)
-        label = f"a{index}"
-        delay_milliseconds = _ffmpeg_number(offset * 1_000)
-        filters.append(
-            f"[{index}:a:0]asetpts=PTS-STARTPTS,adelay={delay_milliseconds}:all=1[{label}]"
-        )
-        audio_labels.append(f"[{label}]")
-    if len(audio_labels) == 1:
-        audio_map = audio_labels[0]
-    else:
-        filters.append(
-            f"{''.join(audio_labels)}amix=inputs={len(audio_labels)}:duration=longest[a]"
-        )
-        audio_map = "[a]"
-
-    base = command + [
-        "-filter_complex", ";".join(filters),
-        "-map", "[v]", "-map", audio_map,
-        "-pix_fmt", "yuv420p", "-tag:v", "avc1", "-fps_mode:v", "passthrough",
-        "-profile:v", "high", "-level:v", "4.1",
-        "-b:v", "4M", "-maxrate:v", "6M", "-bufsize:v", "8M",
-        "-threads:v", "2", "-c:a", "aac", "-movflags", "+faststart", "-y",
-    ]
-    last_error: subprocess.CalledProcessError | None = None
-    encoders = ("h264_videotoolbox",) if os.environ.get(
-        "MEETING_ARCHIVE_REQUIRE_HARDWARE_H264", ""
-    ) == "1" else ("h264_videotoolbox", "libx264")
+    filters, audio_map = _aligned_audio_filters(manifest, audio, first_input=len(inputs) - len(audio))
     try:
-        for encoder in encoders:
-            temporary.unlink(missing_ok=True)
+        if video is None:
             try:
                 subprocess.run(
-                    base + ["-c:v", encoder, str(temporary)],
+                    command + [
+                        "-filter_complex", ";".join(filters), "-map", audio_map,
+                        "-c:a", "aac", "-movflags", "+faststart", "-y", str(temporary),
+                    ],
                     check=True,
                     capture_output=True,
                     text=True,
                     timeout=_timeout("MEETING_ARCHIVE_PLAYBACK_TIMEOUT_SECONDS", 4 * 3600),
                 )
-                last_error = None
-                break
             except subprocess.CalledProcessError as error:
-                last_error = error
-        if last_error is not None:
-            raise RuntimeError("No working H.264 playback encoder is available.") from last_error
+                detail = (error.stderr or "").strip()[-500:]
+                raise RuntimeError(
+                    f"ffmpeg could not create the audio playback: {detail or 'no error output'}",
+                ) from error
+        else:
+            video_offset = _playback_track_offset(manifest, "video")
+            filters.insert(0, f"[0:v:0]setpts=PTS-STARTPTS+{_ffmpeg_number(video_offset)}/TB[v]")
+            base = command + [
+                "-filter_complex", ";".join(filters),
+                "-map", "[v]", "-map", audio_map,
+                "-pix_fmt", "yuv420p", "-tag:v", "avc1", "-fps_mode:v", "passthrough",
+                "-profile:v", "high", "-level:v", "4.1",
+                "-b:v", "4M", "-maxrate:v", "6M", "-bufsize:v", "8M",
+                "-threads:v", "2", "-c:a", "aac", "-movflags", "+faststart", "-y",
+            ]
+            last_error: subprocess.CalledProcessError | None = None
+            encoders = ("h264_videotoolbox",) if os.environ.get(
+                "MEETING_ARCHIVE_REQUIRE_HARDWARE_H264", ""
+            ) == "1" else ("h264_videotoolbox", "libx264")
+            for encoder in encoders:
+                temporary.unlink(missing_ok=True)
+                try:
+                    subprocess.run(
+                        base + ["-c:v", encoder, str(temporary)],
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=_timeout("MEETING_ARCHIVE_PLAYBACK_TIMEOUT_SECONDS", 4 * 3600),
+                    )
+                    last_error = None
+                    break
+                except subprocess.CalledProcessError as error:
+                    last_error = error
+            if last_error is not None:
+                raise RuntimeError("No working H.264 playback encoder is available.") from last_error
         os.replace(temporary, output)
         atomic_write_text(
             receipt_path,
@@ -396,6 +505,25 @@ def create_playback(archive_directory: Path, manifest) -> Path | None:
     finally:
         temporary.unlink(missing_ok=True)
     return output
+
+
+def _aligned_audio_filters(manifest, audio, first_input: int) -> tuple[list[str], str]:
+    """Place each audio input on the capture clock and mix them into one track."""
+    filters = []
+    labels = []
+    for index, item in enumerate(audio, start=first_input):
+        origin = TranscriptProcessor.CHANNEL_KINDS[item.kind]
+        offset = _playback_track_offset(manifest, origin)
+        label = f"a{index}"
+        delay_milliseconds = _ffmpeg_number(offset * 1_000)
+        filters.append(
+            f"[{index}:a:0]asetpts=PTS-STARTPTS,adelay={delay_milliseconds}:all=1[{label}]"
+        )
+        labels.append(f"[{label}]")
+    if len(labels) == 1:
+        return filters, labels[0]
+    filters.append(f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest[a]")
+    return filters, "[a]"
 
 
 def _assert_generated_namespaces_unowned(manifest) -> None:
@@ -434,8 +562,8 @@ def _ensure_real_generated_directory(root: Path, components: tuple[str, ...]) ->
 
 
 def _playback_recipe(manifest, video, audio) -> dict[str, Any]:
-    sources = [video, *audio]
-    offsets = {"video": _playback_track_offset(manifest, "video")}
+    sources = audio if video is None else [video, *audio]
+    offsets = {} if video is None else {"video": _playback_track_offset(manifest, "video")}
     for item in audio:
         origin = TranscriptProcessor.CHANNEL_KINDS[item.kind]
         offsets[origin] = _playback_track_offset(manifest, origin)
@@ -478,13 +606,22 @@ def _ffmpeg_number(value: float) -> str:
 
 
 def _playback_is_h264(path: Path) -> bool:
+    return _first_stream_codec_is(path, "v:0", "h264")
+
+
+def _playback_is_aac(path: Path) -> bool:
+    """An audio-only playback is current when its audio stream is AAC."""
+    return _first_stream_codec_is(path, "a:0", "aac")
+
+
+def _first_stream_codec_is(path: Path, stream: str, codec: str) -> bool:
     ffprobe = find_executable("ffprobe")
     if ffprobe is None:
         return True
     try:
         completed = subprocess.run(
             [
-                ffprobe, "-v", "error", "-select_streams", "v:0",
+                ffprobe, "-v", "error", "-select_streams", stream,
                 "-show_entries", "stream=codec_name", "-of", "default=nw=1:nk=1", str(path),
             ],
             check=True,
@@ -494,7 +631,7 @@ def _playback_is_h264(path: Path) -> bool:
         )
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
-    return completed.stdout.strip().lower() == "h264"
+    return completed.stdout.strip().lower() == codec
 
 
 def probe_start_time(path: Path) -> float | None:

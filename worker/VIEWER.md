@@ -12,8 +12,10 @@ https://bruce.tail9ef766.ts.net:10443/meeting/<UUID>
 
 The page contains the browser-compatible playback asset, escaped transcript
 turns with seek buttons, and a user-clicked
-`meetingarchive://meeting/<UUID>` link for the installed Mac app. The fixed
-download endpoints are:
+`meetingarchive://meeting/<UUID>` link for the installed Mac app. When the
+worker's playback receipt shows the asset has no video, as for every
+audio-only recording, the page uses an audio player instead of a video one.
+The fixed download endpoints are:
 
 ```text
 GET or HEAD /meeting/<UUID>/playback.mp4

@@ -5,13 +5,17 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import tempfile
 import threading
 import unittest
 import uuid
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 
+from meeting_archive_worker.manifest import VerifiedFile
+from meeting_archive_worker.model_processor import create_playback
 from meeting_archive_worker.viewer import create_server
 
 
@@ -171,6 +175,61 @@ class ViewerTests(unittest.TestCase):
         self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(headers["Cache-Control"], "private, no-store")
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
+    def test_audio_only_playback_is_served_with_an_audio_player(self) -> None:
+        ffmpeg = shutil.which("ffmpeg")
+        sources = (("microphone.m4a", "microphone_audio", 440), ("incoming.m4a", "incoming_audio", 660))
+        for name, _, frequency in sources:
+            subprocess.run([
+                ffmpeg, "-v", "error", "-f", "lavfi", "-i", f"sine=frequency={frequency}:duration=1",
+                "-c:a", "aac", "-y", str(self.archive / name),
+            ], check=True)
+        files = tuple(
+            VerifiedFile(name, (self.archive / name).stat().st_size, "0" * 64, kind)
+            for name, kind, _ in sources
+        )
+        playback = create_playback(self.archive, SimpleNamespace(files=files, metadata={}))
+
+        status, _, body = self._request(f"/meeting/{self.meeting_id}")
+        self.assertEqual(status, 200)
+        page = body.decode("utf-8")
+        self.assertIn(
+            f'<audio id="playback" controls preload="metadata" '
+            f'src="/meeting/{self.meeting_id}/playback.mp4"></audio>',
+            page,
+        )
+        self.assertNotIn("<video", page)
+        self.assertIn("player.currentTime=seconds", page)
+
+        status, headers, body = self._request(
+            f"/meeting/{self.meeting_id}/playback.mp4",
+            headers={"Range": "bytes=0-99"},
+        )
+        self.assertEqual(status, 206)
+        self.assertEqual(headers["Content-Type"], "video/mp4")
+        self.assertEqual(body, playback.read_bytes()[:100])
+
+    def test_video_or_unknown_playback_keeps_the_video_player(self) -> None:
+        receipt = self.archive / "playback" / "meeting-playback.json"
+        video_receipt = json.dumps({"sources": [
+            {"kind": "video", "path": "meeting-view.mov"},
+            {"kind": "microphone_audio", "path": "microphone.m4a"},
+        ]})
+        unknown_receipts = (
+            json.dumps({"sources": [{"kind": "screen_recording", "path": "screen.mov"}]}),
+            json.dumps({"sources": [{"path": "microphone.m4a"}]}),
+            json.dumps({"sources": [{"kind": ["microphone_audio"], "path": "microphone.m4a"}]}),
+        )
+        for content in (None, video_receipt, "not json", json.dumps({"sources": []}), *unknown_receipts):
+            with self.subTest(receipt=content):
+                if content is None:
+                    receipt.unlink(missing_ok=True)
+                else:
+                    receipt.write_text(content, encoding="utf-8")
+                status, _, body = self._request(f"/meeting/{self.meeting_id}")
+                self.assertEqual(status, 200)
+                self.assertIn('<video id="playback" controls preload="metadata"', body.decode("utf-8"))
 
     def test_landing_page_uses_renamed_title_escaped(self) -> None:
         (self.archive / "title.json").write_text(

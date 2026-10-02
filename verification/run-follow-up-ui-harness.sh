@@ -25,7 +25,7 @@ build_harness() {
     "$TOOL_DIR/Sources/MeetingArchiveCore/ModelCodec.swift" \
     "$TOOL_DIR/Sources/MeetingArchiveCore/Models.swift" \
     "$TOOL_DIR/Sources/MeetingArchiveCore/Manifest.swift" \
-    "$TOOL_DIR/Sources/MeetingArchiveCore/CaptureStateMachine.swift" \
+    "$TOOL_DIR/Sources/MeetingArchiveCore/RecordingPolicy.swift" \
     "$TOOL_DIR/Sources/MeetingArchiveCore/SQLiteMeetingStore.swift" \
     -Xlinker -install_name -Xlinker @rpath/libMeetingArchiveCore.dylib \
     -lsqlite3 \
@@ -34,7 +34,7 @@ build_harness() {
 
   local -a app_sources=()
   while IFS= read -r source; do app_sources+=("$source"); done < <(
-    find "$TOOL_DIR/Sources/MeetingArchiveApp" -maxdepth 1 -name '*.swift' ! -name 'StartupCommand.swift' -print | sort
+    find "$TOOL_DIR/Sources/MeetingArchiveApp" -name '*.swift' ! -name 'StartupCommand.swift' -print | sort
   )
   swiftc -j 2 -target arm64-apple-macos15.0 -parse-as-library \
     -I "$BUILD_ROOT" -L "$BUILD_ROOT" -lMeetingArchiveCore \

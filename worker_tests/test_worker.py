@@ -12,7 +12,7 @@ import tempfile
 import unittest
 import uuid
 import time
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -805,10 +805,12 @@ class ProcessingTests(unittest.TestCase):
             }
             (output / "transcript.json").write_text(json.dumps(transcript), encoding="utf-8")
 
+            # The fixture's audio bytes are not real media, so the playback
+            # encode this audio-only bundle now gets is stubbed out.
             with patch.dict(os.environ, {}, clear=True), patch(
                 "meeting_archive_worker.model_processor.WhisperPyannoteTranscriber",
                 side_effect=AssertionError("checkpoint recovery must not load models"),
-            ):
+            ), patch("meeting_archive_worker.model_processor.create_playback") as playback:
                 model_process(
                     incoming,
                     SimpleNamespace(
@@ -820,6 +822,7 @@ class ProcessingTests(unittest.TestCase):
 
             self.assertIn("Recovered view", (output / "transcript.md").read_text(encoding="utf-8"))
             self.assertEqual(list(output.glob("*.part")), [])
+            playback.assert_called_once()
 
     def test_whisper_uses_bounded_cpu_threads_and_vad(self) -> None:
         calls = {}
@@ -1091,11 +1094,63 @@ class ProcessingTests(unittest.TestCase):
             self.assertGreater(playback.stat().st_size, 0)  # type: ignore[union-attr]
 
             class FakeTranscriber:
-                def transcribe(self, path: Path, channel_origin: str):
+                def transcribe(self, path: Path, channel_origin: str, *, single_speaker: bool = False):
                     return [{"start": 0.0, "end": 1.0, "text": "can you hear me"}]
 
             result = TranscriptProcessor(FakeTranscriber()).process(destination, verified)
             self.assertEqual(result["sources"], [{"path": "incoming.m4a", "channel_origin": "incoming"}])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg or ffprobe is unavailable")
+    def test_audio_only_v2_bundle_is_validated_archived_and_played_back(self) -> None:
+        # v2 captures a mono microphone and stereo incoming audio, and no video.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            meeting_id = str(uuid.uuid4())
+            incoming = root / "incoming" / meeting_id / "r1"
+            incoming.mkdir(parents=True)
+            ffmpeg = shutil.which("ffmpeg")
+            for name, layout, frequency in (("microphone.m4a", "mono", 440), ("incoming.m4a", "stereo", 660)):
+                subprocess.run([
+                    ffmpeg, "-v", "error", "-f", "lavfi", "-i", f"sine=frequency={frequency}:sample_rate=48000:duration=2",
+                    "-af", f"aformat=channel_layouts={layout}", "-c:a", "aac", str(incoming / name),
+                ], check=True)
+            metadata = {
+                "schema_version": 1,
+                "meeting_id": meeting_id,
+                "manifest_revision": 1,
+                "started_at": "2026-10-01T09:02:00+08:00",
+                "ended_at": "2026-10-01T09:02:02+08:00",
+                "duration_seconds": 2,
+                "timezone": "Australia/Perth",
+                "source_app": "com.google.Chrome",
+                "tracks": {"incoming": {"firstOffset": 0.41}, "microphone": {"firstOffset": 0.38}},
+            }
+            (incoming / "metadata.json").write_text(json.dumps(metadata, sort_keys=True) + "\n", encoding="utf-8")
+            files = []
+            for path, kind in (("microphone.m4a", "microphone_audio"), ("incoming.m4a", "incoming_audio"), ("metadata.json", "metadata")):
+                data = (incoming / path).read_bytes()
+                files.append({"path": path, "size_bytes": len(data), "sha256": sha256(data), "kind": kind})
+            manifest = {"schema_version": 1, "meeting_id": meeting_id, "revision": 1, "files": files}
+            (incoming / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+            archive = root / "archive"
+            archive.mkdir()
+
+            acknowledgement = ArchiveStore(archive, root / "worker.sqlite3", validate_media=True).accept(incoming)
+
+            self.assertTrue(acknowledgement["cleanup_allowed"])
+            self.assertEqual(
+                sorted(item["kind"] for item in acknowledgement["media_validation"]["files"]),
+                ["incoming_audio", "microphone_audio"],
+            )
+            archive_path = Path(acknowledgement["archive_path"])
+            destination = archive_path if archive_path.is_absolute() else archive / archive_path
+            playback = create_playback(destination, verify_incoming(destination))
+            self.assertEqual(playback, destination / "playback" / "meeting.mp4")
+            codecs = subprocess.run(
+                [shutil.which("ffprobe"), "-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "csv=p=0", str(playback)],
+                check=True, capture_output=True, text=True,
+            ).stdout.split()
+            self.assertEqual(codecs, ["aac,audio"])
 
     def test_playback_command_rebuilds_shared_timeline_from_capture_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1131,7 +1186,7 @@ class ProcessingTests(unittest.TestCase):
             verified = verify_incoming(incoming)
 
             class FakeTranscriber:
-                def transcribe(self, path: Path, channel_origin: str):
+                def transcribe(self, path: Path, channel_origin: str, *, single_speaker: bool = False):
                     if channel_origin == "microphone":
                         return [{"start": 1.0, "end": 2.0, "text": "hello"}]
                     return [{"start": 0.5, "end": 1.5, "text": "hi", "speaker": "SPEAKER_00"}]
@@ -1344,6 +1399,69 @@ class CliTests(unittest.TestCase):
             status = json.loads(status_output.getvalue())
             self.assertEqual(status["publication"]["phase"], "ready")
             self.assertIsNone(status["publication"]["last_error"])
+
+    def test_identify_speakers_saves_every_name_at_once_and_updates_the_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            incoming, _ = write_bundle(root)
+            archive = root / "archive"
+            archive.mkdir()
+            database = root / "worker.sqlite3"
+            acknowledgement = ArchiveStore(archive, database).accept(incoming)
+            meeting_id = acknowledgement["meeting_id"]
+            transcript_directory = Path(acknowledgement["archive_path"]) / "transcripts" / "v1"
+            transcript_directory.mkdir(parents=True)
+            turns = [
+                {"start": float(index), "end": index + 1.0, "speaker": speaker,
+                 "channel_origin": "incoming", "text": "Hello"}
+                for index, speaker in enumerate(("incoming:SPEAKER_00", "incoming:SPEAKER_01", "incoming:SPEAKER_02"))
+            ]
+            (transcript_directory / "transcript.json").write_text(json.dumps({
+                "schema_version": 1, "meeting_id": meeting_id, "manifest_revision": 1, "turns": turns,
+            }), encoding="utf-8")
+            registry = SpeakerRegistry(database)
+            registry.save_observation(meeting_id, 1, "incoming:SPEAKER_00", [1.0, 0.0])
+            registry.save_observation(meeting_id, 1, "incoming:SPEAKER_01", [0.0, 1.0])
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = cli_main([
+                    "identify-speakers",
+                    "--meeting-id", meeting_id,
+                    "--revision", "1",
+                    "--names", json.dumps({"incoming:SPEAKER_00": "Micah", "incoming:SPEAKER_01": " Micah "}),
+                    "--db", str(database),
+                ])
+
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(output.getvalue()), {
+                "schema_version": 1,
+                "meeting_id": meeting_id,
+                "manifest_revision": 1,
+                "speakers": [
+                    {"speaker_id": "incoming:SPEAKER_00", "name": "Micah", "voice_profile_enrolled": True},
+                    {"speaker_id": "incoming:SPEAKER_01", "name": "Micah", "voice_profile_enrolled": True},
+                ],
+            })
+            updated = json.loads((transcript_directory / "transcript.json").read_text(encoding="utf-8"))
+            self.assertEqual([turn.get("name") for turn in updated["turns"]], ["Micah", "Micah", None])
+            self.assertEqual(PublicationQueue(database).status()["phase"], "ready")
+
+    def test_identify_speakers_rejects_bad_names_and_saves_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "worker.sqlite3"
+            meeting_id = str(uuid.uuid4())
+            for names in ("not json", "[]", "{}", '{"incoming:SPEAKER_00": 3}', '{"incoming:SPEAKER_00": " "}'):
+                with self.subTest(names=names):
+                    error = io.StringIO()
+                    with redirect_stdout(io.StringIO()), redirect_stderr(error):
+                        code = cli_main([
+                            "identify-speakers", "--meeting-id", meeting_id, "--revision", "1",
+                            "--names", names, "--db", str(database),
+                        ])
+                    self.assertEqual(code, 2)
+                    self.assertEqual(json.loads(error.getvalue())["error"], "ValueError")
+            self.assertEqual(SpeakerRegistry(database).assignments(meeting_id, 1), {})
 
     def test_accept_validate_media_flag_is_forwarded_to_archive_store(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

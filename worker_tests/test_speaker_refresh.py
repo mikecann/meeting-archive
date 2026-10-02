@@ -332,6 +332,49 @@ class SpeakerRefreshTests(unittest.TestCase):
             reconcile_pending_speakers(self.database, clock=lambda: 1000.0 + 3601)
             self.assertEqual(self._pending(broken_id)[1], 3)
 
+    def test_new_matching_rules_refresh_meetings_with_unnamed_voices_once(self) -> None:
+        unnamed, named, unaccepted = (str(uuid.uuid4()) for _ in range(3))
+        self._accepted_archive(unnamed)
+        self._accepted_archive(named)
+        for meeting_id in (unnamed, named, unaccepted):
+            self._observation(meeting_id)
+        self.registry.confirm_observation(named, 1, "microphone:SPEAKER_00", "Mike Cann")
+        with closing(sqlite3.connect(self.database)) as connection:
+            with connection:
+                connection.execute("DELETE FROM speaker_refreshes")
+
+        self.assertEqual(self.registry.request_refresh_after_rule_change(), 1)
+        self.assertEqual(self._pending(unnamed), (1, 0, None))
+        self.assertIsNone(self._pending(named))
+        self.assertIsNone(self._pending(unaccepted))
+        self.assertEqual(self.registry.request_refresh_after_rule_change(), 0)
+        self.assertEqual(self._pending(unnamed), (1, 0, None))
+
+    def test_the_sweep_names_an_old_meetings_mic_under_new_rules_without_enrolling(self) -> None:
+        older = str(uuid.uuid4())
+        archive, _ = self._accepted_archive(older)
+        # Too far from his one saved sample for an ordinary match.
+        self.registry.save_observation(older, 1, "microphone:SPEAKER_00", [0.7, 0.51 ** 0.5], "model@1")
+        earlier = str(uuid.uuid4())
+        self._observation(earlier)
+        self.registry.confirm_observation(earlier, 1, "microphone:SPEAKER_00", "Mike Cann")
+        with closing(sqlite3.connect(self.database)) as connection:
+            with connection:
+                # As if Mike's name was saved before this worker version.
+                connection.execute("DELETE FROM speaker_refreshes")
+
+        with patch("sys.stderr"):
+            reconcile_pending_speakers(self.database)
+
+        transcript = json.loads((archive / "transcripts" / "v1" / "transcript.json").read_text(encoding="utf-8"))
+        self.assertEqual(transcript["turns"][0]["name"], "Mike Cann")
+        self.assertEqual(transcript["turns"][0]["name_source"], "voice_match")
+        self.assertEqual(transcript["speaker_matches"]["microphone:SPEAKER_00"]["suggestion_kind"], "own_microphone")
+        self.assertIsNone(self._pending(older))
+        self.assertEqual(self.registry.assignments(older, 1), {})
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM voice_profiles").fetchone()[0], 1)
+
     def test_service_reconciles_pending_speakers_before_processing(self) -> None:
         meeting_id = str(uuid.uuid4())
         JobQueue(self.database).enqueue(meeting_id, 1, "b" * 64, str(self.root))

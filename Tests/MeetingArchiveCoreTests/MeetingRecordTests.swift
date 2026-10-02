@@ -58,6 +58,47 @@ final class MeetingRecordTests: XCTestCase {
         XCTAssertEqual(renamed.acceptance, record.acceptance)
     }
 
+    func testTitleSourceIsOptionalSoOlderRecordsStillLoad() throws {
+        var record = makeRecord()
+        XCTAssertNil(record.titleSource)
+        let old = try ModelCodec.encoder.encode(record)
+        XCTAssertFalse(try XCTUnwrap(String(data: old, encoding: .utf8)).contains("titleSource"))
+        XCTAssertNil(try ModelCodec.decoder.decode(MeetingRecord.self, from: old).titleSource)
+
+        record.titleSource = .calendar
+        let data = try ModelCodec.encoder.encode(record)
+        XCTAssertTrue(try XCTUnwrap(String(data: data, encoding: .utf8)).contains("\"titleSource\":\"calendar\""))
+        XCTAssertEqual(try ModelCodec.decoder.decode(MeetingRecord.self, from: data), record)
+        // The worker reads these as metadata title_source.
+        XCTAssertEqual([MeetingTitleSource.default, .calendar, .user].map(\.rawValue), ["default", "calendar", "user"])
+    }
+
+    func testEitherKindOfRenameIsTheUsers() {
+        var record = makeRecord()
+        record.titleSource = .calendar
+        XCTAssertEqual(record.updatingTitle("Mine", at: start).titleSource, .user)
+        XCTAssertEqual(record.renamingArchived("Mine", at: start).titleSource, .user)
+    }
+
+    func testBrucesTitleIsAdoptedUnlessTheUserNamedTheMeeting() {
+        let later = start.addingTimeInterval(500)
+        var record = makeRecord().resolvingAcceptance(.accept(trigger: .deadline), at: start.addingTimeInterval(200))
+        for source in [nil, MeetingTitleSource.default, .calendar] {
+            record.titleSource = source
+            let adopted = record.adoptingArchivedTitle("Budget revision with Sam", at: later)
+            XCTAssertEqual(adopted?.title, "Budget revision with Sam")
+            XCTAssertEqual(adopted?.titleSource, source, "adopting a title doesn't make it the user's")
+            XCTAssertEqual(adopted?.metadataRevision, record.metadataRevision, "no new upload revision")
+            XCTAssertEqual(adopted?.updatedAt, later)
+        }
+        record.titleSource = .default
+        XCTAssertNil(record.adoptingArchivedTitle(nil, at: later))
+        XCTAssertNil(record.adoptingArchivedTitle("  ", at: later))
+        XCTAssertNil(record.adoptingArchivedTitle(record.title, at: later), "nothing to change")
+        record.titleSource = .user
+        XCTAssertNil(record.adoptingArchivedTitle("Budget revision with Sam", at: later))
+    }
+
     private func makeRecord() -> MeetingRecord {
         MeetingRecord(
             id: UUID(uuidString: "3f679acb-96d4-4ee0-aa4e-36e96a1fe41d")!,

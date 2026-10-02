@@ -15,21 +15,17 @@ swiftc -j 2 -emit-library -emit-module -module-name MeetingArchiveCore \
   "$TOOL_DIR/Sources/MeetingArchiveCore/ModelCodec.swift" \
   "$TOOL_DIR/Sources/MeetingArchiveCore/Models.swift" \
   "$TOOL_DIR/Sources/MeetingArchiveCore/Manifest.swift" \
-  "$TOOL_DIR/Sources/MeetingArchiveCore/CaptureStateMachine.swift" \
   -emit-module-path "$BUILD_ROOT/MeetingArchiveCore.swiftmodule" \
   -o "$BUILD_ROOT/libMeetingArchiveCore.dylib"
 
 swiftc -j 2 -I "$BUILD_ROOT" -L "$BUILD_ROOT" -lMeetingArchiveCore \
-  "$TOOL_DIR/Sources/MeetingArchiveApp/CaptureLifecycleCoordinator.swift" \
-  "$TOOL_DIR/Sources/MeetingArchiveApp/NativeCaptureLifecycle.swift" \
-  "$TOOL_DIR/Sources/MeetingArchiveApp/MeetingSignalProvider.swift" \
   "$TOOL_DIR/Sources/MeetingArchiveApp/ArchiveTransfer.swift" \
   "$TOOL_DIR/Sources/MeetingArchiveApp/WorkerStatus.swift" \
   "$TOOL_DIR/Sources/MeetingArchiveApp/ArchiveCleanup.swift" \
   "$TOOL_DIR/Sources/MeetingArchiveApp/SpoolBundle.swift" \
   "$TOOL_DIR/Sources/MeetingArchiveApp/CaptureTimeline.swift" \
   "$TOOL_DIR/Sources/MeetingArchiveApp/Log.swift" \
-  "$TOOL_DIR/Sources/MeetingArchiveApp/CameraActivity.swift" \
+  "$TOOL_DIR/Sources/MeetingArchiveApp/CalendarService.swift" \
   "$SCRIPT_DIR/OfflineRegressions.swift" \
   -o "$BUILD_ROOT/offline-regressions"
 

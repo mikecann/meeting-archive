@@ -14,6 +14,7 @@ PYTHONPATH=worker python3 -m meeting_archive_worker retry --db WORKER_DB --meeti
 PYTHONPATH=worker python3 -m meeting_archive_worker process-ready --archive-root ARCHIVE_ROOT --db WORKER_DB --processor package.module:function
 PYTHONPATH=worker python3 -m meeting_archive_worker review-speakers --archive-dir MEETING_DIR --revision 1 --db WORKER_DB
 PYTHONPATH=worker python3 -m meeting_archive_worker identify --meeting-id UUID --revision 1 --speaker-id incoming:SPEAKER_00 --name "Name" --db WORKER_DB
+PYTHONPATH=worker python3 -m meeting_archive_worker identify-speakers --meeting-id UUID --revision 1 --names '{"incoming:SPEAKER_00": "Name"}' --db WORKER_DB
 PYTHONPATH=worker python3 -m meeting_archive_worker.service --db WORKER_DB
 ```
 
@@ -45,6 +46,13 @@ transcription model. `TranscriptProcessor` provides the separate-channel merge
 seam: it preserves `microphone` or `incoming` as `channel_origin`, independently
 of any optional diarization speaker label.
 
+It transcribes the incoming track first. If anyone on it spoke, the whole
+microphone track is one speaker, `microphone:SPEAKER_00`, because Mike wears
+headphones on calls and the mic only hears him. pyannote still runs once on
+the mic, held to one speaker, purely for that voice embedding so profile
+matching can name him. A recording with no incoming speech, like an in-person
+meeting, has its microphone diarized as before.
+
 The optional Bruce adapter is `meeting_archive_worker.processor:process`.
 It imports faster-whisper and pyannote only when a job runs. Configure `HF_HOME`
 on CannMedia and supply `HF_TOKEN` to enable diarization. With no token it
@@ -55,11 +63,18 @@ smoke test is
 `python -c 'import faster_whisper, pyannote.audio'`; real model success still
 requires a representative fixture benchmark on Bruce.
 
-The service keeps media processing and Notion publication in separate durable
-SQLite states. A Notion outage retries publication with backoff and does not
-run transcription or playback generation again. Credentials are read only from
-`MEETING_ARCHIVE_NOTION_TOKEN`, `MEETING_ARCHIVE_NOTION_DATA_SOURCE`, and
-`HF_TOKEN`; the worker never includes them in status or result JSON.
+After the transcript, the adapter builds `playback/meeting.mp4` for review
+excerpts and the viewer, with a `meeting-playback.json` receipt so a retry
+reuses it. Both audio tracks are mixed on the transcript's capture clock. A
+bundle with video, from before v2, also gets H.264 video. An audio-only
+bundle gets an AAC-only MP4.
+
+The service keeps media processing, AI summaries and Notion publication in
+separate durable SQLite states. A Notion outage retries publication with
+backoff and does not run transcription or playback generation again.
+Credentials are read only from `MEETING_ARCHIVE_NOTION_TOKEN`,
+`MEETING_ARCHIVE_NOTION_DATA_SOURCE`, `HF_TOKEN` and, for summaries,
+`OPENROUTER_API_KEY`; the worker never includes them in status or result JSON.
 The service accepts `--db WORKER_DB` and optional `--poll-seconds SECONDS`. It
 holds one process lock for that database, while both media processing and
 publication also use durable leases for crash recovery. Heavy processing runs
@@ -80,22 +95,27 @@ required before unusually long recordings can run inside a smaller budget.
 `status` accepts up to 100 repeated `--meeting-id` filters. Its processing jobs,
 counts, and nested publication jobs are scoped to those meetings, which keeps
 the app response bounded as the archive grows. Omitting the filter retains the
-operator-facing full queue response. The `publication` object includes its
-scoped aggregate `phase`, `last_error`, counts, and durable job details.
+operator-facing full queue response. The `publication` and `summary` objects
+include their scoped aggregate `phase`, `last_error`, counts, and durable job
+details. Each processing job also carries the meeting's current display
+`title`, the one Notion and search show, so the app can follow AI titles and
+renames made on Bruce.
 
 `retry --meeting-id UUID` is an idempotent operator action. It releases only a
 processing job in `retry_wait` or `permanent_failure`, or an errored publication
-job in `retry_wait`. It never takes a live lease and never moves succeeded
-processing back to ready, so a Notion retry cannot retranscribe the meeting.
-The JSON response identifies the processing and optional publication stage and
-whether this call changed either queue.
+job in `retry_wait`, or a summary in `retry_wait` or `permanent_failure` (with
+a fresh attempt budget). It never takes a live lease and never moves succeeded
+processing back to ready, so a Notion or summary retry cannot retranscribe the
+meeting. The JSON response identifies the processing, optional publication and
+optional summary stage and whether this call changed any queue.
 
 `rename --meeting-id UUID --title TEXT --archive-root ROOT --db WORKER_DB` sets
 a meeting's display title without touching the manifest-hashed `metadata.json`.
-It atomically writes `title.json` beside it, which Notion and the viewer prefer
-over the captured title, and queues a Notion republish once processing has
-succeeded. Titles are trimmed, at most 200 characters, with no control
-characters. It is idempotent and prints
+It atomically writes `title.json` beside it, with `"source": "user"`, which
+Notion, search and the viewer prefer over the captured title, and queues a
+Notion republish once processing has succeeded. A rename always wins: an AI
+title never replaces it, then or later. Titles are trimmed, at most 200
+characters, with no control characters. It is idempotent and prints
 `{"schema_version":1,"meeting_id":...,"title":...}`.
 
 After `accept` commits a receipt it removes the staged copy at
@@ -111,37 +131,128 @@ case-insensitive substring in each accepted meeting's transcript and prints
 newest meeting first, at most 5 matches per meeting and `N` meetings (default
 20, maximum 100). Queries are trimmed and must be 2 to 200 characters.
 
-Confirming a speaker name rewrites
+Confirming speaker names rewrites
 the JSON and Markdown views with fsync plus atomic replacement, then requests a
 fresh idempotent Notion publication without retranscribing media.
 
 `review-speakers` returns nullable confirmed, automatic, and tentative names,
-cosine similarity and separation values, whether an embedding exists, three timestamped excerpts
-per diarized speaker, an optional absolute playback path, and normalized
-calendar candidate objects. `identify` uses the saved observation automatically
-and enrolls it only after that explicit confirmation.
+the kind of each automatic name (`strong`, `own_microphone` or `same_meeting`),
+cosine similarity and separation values, whether an embedding exists, the three
+wordiest timestamped lines per diarized speaker in the order they were said, an
+optional absolute playback path, and normalized
+calendar candidate objects. Candidates are the top-level `attendees` the app
+writes for the calendar event it matched, each `{name, email, response}`. A
+bundle without that list falls back to the attendees of its only event under
+`calendar`, and suggests nobody when there were several.
 
-Strong matches retain the 0.82 cosine / 0.08 runner-up margin gate and require
-an explicitly confirmed source meeting. Review-only tentative suggestions use
-0.65 / 0.08 and at least two distinct confirmed source meetings. These are
-engineering defaults, not calibrated probabilities or a completed human
-recognition accuracy benchmark. Matching excludes the current meeting across
-all revisions. Profile provenance is migrated from unambiguous existing
-assignments and observations; repeated confirmations update one source profile.
+`identify-speakers` is what the app's **Save names** runs. `--names` is a JSON
+object of speaker ID to name; every name is saved in one transaction or none
+is, and the reply lists exactly what was saved,
+`{"schema_version":1,"meeting_id":"UUID","manifest_revision":1,"speakers":[{"speaker_id":"incoming:SPEAKER_00","name":"Name","voice_profile_enrolled":true}]}`.
+`identify` saves one name the same way. Both use each speaker's saved
+observation and enroll it only because Mike saved that name. A speaker whose
+pyannote embedding is empty, non-finite or all zeros has no embedding: it is
+still reviewed, but never matched or enrolled, and the rest of the job carries
+on.
 
-Only strong matches are written as transcript names, with `name_source` set to
-`voice_match`. Explicit corrections use `confirmed`. Tentative matches stay in
-the review evidence. The service retries durable speaker refresh requests so
-interrupted transcript or Notion updates recover without retranscribing or
-enrolling predictions. Per-meeting locks serialize review/confirmation writes.
+Matching gates come from Mike's own voices on Bruce on 2 Oct 2026: 22 confirmed
+voices from 9 meetings. Two different people scored at most 0.654 against each
+other across meetings and 0.640 within one meeting; the same person scored
+anywhere from 0.04 to 0.82, because short and split voices give noisy
+embeddings. So only the mic's single voice is ever named below 0.72:
 
-`vision/build.sh` builds the local Apple Vision OCR helper during Bruce setup.
-Video analysis samples at most 12 frames, three per speaker, within a shared
-20-second budget. It compares text only against previously confirmed full names
-and calendar attendee names. `video_label` and `active_speaker_label` evidence
-is cached separately with video/turn/candidate provenance, never used to lower
-voice thresholds or automatically name a speaker. Missing OCR tools and failed
-frame reads do not block transcription or archiving. See [vision/README.md](vision/README.md).
+| Rule | Gate | Result |
+| --- | --- | --- |
+| Voice matches someone confirmed in one meeting | 0.82, margin 0.08 | Named automatically |
+| Voice matches someone confirmed in two or more meetings | 0.72, margin 0.08 | Named automatically |
+| Voice is close to someone confirmed in two or more meetings | 0.65, margin 0.08 | Suggested only |
+| The only voice on the mic is its usual owner | 0.65, margin 0.08 | Named automatically |
+| Voice matches one Mike saved in the same meeting | 0.72, margin 0.08 | Named automatically |
+
+The mic's owner is whoever Mike confirmed on the microphone in the most
+meetings; other people heard through his mic scored at most 0.612 against him,
+and his own mic tracks 0.72 to 0.96. When two rules name a voice differently it
+is only a suggestion. Leaving out each confirmed voice in turn and matching it
+against the rest, these rules named 7 of the 22 automatically, all correctly,
+where the old 0.82 rule named none. These are still not calibrated
+probabilities. Matching excludes the current meeting across all revisions.
+Profile provenance is migrated from unambiguous existing assignments and
+observations; repeated confirmations update one source profile.
+
+Automatic names are written as transcript names with `name_source` set to
+`voice_match` and count as reviewed; they are recomputed on every refresh and
+never enrolled. Explicit corrections use `confirmed`. Tentative matches stay in
+the review evidence. Saving a name also queues a refresh of every other accepted
+meeting with an unnamed voice within 0.57 of the saved voice, or of any sample
+of someone whose confirmed meetings crossed two or who became or stopped being
+the mic's owner, so the service updates those names in the background. When the matching rules change
+(`MATCHING_RULES_VERSION`), the service queues one refresh of every meeting
+with an unnamed voice, so older meetings get the new rules without being
+opened. On 2 Oct that takes Bruce from 12 voices needing names to 9. The
+service retries durable speaker refresh requests so interrupted transcript or
+Notion updates recover without retranscribing or enrolling predictions.
+Per-meeting locks serialize review/confirmation writes.
+
+The worker no longer reads names off video frames. `review-speakers` still
+returns `evidence_labels` for each speaker, always as an empty list, because
+the app decodes it. A `visual-labels.json` left in an older meeting is ignored.
+
+## AI titles and summaries
+
+With an OpenRouter API key, each meeting gets a short title, three to five
+summary points and any action items, written by Claude from its transcript.
+Without a key the stage is skipped quietly and nothing else changes. To turn
+it on, add `openRouterApiKey` to the protected credentials file (see below),
+then restart with `install-service-bruce.sh --enable`. Nothing extra is
+installed: the worker calls OpenRouter's chat completions API with the
+standard library.
+
+It is its own durable stage on its own service thread. When a transcript is
+written, a summary job is queued. The first start with a key also queues every
+meeting processed earlier. The job sends the transcript, with speaker names or
+labels like "Remote speaker 1", rough timestamps, the source app, date, length
+and calendar attendees, to `anthropic/claude-opus-5.5` at low reasoning
+effort, asking for JSON that fits a strict schema. Set
+`MEETING_ARCHIVE_SUMMARY_MODEL` to use another OpenRouter model. The whole
+transcript is always sent; one too long for a single request fails visibly
+rather than being cut short.
+
+The worker checks the answer against that schema itself, since not every
+provider behind OpenRouter enforces it, then writes it atomically to
+`transcripts/vN/summary.json` with its `schema_version`, `provider`
+(`openrouter`), the `model` it asked for, the `served_by` model OpenRouter
+reports, its `usage` (requests, tokens and `cost` in US dollars, added up
+across any retries) and an `input_sha256` of everything sent. A retry with the
+same transcript and model reuses it without calling OpenRouter. Confirming
+speaker names asks for a fresh summary five minutes after the last name, so it
+can use them. A summary that failed is left to its own backoff, or to `retry`.
+
+An OpenRouter outage never holds up transcription or Notion. The page is
+published without a summary and updated in place once one arrives. Rate limits
+(429), timeouts (408), server errors and network failures retry with backoff
+from 1 minute, doubling to an hour, never sooner than a `Retry-After` header
+asks (up to a day), and become a `permanent_failure` after 8 attempts. Running out of
+credits (402) waits an hour between tries, so a top-up within about seven
+hours lets it carry on by itself. An answer that runs out of room is asked for
+again with 16,000 tokens, and one that isn't valid JSON in the expected shape
+is asked for once more. If the second try doesn't help, the summary fails
+permanently, as a refusal or content filter, a rejected key (401), a
+forbidden request (403) or a bad request (400) does straight away. `retry`
+releases it, for example after fixing the key and restarting.
+
+The AI title replaces only a title nobody chose: the app's default title
+(`title_source` `default`), or, for recordings from before the app recorded a
+source, one matching its old default pattern such as `Meeting 23 Sep 2026 at
+6:47 am`. A calendar title, a title typed in the app and any rename stay. The
+AI title is written through the same `title.json` as `rename`, marked
+`"source": "ai"`, so Notion, search, the viewer and the app pick it up. The app
+adopts Bruce's display title for any meeting the user didn't name there.
+
+Cost is roughly 5 to 15 US cents per meeting on Claude Opus 5.5, at $4 per
+million input tokens and $20 per million output tokens: about 5 cents for a
+half-hour call and 10 to 15 cents for 90 minutes. A meeting whose speakers are
+named after it was summarized is summarized again, so allow about double for
+those. Each `summary.json` records what it actually cost.
 
 ## Bruce background service
 
@@ -186,11 +297,16 @@ Bruce's login Keychain is locked for unattended SSH work. The launcher instead
 loads `/Volumes/CannMedia/MeetingArchive/runtime/secrets/credentials.json`
 from the encrypted archive volume. The directory must be owned by the worker
 user with mode `0700`; the regular file must have mode `0600` and contain the
-approved `huggingFaceToken` and `notionToken` JSON fields. Symlinks, shared
-permissions, unexpected fields, and malformed data are rejected. Values only
-enter the worker's process environment; they are never printed, placed in
-command arguments, or included in the plist/source repository. Provisioning
-requires the user's authorization and occurs separately over encrypted SSH.
+approved `huggingFaceToken` and `notionToken` JSON fields, plus an optional
+`openRouterApiKey`, which becomes `OPENROUTER_API_KEY` and turns on AI titles
+and summaries. Symlinks, shared permissions, unexpected fields, empty values
+and malformed data are rejected. Values only enter the worker's process
+environment; the wrapper first clears any inherited `OPENROUTER_API_KEY`,
+along with the old `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` and
+`ANTHROPIC_BASE_URL`. They are never printed, placed in command arguments, or
+included in the plist/source repository.
+Provisioning requires the user's authorization and occurs separately over
+encrypted SSH.
 
 The scripts never create or copy credentials. If credentials are unavailable,
 the service still starts; affected jobs remain in durable retry state and

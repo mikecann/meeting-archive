@@ -33,6 +33,18 @@ timestamp link uses `t=<seconds>` in its fragment so the private viewer can
 start playback at that turn. Manual and unknown page content remains in place
 because the publisher never replaces or deletes a page's children.
 
+When the meeting has an AI summary (`transcripts/vN/summary.json`, see the
+worker README), a `Summary` heading with its points as bullets, then an
+`Action items` heading with any action items, sit between the description and
+the transcript. Each is an owned block like the rest, its marker carried in a
+link on its own text, and the summary is part of the content fingerprint. A
+summary that arrives after the page was published is inserted straight after
+the description with the API's `position` `after_block`, so it lands above the
+transcript and any notes below stay where they are. A new summary updates
+those blocks in place, adds or trashes only the points that changed, and
+never duplicates them. A page without a summary is published exactly as
+before.
+
 `notion-receipt.json` is written atomically inside the archive after the page
 and all owned blocks are confirmed. It records the page ID, owned block IDs,
 and a content fingerprint. If metadata or transcript speaker assignments are

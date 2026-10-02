@@ -23,7 +23,7 @@ from .media_validation import MediaValidationError
 from .model_processor import _write_transcript_artifacts
 from .queue import Job, JobQueue, QueueConflict
 from .speakers import SpeakerRegistry
-from .speaker_evidence import automatic_names, refresh_speaker_matches, video_label_evidence
+from .speaker_evidence import automatic_names, refresh_speaker_matches
 
 
 class PermanentProcessingError(RuntimeError):
@@ -67,18 +67,40 @@ def _load_processor(specification: str) -> Callable[[Path, Job], None]:
 
 
 def _calendar_candidates(metadata: dict[str, Any]) -> list[dict[str, str | None]]:
+    from .summaries import matched_event_attendees
+
     result = []
-    for raw in metadata.get("attendees", []):
+    for raw in matched_event_attendees(metadata):
         if isinstance(raw, str) and raw.strip():
             result.append({"name": raw.strip(), "email": None, "response_status": None, "source": None})
         elif isinstance(raw, dict) and isinstance(raw.get("name"), str) and raw["name"].strip():
+            # The app calls it "response": EKParticipantStatus's raw value.
+            response = raw.get("response", raw.get("response_status"))
             result.append({
                 "name": raw["name"].strip(),
                 "email": raw.get("email") if isinstance(raw.get("email"), str) else None,
-                "response_status": raw.get("response_status") if isinstance(raw.get("response_status"), str) else None,
+                "response_status": response if isinstance(response, str) else None,
                 "source": raw.get("source") if isinstance(raw.get("source"), str) else None,
             })
     return result
+
+
+def _excerpt_turns(turns: list[dict[str, Any]], speaker: str, limit: int = 3) -> list[dict[str, Any]]:
+    """The speaker's wordiest lines, in the order they were said.
+
+    The first lines are often "Yeah" or "Hi" said over someone else, and the
+    playback mixes both tracks, so they mostly play the other person.
+    """
+    spoken = [turn for turn in turns if turn.get("speaker") == speaker]
+    wordiest = sorted(
+        enumerate(spoken),
+        key=lambda item: (-len(str(item[1].get("text", "")).split()), item[0]),
+    )[:limit]
+    return [turn for _, turn in sorted(wordiest, key=lambda item: item[0])]
+
+
+#: Seconds a voice must speak before the menu asks Mike to name it.
+MINIMUM_SPEECH_TO_ASK_SECONDS = 15.0
 
 
 def _speaker_counts_for_status(
@@ -140,24 +162,37 @@ def _speaker_counts_for_status(
                        for turn in transcript["turns"] if turn.get("speaker") == speaker)
             }
             # A name appearing in text alone is not evidence of a completed
-            # review. Require a persisted strong match and recheck its explicit
-            # source profiles without enrolling or migrating anything here.
-            for speaker, name in automatic_names(transcript).items():
-                observation = connection.execute(
-                    "SELECT embedding_json, model_id FROM observed_voices "
-                    "WHERE meeting_id=? AND manifest_revision=? AND speaker_id=?",
-                    (job["meeting_id"], job["manifest_revision"], speaker),
-                ).fetchone()
-                if observation:
-                    match = SpeakerRegistry.review_match_from_connection(
-                        connection, json.loads(observation[0]), model_id=observation[1],
-                        exclude_meeting_id=job["meeting_id"],
-                    )
-                    if match["automatic_name"] == name:
-                        confirmed_ids.add(speaker)
+            # review. Require a persisted automatic name and recheck it against
+            # the confirmed voices without enrolling or migrating anything here.
+            automatic = automatic_names(transcript)
+            if automatic:
+                matches = SpeakerRegistry.meeting_matches_from_connection(
+                    connection,
+                    job["meeting_id"],
+                    job["manifest_revision"],
+                    sorted(speaker_ids),
+                    targets=sorted(automatic),
+                )
+                confirmed_ids.update(
+                    speaker for speaker, name in automatic.items()
+                    if matches.get(speaker, {}).get("automatic_name") == name
+                )
     except (OSError, sqlite3.Error, ValueError, TypeError):
         return None
-    return len(speaker_ids), len(speaker_ids - confirmed_ids)
+    # A voice heard for a few seconds is rarely worth asking about, so it
+    # doesn't count towards the menu's "needs a name". Review still lists it.
+    # A voice whose length can't be told is still asked about.
+    speech: dict[str, float] = {}
+    for turn in transcript["turns"]:
+        speaker_id = turn.get("speaker")
+        if speaker_id is None:
+            continue
+        try:
+            speech[speaker_id] = speech.get(speaker_id, 0.0) + max(0.0, float(turn["end"]) - float(turn["start"]))
+        except (KeyError, TypeError, ValueError):
+            speech[speaker_id] = float("inf")
+    waiting = {speaker for speaker in speaker_ids - confirmed_ids if speech.get(speaker, 0.0) >= MINIMUM_SPEECH_TO_ASK_SECONDS}
+    return len(speaker_ids), len(waiting)
 
 
 def _add_speaker_counts_to_status(status: dict[str, Any], database: Path) -> None:
@@ -165,6 +200,17 @@ def _add_speaker_counts_to_status(status: dict[str, Any], database: Path) -> Non
         counts = _speaker_counts_for_status(job, database)
         if counts is not None:
             job["total_speaker_count"], job["unconfirmed_speaker_count"] = counts
+
+
+def _add_titles_to_status(status: dict[str, Any]) -> None:
+    """The title Notion and search show, so the app can follow AI titles and renames."""
+    from .titles import display_title
+
+    for job in status["jobs"]:
+        archive = Path(job["archive_path"])
+        title = display_title(archive) if archive.is_absolute() else None
+        if title is not None:
+            job["title"] = title
 
 
 class _Heartbeat:
@@ -307,6 +353,18 @@ def parser() -> argparse.ArgumentParser:
     identify.add_argument("--speaker-id", required=True)
     identify.add_argument("--name", required=True)
     identify.add_argument("--db", type=Path, required=True)
+    identify_speakers = commands.add_parser(
+        "identify-speakers",
+        help="save names for several speakers of one meeting together",
+    )
+    identify_speakers.add_argument("--meeting-id", required=True)
+    identify_speakers.add_argument("--revision", type=int, required=True)
+    identify_speakers.add_argument(
+        "--names",
+        required=True,
+        help='JSON object of speaker ID to name, like {"incoming:SPEAKER_00": "Micah"}',
+    )
+    identify_speakers.add_argument("--db", type=Path, required=True)
     locate = commands.add_parser("locate")
     locate.add_argument("--meeting-id", required=True)
     locate.add_argument("--archive-root", type=Path, required=True)
@@ -332,6 +390,37 @@ def _accepted_archive_path(database: Path, archive_root: Path, meeting_id: str) 
     if not path.is_absolute():
         path = archive_root / path
     return path
+
+
+#: More speakers than any meeting has, so a bad request can't grow unbounded.
+MAXIMUM_NAMES_PER_SAVE = 100
+
+
+def _names_argument(raw: str) -> dict[str, str]:
+    try:
+        names = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"--names must be a JSON object: {error}") from error
+    if not isinstance(names, dict) or not names or len(names) > MAXIMUM_NAMES_PER_SAVE:
+        raise ValueError(f"--names must name between 1 and {MAXIMUM_NAMES_PER_SAVE} speakers.")
+    if not all(isinstance(value, str) for value in names.values()):
+        raise ValueError("Every name in --names must be a string.")
+    return names
+
+
+def _save_names(database: Path, meeting_id: str, revision: int, names: dict[str, str]) -> dict[str, bool]:
+    """Confirm names together, then bring this meeting's transcript up to date."""
+    from .speaker_refresh import reconcile_speaker_refresh
+
+    enrolled = SpeakerRegistry(database).confirm_observations(meeting_id, revision, names)
+    acknowledgement = JobQueue(database).acceptance(meeting_id)
+    refreshed = reconcile_speaker_refresh(database, meeting_id, revision)
+    if acknowledgement and not refreshed:
+        raise ValueError(
+            ("The names are" if len(names) > 1 else "The name is")
+            + " saved. Updating the transcript is queued for retry on Bruce.",
+        )
+    return enrolled
 
 
 def _rename(args: argparse.Namespace) -> int:
@@ -393,30 +482,36 @@ def main(argv: list[str] | None = None) -> int:
             } if args.meeting_id else None
             status = JobQueue(args.db).status(meeting_ids)
             _add_speaker_counts_to_status(status, Path(args.db))
+            _add_titles_to_status(status)
             from .service import PublicationQueue
+            from .summaries import SummaryQueue
 
             processing_job_ids = {int(job["id"]) for job in status["jobs"]}
-            status["publication"] = PublicationQueue(args.db).status(
-                processing_job_ids if meeting_ids is not None else None,
-            )
+            scope = processing_job_ids if meeting_ids is not None else None
+            status["publication"] = PublicationQueue(args.db).status(scope)
+            status["summary"] = SummaryQueue(args.db).status(scope)
             _print_json(status)
             return 0
         if args.command == "retry":
             meeting_id = str(uuid.UUID(args.meeting_id)).lower()
             processing = JobQueue(args.db).retry_failed(meeting_id)
             publication = None
+            summary = None
             if processing["state"] == "succeeded":
                 from .service import PublicationQueue
+                from .summaries import SummaryQueue
 
                 publication = PublicationQueue(args.db).retry_failed(processing["job_id"])
+                summary = SummaryQueue(args.db).retry_failed(processing["job_id"])
             _print_json({
                 "schema_version": 1,
                 "meeting_id": meeting_id,
-                "retried": processing["retried"] or bool(
-                    publication and publication["retried"],
-                ),
+                "retried": processing["retried"]
+                or bool(publication and publication["retried"])
+                or bool(summary and summary["retried"]),
                 "processing": processing,
                 "publication": publication,
+                "summary": summary,
             })
             return 0
         if args.command == "process-ready":
@@ -440,20 +535,19 @@ def main(argv: list[str] | None = None) -> int:
             reconcile_speaker_refresh(args.db, transcript["meeting_id"], args.revision)
             speaker_ids = sorted({turn["speaker"] for turn in transcript["turns"] if "speaker" in turn})
             metadata = json.loads((args.archive_dir / "metadata.json").read_text(encoding="utf-8"))
-            visual_evidence = video_label_evidence(args.archive_dir, transcript, registry)
             speakers = []
+            playback = args.archive_dir / "playback" / "meeting.mp4"
+            playback_path = str(playback) if playback.is_file() else None
             for value in speaker_ids:
                 observation = registry.observation_record(transcript["meeting_id"], args.revision, value)
                 match = transcript["speaker_matches"].get(value, {})
                 excerpts = [
                     {
                         **{key: turn[key] for key in ("start", "end", "text", "channel_origin")},
-                        "playback_path": str(args.archive_dir / "playback" / "meeting.mp4")
-                        if (args.archive_dir / "playback" / "meeting.mp4").is_file()
-                        else None,
+                        "playback_path": playback_path,
                     }
-                    for turn in transcript["turns"] if turn.get("speaker") == value
-                ][:3]
+                    for turn in _excerpt_turns(transcript["turns"], value)
+                ]
                 speakers.append({
                     "speaker_id": value, "name": assignments.get(value),
                     "suggested_name": match.get("suggested_name"),
@@ -463,20 +557,28 @@ def main(argv: list[str] | None = None) -> int:
                     "suggestion_margin": match.get("suggestion_margin"),
                     "confirmation_count": match.get("confirmation_count", 0),
                     "embedding_available": observation is not None, "excerpts": excerpts,
-                    "evidence_labels": visual_evidence.get(value, []),
+                    # Names are no longer read from video frames. The app still
+                    # decodes this field, so it stays as an empty list.
+                    "evidence_labels": [],
                 })
             _print_json({"schema_version": 1, "meeting_id": transcript["meeting_id"], "manifest_revision": args.revision, "speakers": speakers, "calendar_candidates": _calendar_candidates(metadata)})
             return 0
         if args.command == "identify":
-            from .speaker_refresh import reconcile_speaker_refresh
-
-            registry = SpeakerRegistry(args.db)
-            enrolled = registry.confirm_observation(args.meeting_id, args.revision, args.speaker_id, args.name)
-            acknowledgement = JobQueue(args.db).acceptance(args.meeting_id)
-            refreshed = reconcile_speaker_refresh(args.db, args.meeting_id, args.revision)
-            if acknowledgement and not refreshed:
-                raise ValueError("The name is saved. Updating the transcript is queued for retry on Bruce.")
-            _print_json({"schema_version": 1, "confirmed": True, "meeting_id": args.meeting_id, "manifest_revision": args.revision, "speaker_id": args.speaker_id, "name": args.name, "voice_profile_enrolled": enrolled})
+            enrolled = _save_names(args.db, args.meeting_id, args.revision, {args.speaker_id: args.name})
+            _print_json({"schema_version": 1, "confirmed": True, "meeting_id": args.meeting_id, "manifest_revision": args.revision, "speaker_id": args.speaker_id, "name": args.name, "voice_profile_enrolled": enrolled[args.speaker_id]})
+            return 0
+        if args.command == "identify-speakers":
+            names = _names_argument(args.names)
+            enrolled = _save_names(args.db, args.meeting_id, args.revision, names)
+            _print_json({
+                "schema_version": 1,
+                "meeting_id": args.meeting_id,
+                "manifest_revision": args.revision,
+                "speakers": [
+                    {"speaker_id": speaker, "name": name.strip(), "voice_profile_enrolled": enrolled[speaker]}
+                    for speaker, name in sorted(names.items())
+                ],
+            })
             return 0
         if args.command == "locate":
             path = _accepted_archive_path(args.db, args.archive_root, args.meeting_id)

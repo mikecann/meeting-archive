@@ -33,10 +33,24 @@ if [[ -e "$STAGING" ]]; then
   echo "Staging already exists: $STAGING. Inspect it before retrying." >&2
   exit 1
 fi
-mkdir -p "$STAGING/Contents/MacOS" "$STAGING/Contents/Library/LaunchAgents"
+mkdir -p "$STAGING/Contents/MacOS" "$STAGING/Contents/Resources" "$STAGING/Contents/Library/LaunchAgents"
 cp "$BIN_DIR/meeting-archive-app" "$STAGING/Contents/MacOS/"
 cp "$SCRIPT_DIR/Resources/Info.plist" "$STAGING/Contents/Info.plist"
 cp "$SCRIPT_DIR/Resources/com.mikerosoft.meeting-archive.plist" "$STAGING/Contents/Library/LaunchAgents/"
+# The app icon is drawn in icons/meeting-archive.svg and rendered to the PNG.
+ICON_SOURCE="$SCRIPT_DIR/icons/meeting-archive.png"
+if [[ -f "$ICON_SOURCE" ]]; then
+  ICONSET_ROOT="$(mktemp -d)"
+  ICONSET="$ICONSET_ROOT/meeting-archive.iconset"
+  mkdir -p "$ICONSET"
+  for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$ICON_SOURCE" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+    double=$((size * 2))
+    sips -z "$double" "$double" "$ICON_SOURCE" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$ICONSET" -o "$STAGING/Contents/Resources/meeting-archive.icns"
+  rm -rf "$ICONSET_ROOT"
+fi
 # A stable signing identity keeps the login item valid across rebuilds. Ad-hoc
 # signatures change with every build, and launchd then refuses to start the
 # background agent (EX_CONFIG) until it is re-registered by hand.

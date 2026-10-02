@@ -68,6 +68,11 @@ enum SpoolBundle {
         try base.validate()
         var metadata = try JSONSerialization.jsonObject(with: base.canonicalData()) as! [String: Any]
         metadata["title"] = record.title
+        // Bruce only replaces a "default" title with an AI one. Without a
+        // source, as on older records, it goes by the app's default pattern.
+        if let titleSource = record.titleSource {
+            metadata["title_source"] = titleSource.rawValue
+        }
         metadata["capture"] = try JSONSerialization.jsonObject(with: ModelCodec.encoder.encode(record))
         // Calendar attendees remain suggestions for the voice review UI.
         for (filename, key) in [("calendar.json", "calendar"), ("tracks.json", "tracks")] {
@@ -75,6 +80,11 @@ enum SpoolBundle {
                 metadata[key] = try JSONSerialization.jsonObject(with: data)
             }
         }
+        // The worker suggests names from top-level "attendees". v1 only wrote
+        // every nearby event under "calendar", so suggestions never arrived.
+        // An empty list says "no match"; leaving it out would let the worker
+        // fall back to a lone nearby event that isn't this meeting.
+        metadata["attendees"] = try JSONSerialization.jsonObject(with: ModelCodec.encoder.encode(matchedAttendees(in: directory, record: record)))
         let metadataURL = directory.appendingPathComponent("metadata.json")
         try JSONSerialization.data(withJSONObject: metadata, options: [.sortedKeys, .withoutEscapingSlashes]).write(to: metadataURL, options: .atomic)
         let files = try (media + [(metadataURL, .metadata)]).map { url, kind in
@@ -85,6 +95,34 @@ enum SpoolBundle {
         try manifest.validate()
         try manifest.canonicalData().write(to: manifestURL, options: .atomic)
         return manifest
+    }
+
+    /// The events around a call, and the one it matched, if any. The title
+    /// came from that match, so the attendees do too. Ranking again against
+    /// the part's end would count the release grace after the call.
+    static func saveCalendar(_ events: [CalendarSuggestion], match: CalendarSuggestion?, in directory: URL) throws {
+        try ModelCodec.encoder.encode(events).write(to: directory.appendingPathComponent("calendar.json"), options: .atomic)
+        try ModelCodec.encoder.encode(CalendarMatch(eventID: match?.id))
+            .write(to: directory.appendingPathComponent(calendarMatchName), options: .atomic)
+    }
+
+    /// Only the event that clearly matches the recording counts. Attendees of
+    /// a neighbouring event are not people who might have spoken.
+    static func matchedAttendees(in directory: URL, record: MeetingRecord) throws -> [CalendarAttendee] {
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("calendar.json")) else { return [] }
+        let events = try ModelCodec.decoder.decode([CalendarSuggestion].self, from: data)
+        if let saved = try? Data(contentsOf: directory.appendingPathComponent(calendarMatchName)) {
+            let match = try ModelCodec.decoder.decode(CalendarMatch.self, from: saved)
+            return events.first { $0.id == match.eventID }?.attendees ?? []
+        }
+        // A bundle saved before the match was kept.
+        return CalendarRanking.best(events, start: record.startedAt, end: record.endedAt)?.attendees ?? []
+    }
+
+    private static let calendarMatchName = "calendar-match.json"
+
+    private struct CalendarMatch: Codable {
+        var eventID: String?
     }
 
     static func hash(_ url: URL) throws -> String {

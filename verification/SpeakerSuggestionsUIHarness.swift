@@ -14,8 +14,8 @@ private struct FixtureSpeakerClient: SpeakerReviewServing {
         return response
     }
 
-    func identify(meetingID: UUID, revision: Int, speakerID: String, name: String, configuration: ArchiveTransferConfiguration) async throws -> SpeakerIdentificationResponse {
-        throw SpeakerReviewError.invalidResponse("This verification window does not save speaker identities.")
+    func saveNames(meetingID: UUID, revision: Int, names: [String: String], configuration: ArchiveTransferConfiguration) async throws -> SavedSpeakerNamesResponse {
+        throw SpeakerReviewError.invalidResponse("This verification window does not save speaker names.")
     }
 
     func fetchPlayback(meetingID: UUID, destination: URL, configuration: ArchiveTransferConfiguration) async throws -> URL { video }

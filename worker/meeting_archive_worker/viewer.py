@@ -28,6 +28,10 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8791
 DEFAULT_ALLOWED_LOGIN = "mike.cann@gmail.com"
 MAX_METADATA_BYTES = 1024 * 1024
+MAX_PLAYBACK_RECEIPT_BYTES = 64 * 1024
+# The manifest kinds of the audio tracks a playback receipt can list. A tuple,
+# so a malformed kind such as a list is compared rather than hashed.
+AUDIO_SOURCE_KINDS = ("microphone_audio", "incoming_audio")
 MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
 MAX_TRANSCRIPT_TURNS = 20_000
 STREAM_CHUNK_BYTES = 64 * 1024
@@ -353,6 +357,24 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
             return None
         return title_override(record)
 
+    def _playback_is_audio_only(self, acceptance: Acceptance) -> bool:
+        # The worker's receipt lists what went into meeting.mp4. Without a
+        # readable one, or with a source that isn't known audio, keep the
+        # video player older meetings always had.
+        try:
+            receipt = _read_json(
+                self.viewer.open_generated(acceptance, ("playback", "meeting-playback.json")),
+                MAX_PLAYBACK_RECEIPT_BYTES,
+            )
+        except (ViewerNotFound, ViewerTooLarge):
+            return False
+        sources = receipt.get("sources") if isinstance(receipt, dict) else None
+        return (
+            isinstance(sources, list)
+            and bool(sources)
+            and all(isinstance(source, dict) and source.get("kind") in AUDIO_SOURCE_KINDS for source in sources)
+        )
+
     def _landing_page(self, acceptance: Acceptance) -> tuple[bytes, str]:
         metadata = _read_json(
             self.viewer.open_generated(acceptance, ("metadata.json",)),
@@ -411,6 +433,8 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
         nonce = secrets.token_urlsafe(18)
         meeting_id = acceptance.meeting_id
         playback_path = f"/meeting/{meeting_id}/playback.mp4"
+        # An audio-only recording in a video element is a large black box.
+        player = "audio" if self._playback_is_audio_only(acceptance) else "video"
         app_path = f"meetingarchive://meeting/{meeting_id}"
         script = (
             "const player=document.getElementById('playback');"
@@ -430,6 +454,7 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
             "body{font:16px system-ui,sans-serif;line-height:1.5;margin:0;color:#171717;background:#f6f6f4}"
             "main{max-width:900px;margin:0 auto;padding:32px 20px 64px}"
             "h1{line-height:1.15;margin-bottom:8px}video{display:block;width:100%;max-height:70vh;background:#000;margin:24px 0}"
+            "audio{display:block;width:100%;margin:24px 0}"
             "ol{padding-left:0;list-style:none}li{padding:12px 0;border-bottom:1px solid #ddd}"
             ".timestamp{display:inline-block;min-width:4.5rem;font-variant-numeric:tabular-nums}"
         )
@@ -439,7 +464,7 @@ class ViewerRequestHandler(BaseHTTPRequestHandler):
             f"<title>{title}</title><style nonce=\"{nonce}\">{style}</style></head>"
             f"<body><main><h1>{title}</h1><p>{started_at} · {duration}</p>"
             f'<p><a href="{app_path}">Open in Meeting Archive</a></p>'
-            f'<video id="playback" controls preload="metadata" src="{playback_path}"></video>'
+            f'<{player} id="playback" controls preload="metadata" src="{playback_path}"></{player}>'
             f'<section id="transcript"><h2>Transcript</h2><ol>{"".join(turns)}</ol></section>'
             f'<script nonce="{nonce}">{script}</script></main></body></html>'
         )

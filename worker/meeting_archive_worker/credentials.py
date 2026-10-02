@@ -12,6 +12,8 @@ from collections.abc import MutableMapping
 
 DEFAULT_PATH = Path("/Volumes/CannMedia/MeetingArchive/runtime/secrets/credentials.json")
 ACCOUNTS = {"huggingFaceToken": "HF_TOKEN", "notionToken": "MEETING_ARCHIVE_NOTION_TOKEN"}
+# AI titles and summaries are off until this key is added to the file.
+OPTIONAL_ACCOUNTS = {"openRouterApiKey": "OPENROUTER_API_KEY"}
 
 
 class CredentialError(RuntimeError):
@@ -35,8 +37,15 @@ def load_credentials(path: Path = DEFAULT_PATH, environment: MutableMapping[str,
         if len(raw) > 16384:
             raise CredentialError("Credential file exceeds the expected size limit.")
         values = json.loads(raw)
-        if not isinstance(values, dict) or set(values) != set(ACCOUNTS) or not all(isinstance(value, str) and value.strip() for value in values.values()):
-            raise CredentialError("Credential file must contain the two approved nonempty accounts.")
+        if (
+            not isinstance(values, dict)
+            or not set(ACCOUNTS) <= set(values) <= set(ACCOUNTS) | set(OPTIONAL_ACCOUNTS)
+            or not all(isinstance(value, str) and value.strip() for value in values.values())
+        ):
+            raise CredentialError(
+                "Credential file must contain the approved nonempty accounts: huggingFaceToken, "
+                "notionToken and optionally openRouterApiKey.",
+            )
     except CredentialError:
         raise
     except (OSError, ValueError, UnicodeError):
@@ -46,8 +55,8 @@ def load_credentials(path: Path = DEFAULT_PATH, environment: MutableMapping[str,
     finally:
         if descriptor is not None:
             os.close(descriptor)
-    for account, variable in ACCOUNTS.items():
-        if not environment.get(variable):
+    for account, variable in {**ACCOUNTS, **OPTIONAL_ACCOUNTS}.items():
+        if account in values and not environment.get(variable):
             environment[variable] = values[account]
 
 

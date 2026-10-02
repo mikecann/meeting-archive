@@ -80,9 +80,11 @@ class RenameTests(unittest.TestCase):
         record = json.loads((self.archive / "title.json").read_text(encoding="utf-8"))
         self.assertEqual(record["schema_version"], 1)
         self.assertEqual(record["title"], "Quarterly planning")
+        self.assertEqual(record["source"], "user")
         self.assertIsInstance(record["updated_at"], str)
         after = tree_digest(self.archive)
         after.pop("title.json")
+        after.pop(".title.lock")
         self.assertEqual(after, before)
 
     def test_rename_is_idempotent(self) -> None:
@@ -159,6 +161,157 @@ class EffectiveTitleTests(unittest.TestCase):
         self.assertEqual(len(normalize_title("x" * 200)), 200)
         with self.assertRaises(ValueError):
             normalize_title("x" * 201)
+
+
+class TitleSourceTests(unittest.TestCase):
+    """Which titles a summary may replace: only ones nobody chose."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.archive = Path(self.temporary.name)
+        (self.archive / "manifest.json").write_text(
+            json.dumps({"files": [{"path": "metadata.json"}]}), encoding="utf-8",
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_title_file(self, record: dict) -> None:
+        (self.archive / "title.json").write_text(json.dumps(record), encoding="utf-8")
+
+    def test_app_recorded_sources_decide_for_new_recordings(self) -> None:
+        from meeting_archive_worker.titles import title_is_automatic
+
+        self.assertTrue(title_is_automatic(self.archive, {"title": "Zoom call", "title_source": "default"}))
+        self.assertFalse(title_is_automatic(self.archive, {"title": "Acme catch up", "title_source": "calendar"}))
+        self.assertFalse(title_is_automatic(self.archive, {"title": "Mum's birthday", "title_source": "user"}))
+        self.assertFalse(title_is_automatic(self.archive, {"title": "Zoom call", "title_source": "something new"}))
+
+    def test_older_recordings_without_a_source_are_judged_by_the_default_pattern(self) -> None:
+        from meeting_archive_worker.titles import title_is_automatic
+
+        automatic = [
+            "Meeting 23 Sep 2026 at 6:47 am",
+            "Meeting 21 Sep 2026 at 10:13 pm",
+            "Meeting 21 Sept 2026 at 22:13",
+            "Meeting Sep 21, 2026 at 10:13 PM",
+            # v2 before it recorded title_source.
+            "Zoom call 1 Oct 2026 at 3:15 pm",
+            "Google Chrome call 1 Oct 2026 at 3:15 pm (part 2)",
+        ]
+        chosen = [
+            "Acme catch up",
+            "Meeting with Sam about the budget",
+            "Meeting 23 Sep 2026 at 6:47 am with Sam",
+            "Weekly sync 1 Oct 2026",
+        ]
+        for title in automatic:
+            with self.subTest(title=title):
+                self.assertTrue(title_is_automatic(self.archive, {"title": title}))
+        for title in chosen:
+            with self.subTest(title=title):
+                self.assertFalse(title_is_automatic(self.archive, {"title": title}))
+        self.assertTrue(title_is_automatic(self.archive, {}))
+
+    def test_a_title_file_decides_before_metadata(self) -> None:
+        from meeting_archive_worker.titles import title_is_automatic
+
+        default = {"title": "Zoom call", "title_source": "default"}
+        self.write_title_file({"schema_version": 1, "title": "Renamed", "updated_at": "2026-09-29T00:00:00Z"})
+        self.assertFalse(title_is_automatic(self.archive, default), "a rename from before sources is the user's")
+        self.write_title_file({"schema_version": 1, "title": "Renamed", "source": "user"})
+        self.assertFalse(title_is_automatic(self.archive, default))
+        self.write_title_file({"schema_version": 1, "title": "Budget review", "source": "ai"})
+        self.assertTrue(title_is_automatic(self.archive, default))
+        (self.archive / "title.json").write_text("{broken", encoding="utf-8")
+        self.assertFalse(title_is_automatic(self.archive, default), "never replace a title file it cannot read")
+
+    def test_generated_title_replaces_only_automatic_titles(self) -> None:
+        from meeting_archive_worker.titles import apply_generated_title
+
+        self.assertFalse(apply_generated_title(
+            self.archive, "Budget review", {"title": "Acme catch up", "title_source": "calendar"}, model="m",
+        ))
+        self.assertFalse((self.archive / "title.json").exists())
+        self.assertFalse(apply_generated_title(
+            self.archive, "Budget review", {"title": "Mum's birthday", "title_source": "user"}, model="m",
+        ))
+        self.assertFalse((self.archive / "title.json").exists())
+
+        self.assertTrue(apply_generated_title(
+            self.archive, "  Budget review  ", {"title": "Meeting 23 Sep 2026 at 6:47 am"}, model="claude-opus-5-5",
+        ))
+        record = json.loads((self.archive / "title.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["title"], "Budget review")
+        self.assertEqual(record["source"], "ai")
+        self.assertEqual(record["model"], "claude-opus-5-5")
+        self.assertEqual(effective_title(self.archive, {"title": "Meeting 23 Sep 2026 at 6:47 am"}), "Budget review")
+
+    def test_generated_title_is_idempotent_and_may_update_its_own_title(self) -> None:
+        from meeting_archive_worker.titles import apply_generated_title
+
+        metadata = {"title": "Zoom call", "title_source": "default"}
+        self.assertTrue(apply_generated_title(self.archive, "Budget review", metadata, model="m"))
+        first = (self.archive / "title.json").read_bytes()
+        self.assertFalse(apply_generated_title(self.archive, "Budget review", metadata, model="m"))
+        self.assertEqual((self.archive / "title.json").read_bytes(), first)
+        self.assertTrue(apply_generated_title(self.archive, "Budget review with Sam", metadata, model="m"))
+        self.assertEqual(effective_title(self.archive, metadata), "Budget review with Sam")
+
+    def test_a_user_rename_always_wins_later_too(self) -> None:
+        from meeting_archive_worker.titles import apply_generated_title, write_title
+
+        metadata = {"title": "Zoom call", "title_source": "default"}
+        apply_generated_title(self.archive, "Budget review", metadata, model="m")
+        write_title(self.archive, "Mike's budget chat")
+        record = json.loads((self.archive / "title.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["source"], "user")
+
+        self.assertFalse(apply_generated_title(self.archive, "Budget review v2", metadata, model="m"))
+        self.assertEqual(effective_title(self.archive, metadata), "Mike's budget chat")
+
+    def test_keeping_the_generated_title_by_renaming_to_it_makes_it_the_users(self) -> None:
+        from meeting_archive_worker.titles import apply_generated_title, write_title
+
+        metadata = {"title": "Zoom call", "title_source": "default"}
+        apply_generated_title(self.archive, "Budget review", metadata, model="m")
+        write_title(self.archive, "Budget review")
+
+        record = json.loads((self.archive / "title.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["source"], "user")
+        self.assertFalse(apply_generated_title(self.archive, "Something else", metadata, model="m"))
+
+    def test_rename_waits_for_a_generated_title_being_written(self) -> None:
+        import threading
+
+        from meeting_archive_worker.titles import title_lock, write_title
+
+        started, renamed = threading.Event(), threading.Event()
+
+        def rename() -> None:
+            started.set()
+            write_title(self.archive, "Mine")
+            renamed.set()
+
+        with title_lock(self.archive):
+            thread = threading.Thread(target=rename)
+            thread.start()
+            # Only time the wait once the rename is actually under way.
+            self.assertTrue(started.wait(5))
+            self.assertFalse(renamed.wait(0.3), "a rename must not interleave with a generated title")
+        thread.join(5)
+        self.assertTrue(renamed.is_set())
+        lock = self.archive / ".title.lock"
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o600)
+
+    def test_display_title_reads_bounded_metadata_and_rename(self) -> None:
+        from meeting_archive_worker.titles import display_title
+
+        self.assertIsNone(display_title(self.archive))
+        (self.archive / "metadata.json").write_text(json.dumps({"title": "Zoom call"}), encoding="utf-8")
+        self.assertEqual(display_title(self.archive), "Zoom call")
+        self.write_title_file({"schema_version": 1, "title": "Budget review", "source": "ai"})
+        self.assertEqual(display_title(self.archive), "Budget review")
 
 
 class RenamedPublicationTests(unittest.TestCase):

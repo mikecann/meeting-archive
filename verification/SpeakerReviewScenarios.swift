@@ -11,14 +11,25 @@ private func require(_ condition: @autoclosure () -> Bool, _ message: String) th
     guard condition() else { throw ScenarioFailure(description: message) }
 }
 
+private func saved(meetingID: UUID, revision: Int, names: [String: String]) -> SavedSpeakerNamesResponse {
+    SavedSpeakerNamesResponse(
+        schemaVersion: 1,
+        meetingID: meetingID,
+        manifestRevision: revision,
+        speakers: names.sorted { $0.key < $1.key }.map {
+            .init(speakerID: $0.key, name: $0.value.trimmingCharacters(in: .whitespacesAndNewlines), voiceProfileEnrolled: true)
+        }
+    )
+}
+
 private actor ScenarioReviewService: SpeakerReviewServing {
     let response: SpeakerReviewResponse
-    let identifyFails: Bool
-    private var identifyCalls = 0
+    private var failures: Int
+    private var calls: [[String: String]] = []
 
-    init(response: SpeakerReviewResponse, identifyFails: Bool = false) {
+    init(response: SpeakerReviewResponse, failures: Int = 0) {
         self.response = response
-        self.identifyFails = identifyFails
+        self.failures = failures
     }
 
     func load(
@@ -29,24 +40,18 @@ private actor ScenarioReviewService: SpeakerReviewServing {
         response
     }
 
-    func identify(
+    func saveNames(
         meetingID: UUID,
         revision: Int,
-        speakerID: String,
-        name: String,
+        names: [String: String],
         configuration: ArchiveTransferConfiguration
-    ) async throws -> SpeakerIdentificationResponse {
-        identifyCalls += 1
-        if identifyFails { throw SpeakerReviewError.invalidResponse("fixture confirmation failed") }
-        return SpeakerIdentificationResponse(
-            schemaVersion: 1,
-            confirmed: true,
-            meetingID: meetingID,
-            manifestRevision: revision,
-            speakerID: speakerID,
-            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-            voiceProfileEnrolled: false
-        )
+    ) async throws -> SavedSpeakerNamesResponse {
+        calls.append(names)
+        if failures > 0 {
+            failures -= 1
+            throw SpeakerReviewError.invalidResponse("fixture save failed")
+        }
+        return saved(meetingID: meetingID, revision: revision, names: names)
     }
 
     func fetchPlayback(
@@ -57,12 +62,12 @@ private actor ScenarioReviewService: SpeakerReviewServing {
         destination
     }
 
-    func identifyCallCount() -> Int { identifyCalls }
+    func savedNameCalls() -> [[String: String]] { calls }
 }
 
 private actor ControlledScenarioReviewService: SpeakerReviewServing {
     let response: SpeakerReviewResponse
-    private var identifyStarted = false
+    private var saveStarted = false
     private var startWaiters: [CheckedContinuation<Void, Never>] = []
     private var finishContinuation: CheckedContinuation<Void, Never>?
 
@@ -72,28 +77,24 @@ private actor ControlledScenarioReviewService: SpeakerReviewServing {
         response
     }
 
-    func identify(
-        meetingID: UUID, revision: Int, speakerID: String, name: String,
+    func saveNames(
+        meetingID: UUID, revision: Int, names: [String: String],
         configuration: ArchiveTransferConfiguration
-    ) async throws -> SpeakerIdentificationResponse {
-        identifyStarted = true
+    ) async throws -> SavedSpeakerNamesResponse {
+        saveStarted = true
         let waiters = startWaiters
         startWaiters.removeAll()
         waiters.forEach { $0.resume() }
         await withCheckedContinuation { finishContinuation = $0 }
-        return SpeakerIdentificationResponse(
-            schemaVersion: 1, confirmed: true, meetingID: meetingID,
-            manifestRevision: revision, speakerID: speakerID,
-            name: name.trimmingCharacters(in: .whitespacesAndNewlines), voiceProfileEnrolled: false
-        )
+        return saved(meetingID: meetingID, revision: revision, names: names)
     }
 
-    func waitUntilIdentifyStarted() async {
-        if identifyStarted { return }
+    func waitUntilSaveStarted() async {
+        if saveStarted { return }
         await withCheckedContinuation { startWaiters.append($0) }
     }
 
-    func finishIdentify() {
+    func finishSave() {
         finishContinuation?.resume()
         finishContinuation = nil
     }
@@ -118,11 +119,11 @@ private actor ControlledScenarioPlaybackService: SpeakerReviewServing {
         )
     }
 
-    func identify(
-        meetingID: UUID, revision: Int, speakerID: String, name: String,
+    func saveNames(
+        meetingID: UUID, revision: Int, names: [String: String],
         configuration: ArchiveTransferConfiguration
-    ) async throws -> SpeakerIdentificationResponse {
-        throw SpeakerReviewError.invalidResponse("identify is not part of this fixture")
+    ) async throws -> SavedSpeakerNamesResponse {
+        throw SpeakerReviewError.invalidResponse("saving is not part of this fixture")
     }
 
     func fetchPlayback(
@@ -151,85 +152,123 @@ private enum SpeakerReviewScenarios {
     @MainActor
     static func main() async throws {
         let meetingID = UUID()
-        let reopened = response(
+
+        // A call where one person was split into two voices, the mic's owner
+        // was recognized, and one voice is unknown.
+        let slackCall = response(
             meetingID: meetingID,
-            speakers: [speaker("saved", name: "Michael"), speaker("pending", suggestion: "Alex")]
+            speakers: [
+                speaker("incoming:SPEAKER_00", name: "Micah"),
+                speaker("incoming:SPEAKER_01"),
+                speaker("incoming:SPEAKER_02"),
+                speaker("microphone:SPEAKER_00", automaticName: "Mike Cann", suggestionKind: "own_microphone", confirmationCount: 6),
+            ]
         )
+        let service = ScenarioReviewService(response: slackCall)
         var reviewChanges = 0
         let model = SpeakerReviewModel(
             meetingID: meetingID,
             revision: 3,
             configuration: .bruce,
-            client: ScenarioReviewService(response: reopened),
+            client: service,
             onReviewChanged: { reviewChanges += 1 }
         )
-        try require(!model.canComplete, "review completed before a response loaded")
+        try require(!model.canSave, "review could be saved before it loaded")
         await model.load()
-        try require(model.confirmedSpeakerIDs == ["saved"], "saved name was not restored as confirmed")
-        try require(model.remainingUnconfirmedCount == 1, "reopened pending count was wrong")
+        try require(model.savedNames == ["incoming:SPEAKER_00": "Micah"], "saved name was not restored")
+        try require(model.cards.count == 4, "every distinct voice should start on its own card")
+        try require(
+            model.cards.first.map { model.status(of: $0) } == .unknown,
+            "voices that need a name should come first"
+        )
 
-        let evidence = SpeakerEvidenceLabel(
-            name: "Michael Cann",
-            timestamps: [12.5, 42],
-            source: "video_text"
+        let split = try unwrap(model.card(containing: "incoming:SPEAKER_01"), "split voice has no card")
+        model.setName("micah", forCard: split.id)
+        try require(model.cards.count == 4, "cards merged while a name was still being typed")
+        model.commitName(forCard: split.id)
+        let micah = try unwrap(model.card(containing: "incoming:SPEAKER_00"), "Micah has no card")
+        try require(micah.speakerIDs.count == 2, "the same name did not make one card")
+        try require(micah.name == "Micah", "merging lost the saved spelling")
+        try require(model.status(of: micah) == .typed, "a half-saved person should still need saving")
+
+        let saveFinished = await model.save()
+        let calls = await service.savedNameCalls()
+        try require(saveFinished, "one click did not finish the review")
+        try require(
+            calls == [["incoming:SPEAKER_01": "Micah", "microphone:SPEAKER_00": "Mike Cann"]],
+            "Save names did not send exactly the new and recognized names in one call: \(calls)"
         )
-        let automaticResponse = response(
-            meetingID: meetingID,
-            speakers: [
-                speaker(
-                    "automatic",
-                    suggestion: "Tentative fallback",
-                    automaticName: "Mike Cann",
-                    suggestionKind: "strong",
-                    confirmationCount: 3
-                ),
-                speaker(
-                    "tentative",
-                    suggestion: "Alex Chen",
-                    suggestionKind: "tentative",
-                    evidenceLabels: [evidence]
-                ),
-            ]
+        try require(model.savedNames["incoming:SPEAKER_02"] == nil, "a blank voice was saved")
+        try require(
+            model.cards.filter { model.status(of: $0) == .saved }.count == 2,
+            "saved cards were not shown as saved"
         )
-        let automaticService = ScenarioReviewService(response: automaticResponse)
-        let automatic = SpeakerReviewModel(
+        try require(reviewChanges == 1, "a successful save did not refresh Bruce's status once")
+
+        // Nothing left to save closes without another trip to Bruce.
+        let again = await model.save()
+        let callsAfterAgain = await service.savedNameCalls()
+        try require(again && callsAfterAgain.count == 1, "saving an unchanged review called Bruce")
+
+        // Two voices Bruce suggested as the same person, and one isn't.
+        let suggested = SpeakerReviewModel(
             meetingID: meetingID,
             revision: 3,
             configuration: .bruce,
-            client: automaticService
+            client: ScenarioReviewService(response: response(
+                meetingID: meetingID,
+                speakers: [
+                    speaker("incoming:SPEAKER_00", suggestion: "Sean", suggestionKind: "tentative", confirmationCount: 2),
+                    speaker("incoming:SPEAKER_01", suggestion: "Sean", suggestionKind: "tentative", confirmationCount: 2),
+                ]
+            ))
         )
-        await automatic.load()
-        try require(
-            automatic.drafts["automatic"] == SpeakerReviewDraft(name: "Mike Cann", isPredicted: false),
-            "strong automatic voice did not take priority over a tentative suggestion"
-        )
-        try require(automatic.confirmedSpeakerIDs.contains("automatic"), "strong automatic voice was not complete-capable")
-        try require(
-            automatic.drafts["tentative"] == SpeakerReviewDraft(name: "Alex Chen", isPredicted: true),
-            "tentative suggestion was not presented as pending"
-        )
-        let unchangedAutomaticSave = await automatic.confirm("automatic")
-        let callsAfterUnchangedAutomatic = await automaticService.identifyCallCount()
-        try require(!unchangedAutomaticSave, "unchanged automatic voice tried to enroll again")
-        try require(callsAfterUnchangedAutomatic == 0, "unchanged automatic voice called identify")
+        await suggested.load()
+        try require(suggested.cards.count == 1, "matching suggestions did not share a card")
+        try require(suggested.status(of: suggested.cards[0]) == .suggested, "a suggestion was not flagged")
+        suggested.separate("incoming:SPEAKER_01")
+        try require(suggested.namesToSave == ["incoming:SPEAKER_00": "Sean"], "a separated voice kept the name")
 
-        automatic.setName("Michael Cann", for: "automatic")
-        try require(!automatic.canComplete, "editing an automatic voice left review complete")
-        let editedAutomaticSave = await automatic.confirm("automatic")
-        let callsAfterEditedAutomatic = await automaticService.identifyCallCount()
-        try require(editedAutomaticSave, "edited automatic voice could not be confirmed")
-        try require(callsAfterEditedAutomatic == 1, "edited automatic voice did not call identify exactly once")
-        try require(
-            automatic.response?.speakers.first(where: { $0.speakerID == "automatic" })?.name == "Michael Cann",
-            "explicit edit remained classified as an automatic match"
+        let failing = ScenarioReviewService(
+            response: response(meetingID: meetingID, speakers: [speaker("pending", suggestion: "Alex")]),
+            failures: 1
         )
+        let failed = SpeakerReviewModel(
+            meetingID: meetingID,
+            revision: 3,
+            configuration: .bruce,
+            client: failing,
+            onReviewChanged: { reviewChanges += 1 }
+        )
+        await failed.load()
+        let failedSave = await failed.save()
+        try require(!failedSave, "a failed save reported success")
+        try require(failed.failure != nil, "a failed save was not shown")
+        try require(failed.savedNames.isEmpty, "a failed save marked a name saved")
+        try require(reviewChanges == 1, "a failed save published a review change")
+        let retried = await failed.save()
+        try require(retried && failed.savedNames == ["pending": "Alex"], "Save names did not retry the failed name")
 
-        automatic.selectEvidence(evidence, for: "tentative")
-        try require(automatic.drafts["tentative"]?.name == "Michael Cann", "visible label did not fill the draft")
-        try require(
-            !automatic.confirmedSpeakerIDs.contains("tentative") && !automatic.canComplete,
-            "visible label evidence confirmed a speaker without user confirmation"
+        let controlledClient = ControlledScenarioReviewService(
+            response: response(meetingID: meetingID, speakers: [speaker("pending", suggestion: "Alex")])
         )
+        let controlled = SpeakerReviewModel(
+            meetingID: meetingID,
+            revision: 3,
+            configuration: .bruce,
+            client: controlledClient
+        )
+        await controlled.load()
+        let card = try unwrap(controlled.cards.first, "controlled review has no card")
+        let inFlight = Task { await controlled.save() }
+        await controlledClient.waitUntilSaveStarted()
+        try require(!controlled.canSave, "a second save could start while one was in flight")
+        controlled.setName("Alicia", forCard: card.id)
+        await controlledClient.finishSave()
+        let savedCurrentDraft = await inFlight.value
+        try require(!savedCurrentDraft, "a stale save finished the review")
+        try require(controlled.savedNames == ["pending": "Alex"], "the saved name was not what Bruce saved")
+        try require(controlled.namesToSave == ["pending": "Alicia"], "the newer name was not left to save")
 
         let oldResponse = try JSONDecoder().decode(
             SpeakerReviewResponse.self,
@@ -253,74 +292,16 @@ private enum SpeakerReviewScenarios {
         )
         try require(oldResponse.speakers.first?.automaticName == nil, "old response did not decode without automatic fields")
 
-        let invalidEvidenceResponse = response(
-            meetingID: meetingID,
-            speakers: [
-                speaker(
-                    "invalid-evidence",
-                    evidenceLabels: [SpeakerEvidenceLabel(name: "", timestamps: [-1], source: "video_text")]
-                ),
-            ]
-        )
-        do {
-            try invalidEvidenceResponse.validate(meetingID: meetingID, revision: 3)
-            throw ScenarioFailure(description: "malformed visible label evidence passed validation")
-        } catch is SpeakerReviewError {
-            // Expected: visible labels must have a bounded name and valid time.
-        }
-
-        model.setName("Mike", for: "saved")
-        try require(model.remainingUnconfirmedCount == 2, "edit did not invalidate saved confirmation")
-        let savedEdit = await model.confirm("saved")
-        try require(savedEdit, "edited saved speaker did not confirm")
-        try require(model.remainingUnconfirmedCount == 1, "successful confirmation did not clear one pending speaker")
-        try require(reviewChanges == 1, "successful confirmation did not publish review change")
-
-        let failed = SpeakerReviewModel(
-            meetingID: meetingID,
-            revision: 3,
-            configuration: .bruce,
-            client: ScenarioReviewService(response: response(meetingID: meetingID, speakers: [speaker("pending", suggestion: "Alex")]), identifyFails: true),
-            onReviewChanged: { reviewChanges += 1 }
-        )
-        await failed.load()
-        let failedSave = await failed.confirm("pending")
-        try require(!failedSave, "failed identification reported success")
-        try require(failed.remainingUnconfirmedCount == 1, "failed identification cleared pending review")
-        try require(!failed.canComplete, "failed identification enabled completion")
-        try require(reviewChanges == 1, "failed identification published a review change")
-
-        let controlledClient = ControlledScenarioReviewService(
-            response: response(meetingID: meetingID, speakers: [speaker("pending", suggestion: "Alex")])
-        )
-        let controlled = SpeakerReviewModel(
-            meetingID: meetingID,
-            revision: 3,
-            configuration: .bruce,
-            client: controlledClient,
-            onReviewChanged: { reviewChanges += 1 }
-        )
-        await controlled.load()
-        let inFlight = Task { await controlled.confirm("pending") }
-        await controlledClient.waitUntilIdentifyStarted()
-        try require(!controlled.canComplete, "in-flight confirmation enabled completion")
-        controlled.setName("Alicia", for: "pending")
-        await controlledClient.finishIdentify()
-        let savedCurrentDraft = await inFlight.value
-        try require(!savedCurrentDraft, "stale confirmation blessed a newer draft")
-        try require(controlled.drafts["pending"]?.name == "Alicia", "stale confirmation overwrote the newer draft")
-        try require(controlled.remainingUnconfirmedCount == 1 && !controlled.canComplete, "newer draft did not remain pending")
-        try require(reviewChanges == 2, "successful remote confirmation did not publish its status change")
-
         let empty = SpeakerReviewModel(
             meetingID: meetingID,
             revision: 3,
             configuration: .bruce,
             client: ScenarioReviewService(response: response(meetingID: meetingID, speakers: []))
         )
-        try require(!empty.canComplete, "empty review completed before loading")
+        try require(!empty.canSave, "empty review could be saved before loading")
         await empty.load()
-        try require(empty.remainingUnconfirmedCount == 0 && empty.canComplete, "loaded zero-speaker review could not complete")
+        let emptySaved = await empty.save()
+        try require(empty.canSave && emptySaved, "loaded zero-speaker review could not be saved")
 
         _ = SpeakerReviewView(
             meetingID: meetingID,
@@ -350,7 +331,12 @@ private enum SpeakerReviewScenarios {
         try require(!stopped.isFetchingPlayback, "late fetch left playback loading")
 
         try await verifyNativePlaybackSurface()
-        print("Speaker review state, in-flight edit, and native playback surface scenarios passed")
+        print("Speaker review cards, one-click save, retry, in-flight edit, and native playback surface scenarios passed")
+    }
+
+    private static func unwrap<T>(_ value: T?, _ message: String) throws -> T {
+        guard let value else { throw ScenarioFailure(description: message) }
+        return value
     }
 
     @MainActor
@@ -373,12 +359,36 @@ private enum SpeakerReviewScenarios {
         window.contentView = view
         try require(view.player === player, "native player view did not retain the player")
         player.play()
-        try await Task.sleep(for: .milliseconds(350))
-        try require(player.currentTime().seconds > 0, "valid local media did not begin playback")
+        // A cold CI machine can be slow to start audio, so allow a few seconds
+        // rather than one fixed pause, and say why if it never starts.
+        let deadline = ContinuousClock.now + .seconds(5)
+        // The time is NaN until the item is ready, so wait for a positive time
+        // rather than stopping at the first value that isn't zero or less.
+        while !(player.currentTime().seconds > 0), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try require(
+            player.currentTime().seconds > 0,
+            "valid local media did not begin playback (\(playbackState(player)))"
+        )
 
         SpeakerPlayerSurface.dismantle(view)
         window.contentView = nil
         try require(view.player == nil && player.rate == 0, "native player teardown did not stop playback")
+    }
+
+    @MainActor
+    private static func playbackState(_ player: AVPlayer) -> String {
+        let item = player.currentItem
+        let error = item?.error ?? player.error
+        return [
+            "rate \(player.rate)",
+            "time control \(player.timeControlStatus.rawValue)",
+            "waiting for \(player.reasonForWaitingToPlay?.rawValue ?? "nothing")",
+            "player status \(player.status.rawValue)",
+            "item status \(item.map { String($0.status.rawValue) } ?? "no item")",
+            "error \(error.map { String(describing: $0) } ?? "none")",
+        ].joined(separator: ", ")
     }
 
     private static func writeValidAudio(to url: URL) throws {
@@ -421,8 +431,7 @@ private enum SpeakerReviewScenarios {
         suggestion: String? = nil,
         automaticName: String? = nil,
         suggestionKind: String? = nil,
-        confirmationCount: Int? = nil,
-        evidenceLabels: [SpeakerEvidenceLabel]? = nil
+        confirmationCount: Int? = nil
     ) -> SpeakerReviewSpeaker {
         SpeakerReviewSpeaker(
             speakerID: id,
@@ -434,8 +443,7 @@ private enum SpeakerReviewScenarios {
             excerpts: [],
             automaticName: automaticName,
             suggestionKind: suggestionKind,
-            confirmationCount: confirmationCount,
-            evidenceLabels: evidenceLabels
+            confirmationCount: confirmationCount
         )
     }
 }

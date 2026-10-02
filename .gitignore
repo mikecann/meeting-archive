@@ -17,4 +17,3 @@ build/
 *.app/
 *.log
 .DS_Store
-worker/vision/meeting-label-ocr

@@ -356,8 +356,64 @@ final class WorkerStatusTests: XCTestCase {
         XCTAssertEqual(requestCount, 3)
     }
 
-    private func statusFixture(jobs: [[String: Any]], publications: [[String: Any]]) -> Data {
-        let value: [String: Any] = [
+    func testStatusCarriesBrucesDisplayTitleWhenItHasOne() throws {
+        let titledID = UUID()
+        let olderWorkerID = UUID()
+        let response = try JSONDecoder().decode(
+            WorkerStatusResponse.self,
+            from: statusFixture(
+                jobs: [
+                    job(id: 40, meetingID: titledID, state: "succeeded", title: "Budget revision with Sam"),
+                    job(id: 41, meetingID: olderWorkerID, state: "succeeded"),
+                ],
+                publications: [publication(processingJobID: 40, state: "succeeded")]
+            )
+        )
+
+        let statuses = try response.statuses(for: [titledID, olderWorkerID])
+
+        XCTAssertEqual(statuses[titledID]?.title, "Budget revision with Sam")
+        XCTAssertNil(statuses[olderWorkerID]?.title)
+        XCTAssertNil(response.summary, "a worker without summaries sends no summary stage")
+    }
+
+    func testSummaryStageIsJoinedToItsMeeting() throws {
+        let pendingID = UUID()
+        let doneID = UUID()
+        let response = try JSONDecoder().decode(
+            WorkerStatusResponse.self,
+            from: statusFixture(
+                jobs: [
+                    job(id: 50, meetingID: pendingID, state: "succeeded"),
+                    job(id: 51, meetingID: doneID, state: "succeeded"),
+                ],
+                publications: [
+                    publication(processingJobID: 50, state: "succeeded"),
+                    publication(processingJobID: 51, state: "succeeded"),
+                ],
+                summaries: [
+                    summaryJob(processingJobID: 50, state: "retry_wait", error: "Anthropic is unavailable"),
+                    summaryJob(processingJobID: 51, state: "succeeded"),
+                    summaryJob(processingJobID: 99, state: "ready"),
+                ]
+            )
+        )
+
+        let statuses = try response.statuses(for: [pendingID, doneID])
+
+        XCTAssertEqual(statuses[pendingID]?.summaryState, .retryWait)
+        XCTAssertEqual(statuses[doneID]?.summaryState, .succeeded)
+        // A summary problem never turns into a processing or Notion problem.
+        XCTAssertEqual(statuses[pendingID]?.phase, .published)
+        XCTAssertNil(statuses[pendingID]?.lastError)
+    }
+
+    private func statusFixture(
+        jobs: [[String: Any]],
+        publications: [[String: Any]],
+        summaries: [[String: Any]]? = nil
+    ) -> Data {
+        var value: [String: Any] = [
             "schema_version": 1,
             "counts": [:],
             "jobs": jobs,
@@ -368,7 +424,24 @@ final class WorkerStatusTests: XCTestCase {
                 "jobs": publications,
             ],
         ]
+        if let summaries {
+            value["summary"] = ["counts": [:], "phase": "ready", "last_error": NSNull(), "jobs": summaries]
+        }
         return try! JSONSerialization.data(withJSONObject: value)
+    }
+
+    private func summaryJob(processingJobID: Int, state: String, error: String? = nil) -> [String: Any] {
+        [
+            "processing_job_id": processingJobID,
+            "archive_path": "/Volumes/CannMedia/MeetingArchive/meetings/2026/09/id",
+            "state": state,
+            "attempts": 1,
+            "available_at": 100.0,
+            "last_error": error ?? NSNull(),
+            "lease_owner": NSNull(),
+            "lease_expires_at": NSNull(),
+            "refresh_requested": 0,
+        ]
     }
 
     private func job(
@@ -377,7 +450,8 @@ final class WorkerStatusTests: XCTestCase {
         state: String,
         error: String? = nil,
         totalSpeakerCount: Int? = nil,
-        unconfirmedSpeakerCount: Int? = nil
+        unconfirmedSpeakerCount: Int? = nil,
+        title: String? = nil
     ) -> [String: Any] {
         var value: [String: Any] = [
             "id": id,
@@ -397,6 +471,9 @@ final class WorkerStatusTests: XCTestCase {
         }
         if let unconfirmedSpeakerCount {
             value["unconfirmed_speaker_count"] = unconfirmedSpeakerCount
+        }
+        if let title {
+            value["title"] = title
         }
         return value
     }
@@ -537,6 +614,24 @@ final class WorkerStatusPollingTests: XCTestCase {
         XCTAssertFalse(WorkerStatusPolling.isSettled(status, revision: 2), "publication is still retrying on Bruce")
         status.processingState = .permanentFailure
         XCTAssertTrue(WorkerStatusPolling.isSettled(status, revision: 2), "only a manual retry changes a permanent failure")
+    }
+
+    func testAMeetingWaitingForItsSummaryIsStillPolledForItsTitle() {
+        var status = WorkerMeetingStatus(
+            meetingID: UUID(), phase: .published, processingState: .succeeded, publicationState: .succeeded,
+            speakerReview: .available, retryStage: nil, lastError: nil, manifestRevision: 1
+        )
+        XCTAssertTrue(WorkerStatusPolling.isSettled(status, revision: 1), "no summary stage, as on an older worker")
+        for underway in [WorkerSummaryState.ready, .summarizing] {
+            status.summaryState = underway
+            XCTAssertFalse(WorkerStatusPolling.isSettled(status, revision: 1), "\(underway) brings a title within minutes")
+        }
+        // A retry can be an hour or more away, or never run once summaries
+        // are turned off, so the half-hourly full refresh picks that title up.
+        for settled in [WorkerSummaryState.retryWait, .succeeded, .permanentFailure] {
+            status.summaryState = settled
+            XCTAssertTrue(WorkerStatusPolling.isSettled(status, revision: 1), "\(settled)")
+        }
     }
 
     func testPollingBacksOffAfterConsecutiveFailures() {

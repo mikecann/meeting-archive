@@ -14,11 +14,10 @@ mkdir -p "$ROOT/meetings" "$ROOT/incoming" "$ROOT/runtime/worker" "$ROOT/runtime
 if [[ "$SOURCE" != "$ROOT/runtime/worker" ]]; then
   /usr/bin/rsync -a --exclude='__pycache__' --exclude='.venv' "$SOURCE/" "$ROOT/runtime/worker/"
 fi
-bash "$ROOT/runtime/worker/vision/build.sh"
 if [[ ! -x "$ROOT/runtime/venv/bin/python3" ]]; then "$PYTHON" -m venv "$ROOT/runtime/venv"; fi
 export PIP_CACHE_DIR="$ROOT/runtime/cache/pip"
 export TMPDIR="$ROOT/runtime/tmp"
 "$ROOT/runtime/venv/bin/python3" -m pip install -r "$ROOT/runtime/worker/requirements.txt"
 "$ROOT/runtime/venv/bin/python3" -m pip check
-"$ROOT/runtime/venv/bin/python3" -c 'import faster_whisper, pyannote.audio; print("Worker model libraries import successfully")'
+"$ROOT/runtime/venv/bin/python3" -c 'import faster_whisper, pyannote.audio; print("Worker libraries import successfully")'
 echo "Installed worker at $ROOT. No background service has been enabled yet."
