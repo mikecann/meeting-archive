@@ -16,9 +16,10 @@ final class AppSettings: ObservableObject {
     /// added to the defaults in a later version are still ignored.
     @Published private(set) var extraIgnoredBundleIDs: Set<String> { didSet { defaults.set(Array(extraIgnoredBundleIDs), forKey: "extraIgnoredBundleIDs") } }
     @Published private(set) var recordedDefaultBundleIDs: Set<String> { didSet { defaults.set(Array(recordedDefaultBundleIDs), forKey: "recordedDefaultBundleIDs") } }
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
 
-    init() {
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         selectedCalendarIDs = Set(defaults.stringArray(forKey: "calendarIDs") ?? [])
         archiveHost = defaults.string(forKey: "archiveHost") ?? "bruce"
         archiveRoot = defaults.string(forKey: "archiveRoot") ?? "/Volumes/CannMedia/MeetingArchive"
@@ -33,26 +34,41 @@ final class AppSettings: ObservableObject {
         AppSettings.ignoredBundleIDs(defaults: MicAppResolver.defaultIgnoredBundleIDs, extra: extraIgnoredBundleIDs, recordedDefaults: recordedDefaultBundleIDs)
     }
 
+    /// Whatever the case, as the mic monitor matches it.
+    func isIgnored(_ bundleIdentifier: String) -> Bool {
+        ignoredBundleIDs.contains { Self.same($0, bundleIdentifier) }
+    }
+
     func ignore(_ bundleIdentifier: String) {
-        if MicAppResolver.defaultIgnoredBundleIDs.contains(bundleIdentifier) {
-            recordedDefaultBundleIDs.remove(bundleIdentifier)
+        guard !isIgnored(bundleIdentifier) else { return }
+        if MicAppResolver.defaultIgnoredBundleIDs.contains(where: { Self.same($0, bundleIdentifier) }) {
+            recordedDefaultBundleIDs = recordedDefaultBundleIDs.filter { !Self.same($0, bundleIdentifier) }
         } else {
             extraIgnoredBundleIDs.insert(bundleIdentifier)
         }
     }
 
     func stopIgnoring(_ bundleIdentifier: String) {
-        // Meeting Archive hearing itself would start a recording of a recording.
-        guard bundleIdentifier != Bundle.main.bundleIdentifier else { return }
-        if MicAppResolver.defaultIgnoredBundleIDs.contains(bundleIdentifier) {
-            recordedDefaultBundleIDs.insert(bundleIdentifier)
-        } else {
-            extraIgnoredBundleIDs.remove(bundleIdentifier)
-        }
+        guard !Self.isMeetingArchive(bundleIdentifier) else { return }
+        // An app ignored in Settings before a later version made it a
+        // default is in both lists, so clear both.
+        extraIgnoredBundleIDs = extraIgnoredBundleIDs.filter { !Self.same($0, bundleIdentifier) }
+        recordedDefaultBundleIDs.formUnion(MicAppResolver.defaultIgnoredBundleIDs.filter { Self.same($0, bundleIdentifier) })
     }
 
     nonisolated static func ignoredBundleIDs(defaults: Set<String>, extra: Set<String>, recordedDefaults: Set<String>) -> Set<String> {
         defaults.subtracting(recordedDefaults).union(extra)
+    }
+
+    /// Meeting Archive hearing itself would start a recording of a recording.
+    /// This doesn't go by `Bundle.main`, which has no identifier when the app
+    /// runs straight from SwiftPM.
+    nonisolated static func isMeetingArchive(_ bundleIdentifier: String) -> Bool {
+        same(bundleIdentifier, MicAppResolver.meetingArchiveBundleID)
+    }
+
+    private nonisolated static func same(_ first: String, _ second: String) -> Bool {
+        first.lowercased() == second.lowercased()
     }
 }
 

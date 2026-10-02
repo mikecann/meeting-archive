@@ -6,10 +6,12 @@ import MeetingArchiveCore
 /// Electron apps capture in a helper buried inside their bundle, FaceTime
 /// calls run in system daemons and Safari captures in the WebKit GPU process.
 struct MicAppResolver {
+    static let meetingArchiveBundleID = "com.mikerosoft.meeting-archive"
+
     /// Apps whose mic use is never a meeting. Matching ignores case.
     static let defaultIgnoredBundleIDs: Set<String> = [
         // Mike's own tools
-        "com.mikerosoft.meeting-archive",
+        meetingArchiveBundleID,
         "com.mikerosoft.voice-type",
         "com.mikerosoft.record-it",
         "com.mikerosoft.record-meeting",
