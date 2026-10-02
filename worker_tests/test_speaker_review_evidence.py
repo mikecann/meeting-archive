@@ -85,7 +85,7 @@ def transcript(speaker="microphone:SPEAKER_00"):
     return {
         "schema_version": 1, "meeting_id": "current", "manifest_revision": 2,
         "processing": {"manifest_sha256": "a" * 64},
-        "turns": [{"speaker": speaker, "start": 1.0, "end": 9.0,
+        "turns": [{"speaker": speaker, "start": 1.0, "end": 31.0,
                    "text": "A different recording", "channel_origin": speaker.split(":")[0]}],
     }
 
@@ -287,7 +287,7 @@ class ReviewIntegrationTests(unittest.TestCase):
             (archive / "transcripts/v2").mkdir(parents=True)
             document = transcript("incoming:SPEAKER_00")
             for speaker in ("incoming:SPEAKER_01", "incoming:SPEAKER_02"):
-                document["turns"].append({"speaker": speaker, "start": 10.0, "end": 12.0,
+                document["turns"].append({"speaker": speaker, "start": 32.0, "end": 60.0,
                                           "text": "Later", "channel_origin": "incoming"})
             refresh_speaker_matches(document, registry)
             (archive / "transcripts/v2/transcript.json").write_text(json.dumps(document))
@@ -324,6 +324,27 @@ class ReviewIntegrationTests(unittest.TestCase):
             job = {"state": "succeeded", "archive_path": str(archive), "meeting_id": "current",
                    "manifest_revision": 2, "manifest_sha256": "a" * 64}
             self.assertEqual(_speaker_counts_for_status(job, database), (1, 1))
+
+
+class ShortVoiceTests(unittest.TestCase):
+    def test_a_voice_heard_for_a_few_seconds_isnt_asked_about(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            database = root / "worker.sqlite"
+            SpeakerRegistry(database)
+            archive = root / "archive"
+            (archive / "transcripts/v2").mkdir(parents=True)
+            document = transcript("incoming:SPEAKER_00")
+            # Two lines adding up to 14 seconds: under the bar, so not counted.
+            document["turns"] += [
+                {"speaker": "incoming:SPEAKER_01", "start": 40.0, "end": 47.0, "text": "Hi", "channel_origin": "incoming"},
+                {"speaker": "incoming:SPEAKER_01", "start": 50.0, "end": 57.0, "text": "Bye", "channel_origin": "incoming"},
+            ]
+            (archive / "transcripts/v2/transcript.json").write_text(json.dumps(document))
+            job = {"state": "succeeded", "archive_path": str(archive), "meeting_id": "current",
+                   "manifest_revision": 2, "manifest_sha256": "a" * 64}
+
+            self.assertEqual(_speaker_counts_for_status(job, database), (2, 1))
 
 
 if __name__ == "__main__":

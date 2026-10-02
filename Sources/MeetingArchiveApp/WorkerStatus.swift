@@ -695,6 +695,9 @@ enum WorkerStatusPolling {
         return status.processingState == .succeeded && status.publicationState == .succeeded
     }
 
+    /// How often every meeting is re-read, finished or not.
+    static let fullRefreshInterval: TimeInterval = 30 * 60
+
     static func interval(hasBusyMeetings: Bool, consecutiveFailures: Int) -> TimeInterval {
         let base: TimeInterval = hasBusyMeetings ? 15 : 60
         return min(900, base * pow(2, Double(min(consecutiveFailures, 10))))

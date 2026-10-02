@@ -115,6 +115,10 @@ def _excerpt_turns(turns: list[dict[str, Any]], speaker: str, limit: int = 3) ->
     return [turn for _, turn in sorted(wordiest, key=lambda item: item[0])]
 
 
+#: Seconds a voice must speak before the menu asks Mike to name it.
+MINIMUM_SPEECH_TO_ASK_SECONDS = 15.0
+
+
 def _speaker_counts_for_status(
     job: dict[str, Any],
     database: Path,
@@ -191,7 +195,20 @@ def _speaker_counts_for_status(
                 )
     except (OSError, sqlite3.Error, ValueError, TypeError):
         return None
-    return len(speaker_ids), len(speaker_ids - confirmed_ids)
+    # A voice heard for a few seconds is rarely worth asking about, so it
+    # doesn't count towards the menu's "needs a name". Review still lists it.
+    # A voice whose length can't be told is still asked about.
+    speech: dict[str, float] = {}
+    for turn in transcript["turns"]:
+        speaker_id = turn.get("speaker")
+        if speaker_id is None:
+            continue
+        try:
+            speech[speaker_id] = speech.get(speaker_id, 0.0) + max(0.0, float(turn["end"]) - float(turn["start"]))
+        except (KeyError, TypeError, ValueError):
+            speech[speaker_id] = float("inf")
+    waiting = {speaker for speaker in speaker_ids - confirmed_ids if speech.get(speaker, 0.0) >= MINIMUM_SPEECH_TO_ASK_SECONDS}
+    return len(speaker_ids), len(waiting)
 
 
 def _add_speaker_counts_to_status(status: dict[str, Any], database: Path) -> None:

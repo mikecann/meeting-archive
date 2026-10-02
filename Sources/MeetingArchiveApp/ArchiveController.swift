@@ -123,6 +123,9 @@ final class ArchiveController: ObservableObject {
     private var uploading = false
     private var lastQueuePoll = Date.distantPast
     private var lastWorkerStatusPoll = Date.distantPast
+    /// The launch fetch already covers every meeting, so the first full
+    /// refresh comes one interval later.
+    private var lastFullWorkerStatusPoll = Date()
     private var cleanedMeetingIDs = Set<UUID>()
     private var lockFD: Int32 = -1
     private var followUpWindow: NamingWindow?
@@ -261,7 +264,13 @@ final class ArchiveController: ObservableObject {
             Task { await uploadNext() }
         }
         let statusInterval = WorkerStatusPolling.interval(hasBusyMeetings: !processingMeetings.isEmpty, consecutiveFailures: workerStatusFailures)
-        if now.timeIntervalSince(lastWorkerStatusPoll) >= statusInterval {
+        if now.timeIntervalSince(lastFullWorkerStatusPoll) >= WorkerStatusPolling.fullRefreshInterval, workerStatusFailures == 0 {
+            // Finished meetings aren't polled, but Bruce can still change them
+            // later: a new summary title, a rename, names saved elsewhere.
+            lastFullWorkerStatusPoll = now
+            lastWorkerStatusPoll = now
+            Task { await refreshWorkerStatuses(force: true) }
+        } else if now.timeIntervalSince(lastWorkerStatusPoll) >= statusInterval {
             lastWorkerStatusPoll = now
             Task { await refreshWorkerStatuses() }
         }
