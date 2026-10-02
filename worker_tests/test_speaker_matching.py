@@ -438,14 +438,14 @@ class MeetingMatchTests(unittest.TestCase):
     def test_the_owner_must_be_the_best_match_for_the_mic_voice(self) -> None:
         self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
         self._confirm_elsewhere("Mike Cann", [1.0, 0.0, 0.0])
-        self._confirm_elsewhere("Sean", unit(1.0, 1.0, 0.0), speaker_id="incoming:SPEAKER_00")
-        # 0.66 against Mike but 0.94 against Sean.
+        self._confirm_elsewhere("Blake", unit(1.0, 1.0, 0.0), speaker_id="incoming:SPEAKER_00")
+        # 0.67 against Mike but 0.95 against Blake.
         self._observe("microphone:SPEAKER_00", unit(0.66, 0.66, 0.3))
 
         match = self._matches("microphone:SPEAKER_00")["microphone:SPEAKER_00"]
 
-        self.assertNotEqual(match["automatic_name"], "Mike Cann")
-        self.assertNotEqual(match["suggestion_kind"], "own_microphone")
+        self.assertEqual(match["automatic_name"], "Blake")
+        self.assertEqual(match["suggestion_kind"], "strong")
 
     def test_a_split_voice_takes_the_name_saved_for_its_twin_in_the_same_meeting(self) -> None:
         self._observe("incoming:SPEAKER_00", [1.0, 0.0, 0.0])

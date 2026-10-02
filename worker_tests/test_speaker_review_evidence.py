@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "worker"))
 
@@ -214,7 +214,7 @@ class ReviewIntegrationTests(unittest.TestCase):
             saved = json.loads((archive / "transcripts/v2/transcript.json").read_text())
             self.assertNotIn("name", saved["turns"][0])
             self.assertEqual(registry.assignments("current", 2), {})
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM voice_profiles").fetchone()[0], 2)
 
     def test_strong_review_persists_automatic_name_and_speaker_count_is_read_only(self):
@@ -231,7 +231,7 @@ class ReviewIntegrationTests(unittest.TestCase):
             self.assertEqual(_speaker_counts_for_status(job, database), (1, 0))
             self.assertEqual(database.read_bytes(), before)
             self.assertEqual(registry.assignments("current", 2), {})
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM voice_profiles").fetchone()[0], 2)
 
     def test_review_keeps_an_empty_evidence_list_and_ignores_old_video_labels(self):
@@ -270,7 +270,7 @@ class ReviewIntegrationTests(unittest.TestCase):
             self.assertEqual(_speaker_counts_for_status(job, database), (1, 0))
             # Recognizing him never makes his voice a confirmed sample.
             self.assertEqual(registry.assignments("current", 2), {})
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM voice_profiles").fetchone()[0], 2)
 
     def test_a_voice_split_from_a_saved_one_counts_as_done(self):
