@@ -53,8 +53,20 @@ final class ActivityMeterTests: XCTestCase {
         XCTAssertEqual(meter.activeSeconds, 0.1, accuracy: 0.000_001)
     }
 
-    private func buffer(channels: AVAudioChannelCount, frames: Int, value: (Int, Int) -> Float) -> AVAudioPCMBuffer {
-        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000, channels: channels, interleaved: true)!
+    func testWindowsAreATenthOfASecondAtTheMetersOwnRate() {
+        var meter = ActivityMeter(sampleRate: 16_000, channels: 1)
+        // 100 ms of sound then 200 ms of silence at 16 kHz. In 48 kHz-sized
+        // windows the silence would share the sound's window and count too.
+        meter.add(buffer(channels: 1, frames: 1_600, sampleRate: 16_000) { _, _ in 0.1 })
+        meter.addSilence(frames: 3_200)
+        meter.finish()
+
+        XCTAssertEqual(meter.activeSeconds, 0.1, accuracy: 0.000_001)
+    }
+
+    private func buffer(channels: AVAudioChannelCount, frames: Int, sampleRate: Double = 48_000,
+                        value: (Int, Int) -> Float) -> AVAudioPCMBuffer {
+        let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: channels, interleaved: true)!
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames))!
         buffer.frameLength = AVAudioFrameCount(frames)
         let samples = buffer.floatChannelData![0]

@@ -87,8 +87,11 @@ final class RebuildScheduler: @unchecked Sendable {
         }
     }
 
-    /// Restarts for other reasons, such as the watchdog's, count too.
+    /// Restarts for other reasons, such as the watchdog's, count too. They
+    /// open whatever is current, so a rebuild still waiting to run is dropped.
     func rebuilt(at now: TimeInterval) {
+        generation += 1
+        reason = nil
         lastRebuild = now
     }
 }

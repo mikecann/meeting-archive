@@ -25,10 +25,12 @@ final class AudioPropertyListenerTests: XCTestCase {
         ]
         try XCTSkipUnless(AudioHardwareCreateAggregateDevice(composition as CFDictionary, &device) == noErr,
                           "This machine cannot create a private aggregate device.")
-        AudioHardwareDestroyAggregateDevice(device)
-        let deadline = Date().addingTimeInterval(2)
+        XCTAssertEqual(AudioHardwareDestroyAggregateDevice(device), noErr, "The test's aggregate device was not destroyed.")
+        // The device list has changed for certain now, so a listener that
+        // hears nothing is broken rather than on a quiet machine.
+        let deadline = Date().addingTimeInterval(5)
         while kept.value == 0, Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
-        try XCTSkipIf(kept.value == 0, "This machine sent no device list notification.")
+        XCTAssertGreaterThan(kept.value, 0, "The listener that was kept heard no device list change.")
         // Every listener for the property hears the same change, so a stale
         // one would have fired by now.
         Thread.sleep(forTimeInterval: 0.2)

@@ -48,8 +48,11 @@ final class SourceWatchdogTests: XCTestCase {
         let rebuilds = Rebuilds()
         let rebuilt = expectation(description: "rebuilt")
         // AirPods connecting: input, output and rate change one after another.
-        for (index, reason) in ["The default microphone changed", "The sound output changed", "The sound output changed mode"].enumerated() {
-            queue.asyncAfter(deadline: .now() + 0.05 * Double(index)) {
+        // Waiting on the queue between them keeps the burst in order however
+        // busy the machine is, rather than racing timers against each other.
+        queue.async {
+            for (index, reason) in ["The default microphone changed", "The sound output changed", "The sound output changed mode"].enumerated() {
+                if index > 0 { Thread.sleep(forTimeInterval: 0.05) }
                 scheduler.request(reason) { rebuilds.add($0); rebuilt.fulfill() }
             }
         }
@@ -68,13 +71,41 @@ final class SourceWatchdogTests: XCTestCase {
         let rebuilds = Rebuilds()
         let both = expectation(description: "rebuilt twice")
         both.expectedFulfillmentCount = 2
-        queue.async { scheduler.request("first") { rebuilds.add($0); both.fulfill() } }
-        queue.asyncAfter(deadline: .now() + 0.15) { scheduler.request("second") { rebuilds.add($0); both.fulfill() } }
+        queue.async {
+            scheduler.request("first") { reason in
+                rebuilds.add(reason)
+                both.fulfill()
+                // The rebuild itself sets off another notification.
+                queue.async { scheduler.request("second") { rebuilds.add($0); both.fulfill() } }
+            }
+        }
 
         wait(for: [both], timeout: 3)
 
         XCTAssertEqual(rebuilds.reasons, ["first", "second"])
         XCTAssertGreaterThanOrEqual(rebuilds.times[1] - rebuilds.times[0], 0.45)
+    }
+
+    func testARestartForAnotherReasonReplacesARebuildThatIsWaiting() {
+        let queue = DispatchQueue(label: "rebuild-scheduler-test")
+        let scheduler = RebuildScheduler(queue: queue, settleDelay: 0.05, minimumSpacing: 0.3)
+        let rebuilds = Rebuilds()
+        let waited = expectation(description: "waited past the settle delay")
+        queue.async {
+            scheduler.request("The default microphone changed") { rebuilds.add($0) }
+            // The watchdog restarts the source before the change settles,
+            // on whatever is the default by then.
+            scheduler.rebuilt(at: DeliveryClock.now)
+            queue.asyncAfter(deadline: .now() + 0.3) { waited.fulfill() }
+        }
+        wait(for: [waited], timeout: 2)
+        XCTAssertEqual(rebuilds.reasons, [])
+
+        // A change after the restart still rebuilds, for its own reason.
+        let later = expectation(description: "rebuilt after a later change")
+        queue.async { scheduler.request("The sound output changed") { rebuilds.add($0); later.fulfill() } }
+        wait(for: [later], timeout: 2)
+        XCTAssertEqual(rebuilds.reasons, ["The sound output changed"])
     }
 
     func testARebuildForANewDeviceCountsTowardTheSpacing() {
