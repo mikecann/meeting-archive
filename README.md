@@ -240,8 +240,10 @@ into several voices, so voices with the same name share a card, like
 card already has merges the two, and **Not Micah** takes a voice back out.
 Voices Bruce recognized are filled in and marked **Recognized**; its guesses
 are filled in and marked **Suggested**. **Save names** saves every name that's
-filled in, whether you typed it, chose it or Bruce did, in one go. Anyone left
-blank stays unknown, and you can save and close with blanks. If the save
+filled in, whether you typed it, chose it or Bruce did, in one go. A voice
+nobody has named stays unknown if you leave it blank, and you can save and
+close with blanks. Blanking a name Bruce already saved or recognized doesn't
+remove it, so type the right name over it instead. If the save
 fails, the window stays open with the error and nothing is marked saved, so
 **Save names** again retries. **Later** closes without saving.
 
