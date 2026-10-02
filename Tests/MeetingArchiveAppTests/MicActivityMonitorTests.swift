@@ -179,11 +179,16 @@ final class MicActivityMonitorTests: XCTestCase {
 
     /// Fake processes carry their owner's bundle ID, or a helper's ID that
     /// the fake resolver lifts to the app, the way the real one walks paths.
-    private func resolve(_ process: AudioInputProcess) -> MicUser? {
+    /// It captures the users rather than the test case, because the monitor
+    /// needs a sendable function and Xcode 26 won't count a method as one.
+    private var resolve: @MainActor @Sendable (AudioInputProcess) -> MicUser? {
+        let chrome = self.chrome
         let owners = [zoom, chrome, slack, claude, MicUser(bundleIdentifier: "com.mikerosoft.meeting-archive", displayName: "Meeting Archive")]
-        guard let bundleID = process.bundleID else { return nil }
-        if bundleID == "com.google.Chrome.helper" { return chrome }
-        return owners.first { $0.bundleIdentifier == bundleID }
+        return { process in
+            guard let bundleID = process.bundleID else { return nil }
+            if bundleID == "com.google.Chrome.helper" { return chrome }
+            return owners.first { $0.bundleIdentifier == bundleID }
+        }
     }
 
     private func process(_ pid: pid_t, _ user: MicUser) -> AudioInputProcess {
