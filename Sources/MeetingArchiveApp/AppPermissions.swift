@@ -44,7 +44,6 @@ enum AppPermissionKind: String, CaseIterable, Identifiable, Sendable {
 
 enum AppPermissionStatus: String, Equatable, Sendable {
     case notRequested
-    case needsAccess
     case granted
     case denied
     case restricted
@@ -56,7 +55,6 @@ enum AppPermissionStatus: String, Equatable, Sendable {
     var label: String {
         switch self {
         case .notRequested: "Not requested"
-        case .needsAccess: "Needs access"
         case .granted: "Granted"
         case .denied: "Denied"
         case .restricted: "Restricted"
@@ -120,7 +118,7 @@ final class AppPermissions: ObservableObject {
     ) async {
         failure = nil
         switch status(for: permission) {
-        case .needsAccess, .denied, .restricted, .unknown, .cannotCheck:
+        case .denied, .restricted, .unknown, .cannotCheck:
             openSystemSettings(for: permission)
             return
         case .granted:

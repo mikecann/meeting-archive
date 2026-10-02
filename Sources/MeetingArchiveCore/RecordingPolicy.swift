@@ -315,7 +315,8 @@ public struct RecordingPolicy: Sendable {
             case .microphone(let app):
                 let stillHeld = holds(app, users)
                 if date >= pending.notBefore {
-                    if stillHeld { return [startNextPart(of: pending, at: date)] }
+                    // Pause holds back the mic, and that includes a restart.
+                    if stillHeld, !state.isPaused { return [startNextPart(of: pending, at: date)] }
                     state.pendingRestart = nil
                 } else if stillHeld {
                     // The app is still on its call, so its own restart comes
@@ -507,8 +508,9 @@ public struct KeepPolicy: Equatable, Sendable {
         return .keep
     }
 
+    /// Rounded up, so a discarded part is always under the bar it names.
     private var underMinimumDuration: String {
-        let seconds = Int(minimumDuration.rounded())
+        let seconds = Int(minimumDuration.rounded(.up))
         if seconds == 60 { return "under a minute" }
         if seconds > 60, seconds % 60 == 0 { return "under \(seconds / 60) minutes" }
         return "under \(seconds) seconds"

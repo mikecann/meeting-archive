@@ -4,7 +4,9 @@ import Foundation
 import MeetingArchiveCore
 
 struct MicUsageSnapshot: Equatable, Sendable {
-    /// Apps holding the mic, in the order each one took it, without ignored apps.
+    /// Apps holding the mic, without ignored apps, in the order each one took
+    /// it. Apps first seen in the same scan, as at launch, keep Core Audio's
+    /// order, since nothing says which of them came first.
     var users: [MicUser]
     /// Ignored apps holding the mic, in the same order.
     var ignored: [MicUser]
@@ -19,13 +21,16 @@ struct AudioInputProcess: Equatable, Sendable {
     /// The process's own bundle ID, which for a helper is the helper's.
     var bundleID: String?
     var executablePath: String?
+    /// Nil when Core Audio couldn't say whether it is capturing.
+    var isRunningInput: Bool? = true
 }
 
 @MainActor
 protocol AudioInputReading {
     /// Whether any input device is running in some process, or nil if it can't tell.
     func anyInputDeviceRunning() -> Bool?
-    /// Every process capturing input right now.
+    /// Every process capturing input right now, plus any that Core Audio
+    /// couldn't say about.
     func runningInputProcesses() throws -> [AudioInputProcess]
 }
 
@@ -41,6 +46,10 @@ final class MicActivityMonitor {
     private let fullScanInterval: Int
     /// Bundle IDs of the apps holding the mic, in the order they took it.
     private var holdOrder: [String] = []
+    /// Processes capturing at the last scan. One that Core Audio can't read
+    /// keeps doing what it was, so a failed read is never an app letting go
+    /// of the mic, nor taking it.
+    private var capturingPIDs: Set<pid_t> = []
     private var scanEveryPoll = true
     private var pollsSinceScan = 0
 
@@ -81,9 +90,11 @@ final class MicActivityMonitor {
             return MicUsageSnapshot(users: [], ignored: [], error: String(describing: error))
         }
         pollsSinceScan = 0
+        let capturing = processes.filter { $0.isRunningInput ?? capturingPIDs.contains($0.pid) }
+        capturingPIDs = Set(capturing.map(\.pid))
 
         var owners: [MicUser] = []
-        for process in processes where process.pid != ownPID {
+        for process in capturing where process.pid != ownPID {
             guard let owner = resolve(process),
                   !owners.contains(where: { $0.bundleIdentifier == owner.bundleIdentifier }) else { continue }
             owners.append(owner)
@@ -121,7 +132,10 @@ struct CoreAudioInputReader: AudioInputReading {
         guard let devices = try? CoreAudioProperty.objectIDs(kAudioHardwarePropertyDevices, of: AudioObjectID(kAudioObjectSystemObject)) else {
             return nil
         }
-        for device in devices where CoreAudioProperty.hasInputStreams(device) {
+        // Any read that fails makes the answer unknown, which only costs a scan.
+        for device in devices {
+            guard let hasInput = CoreAudioProperty.hasInputStreams(device) else { return nil }
+            guard hasInput else { continue }
             guard let running = try? CoreAudioProperty.uint32(kAudioDevicePropertyDeviceIsRunningSomewhere, of: device) else { return nil }
             if running != 0 { return true }
         }
@@ -131,14 +145,17 @@ struct CoreAudioInputReader: AudioInputReading {
     func runningInputProcesses() throws -> [AudioInputProcess] {
         let objects = try CoreAudioProperty.objectIDs(kAudioHardwarePropertyProcessObjectList, of: AudioObjectID(kAudioObjectSystemObject))
         return objects.compactMap { object in
-            // A process that quits between the list and these reads is skipped.
-            guard (try? CoreAudioProperty.uint32(kAudioProcessPropertyIsRunningInput, of: object)) == 1,
-                  let pid = try? CoreAudioProperty.pid(of: object) else { return nil }
+            // A failed read is reported as unknown, not as letting go. A
+            // process that quits between the list and these reads is skipped,
+            // since its PID can't be read either.
+            let isRunning = (try? CoreAudioProperty.uint32(kAudioProcessPropertyIsRunningInput, of: object)).map { $0 != 0 }
+            guard isRunning != false, let pid = try? CoreAudioProperty.pid(of: object) else { return nil }
             let bundleID = try? CoreAudioProperty.string(kAudioProcessPropertyBundleID, of: object)
             return AudioInputProcess(
                 pid: pid,
                 bundleID: bundleID?.isEmpty == false ? bundleID : nil,
-                executablePath: MicAppResolver.executablePath(ofPID: pid)
+                executablePath: MicAppResolver.executablePath(ofPID: pid),
+                isRunningInput: isRunning
             )
         }
     }
@@ -194,14 +211,16 @@ private enum CoreAudioProperty {
         return value?.takeRetainedValue() as String?
     }
 
-    static func hasInputStreams(_ device: AudioObjectID) -> Bool {
+    /// Nil if Core Audio couldn't say.
+    static func hasInputStreams(_ device: AudioObjectID) -> Bool? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyStreams,
             mScope: kAudioObjectPropertyScopeInput,
             mElement: kAudioObjectPropertyElementMain
         )
         var size: UInt32 = 0
-        return AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr && size > 0
+        guard AudioObjectGetPropertyDataSize(device, &address, 0, nil, &size) == noErr else { return nil }
+        return size > 0
     }
 
     private static func globalAddress(_ selector: AudioObjectPropertySelector) -> AudioObjectPropertyAddress {

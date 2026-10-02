@@ -368,7 +368,7 @@ struct ArchiveSettingsView: View {
                 }
             }
             Section("Never record these apps") {
-                let ignored = settings.ignoredBundleIDs.filter { $0 != Bundle.main.bundleIdentifier }
+                let ignored = settings.ignoredBundleIDs.filter { !AppSettings.isMeetingArchive($0) }
                 let named = ignored.compactMap { id in AppNames.installedName(for: id).map { (id: id, name: $0) } }
                     .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
                 ForEach(named, id: \.id) { app in
@@ -382,7 +382,7 @@ struct ArchiveSettingsView: View {
                     Text("Also ignored: Siri, dictation and other system listeners, plus dictation and recording apps you don't have installed.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                let seen = controller.recentMicUsers.filter { !settings.ignoredBundleIDs.contains($0.bundleIdentifier) }
+                let seen = controller.recentMicUsers.filter { !settings.isIgnored($0.bundleIdentifier) }
                 if !seen.isEmpty {
                     Text("Recently used the mic").font(.caption).foregroundStyle(.secondary)
                     ForEach(seen, id: \.self) { user in
@@ -470,8 +470,6 @@ private struct PermissionRow: View {
         switch status {
         case .notRequested:
             return permission == .calendar ? "Not requested · Connect" : "Not requested · Allow"
-        case .needsAccess:
-            return "Needs access · Open Settings"
         case .granted:
             return "Granted"
         case .denied:
