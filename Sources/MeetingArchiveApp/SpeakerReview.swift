@@ -254,7 +254,7 @@ struct SpeakerReviewCard: Identifiable, Equatable, Sendable {
 
     /// Names that only differ by case, accents or spacing are one person.
     static func groupingKey(_ name: String) -> String {
-        name.trimmingCharacters(in: .whitespacesAndNewlines)
+        name.split(whereSeparator: \.isWhitespace).joined(separator: " ")
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
     }
 

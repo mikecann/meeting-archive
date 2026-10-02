@@ -132,6 +132,19 @@ final class SpeakerReviewTests: XCTestCase {
         XCTAssertEqual(cards.map(\.name), ["Micah", "", "", "Mike Cann"])
     }
 
+    func testNamesThatOnlyDifferInSpacingShareOneCard() {
+        XCTAssertEqual(SpeakerReviewCard.groupingKey(" Alex  Chen "), SpeakerReviewCard.groupingKey("alex chen"))
+        XCTAssertEqual(SpeakerReviewCard.groupingKey("Alex\tChen"), SpeakerReviewCard.groupingKey("Alex Chen"))
+        XCTAssertNotEqual(SpeakerReviewCard.groupingKey("Alex Chen"), SpeakerReviewCard.groupingKey("AlexChen"))
+
+        let cards = SpeakerReviewCard.make(speakers: [
+            makeSpeaker(id: "incoming:SPEAKER_00", name: "Alex Chen"),
+            makeSpeaker(id: "incoming:SPEAKER_01", suggestion: "Alex  Chen", suggestionKind: "tentative"),
+        ])
+
+        XCTAssertEqual(cards.map(\.speakerIDs), [["incoming:SPEAKER_00", "incoming:SPEAKER_01"]])
+    }
+
     func testRemoteShellQuotesArbitraryNamesAsOneLiteralArgument() {
         let name = "D'Angelo $(touch /tmp/nope); `whoami`\nSecond line"
 
