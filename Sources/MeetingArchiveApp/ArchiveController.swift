@@ -580,7 +580,12 @@ final class ArchiveController: ObservableObject {
                 meeting.titleSource = .calendar
             }
             try SpoolBundle.saveCalendar(events, match: match, in: directory)
-            try store?.insertMeeting(meeting)
+            guard let store else {
+                // The journal stays, so a launch that opens the library recovers this part.
+                fail("The meeting library isn't open, so this recording stays on this Mac until a relaunch can recover it.")
+                return
+            }
+            try store.insertMeeting(meeting)
             savedParts[entry.seriesID, default: []].append(entry.id)
             try? FileManager.default.removeItem(at: directory.appendingPathComponent("capture-journal.json"))
             if reason != .appQuit {
@@ -647,6 +652,9 @@ final class ArchiveController: ObservableObject {
     }
 
     private func recoverInterruptedCaptures() async {
+        // Without the library a part has nowhere to go, so every journal
+        // stays for a launch that can open it.
+        guard let store else { return }
         var issues: [String] = []
         do {
             for directory in try FileManager.default.contentsOfDirectory(at: AppPaths.spool, includingPropertiesForKeys: nil) {
@@ -654,7 +662,7 @@ final class ArchiveController: ObservableObject {
                     let path = directory.appendingPathComponent("capture-journal.json")
                     guard let data = try? Data(contentsOf: path) else { continue }
                     let entry = try Self.decodeJournal(data)
-                    guard try store?.fetchMeeting(id: entry.id) == nil else { continue }
+                    guard try store.fetchMeeting(id: entry.id) == nil else { continue }
                     // Decoding takes a few seconds per hour of audio, so it runs off the main thread.
                     let part = try await Task.detached(priority: .userInitiated) { try await RecoveredPart.measure(directory) }.value
                     guard part.duration > 0 else {
@@ -674,7 +682,7 @@ final class ArchiveController: ObservableObject {
                     }
                     // Saved like any other part, so it gets the same window to be discarded.
                     let record = makeRecord(entry, ended: entry.startedAt.addingTimeInterval(part.duration), microphone: nil)
-                    try store?.insertMeeting(record)
+                    try store.insertMeeting(record)
                     // The call carries on as the next part of this series, so
                     // discarding it discards this part too while it's pending.
                     savedParts[entry.seriesID, default: []].append(entry.id)
