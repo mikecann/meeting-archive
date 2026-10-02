@@ -82,6 +82,27 @@ final class MicActivityMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.snapshot(), MicUsageSnapshot(users: [], ignored: [zoom], error: nil))
     }
 
+    func testAProcessCoreAudioCannotReadKeepsDoingWhatItWas() {
+        let reader = FakeAudioInputReader(processes: [process(20, zoom), process(10, chrome)])
+        let monitor = makeMonitor(reader)
+        XCTAssertEqual(monitor.snapshot().users, [zoom, chrome])
+
+        // Zoom hasn't let go just because its read failed, so Chrome doesn't
+        // take over the recording.
+        reader.processes = [unreadable(20, zoom), process(10, chrome)]
+        XCTAssertEqual(monitor.snapshot().users, [zoom, chrome])
+        XCTAssertEqual(monitor.snapshot().users, [zoom, chrome])
+
+        // Nor does a failed read start anything.
+        reader.processes = [unreadable(20, zoom), process(10, chrome), unreadable(30, slack)]
+        XCTAssertEqual(monitor.snapshot().users, [zoom, chrome])
+
+        reader.processes = [process(10, chrome)]
+        XCTAssertEqual(monitor.snapshot().users, [chrome])
+        reader.processes = [unreadable(20, zoom), process(10, chrome)]
+        XCTAssertEqual(monitor.snapshot().users, [chrome], "once Zoom has let go, a failed read doesn't bring it back")
+    }
+
     func testAReadErrorIsReportedAndTheNextPollScansAgain() {
         let reader = FakeAudioInputReader(deviceRunning: false)
         let monitor = makeMonitor(reader)
@@ -197,6 +218,11 @@ final class MicActivityMonitorTests: XCTestCase {
 
     private func process(_ pid: pid_t, _ bundleID: String?) -> AudioInputProcess {
         AudioInputProcess(pid: pid, bundleID: bundleID, executablePath: nil)
+    }
+
+    /// A process whose capturing state Core Audio couldn't read.
+    private func unreadable(_ pid: pid_t, _ user: MicUser) -> AudioInputProcess {
+        AudioInputProcess(pid: pid, bundleID: user.bundleIdentifier, executablePath: nil, isRunningInput: nil)
     }
 }
 
