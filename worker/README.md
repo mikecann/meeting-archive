@@ -148,7 +148,7 @@ bundle without that list falls back to the attendees of its only event under
 `identify-speakers` is what the app's **Save names** runs. `--names` is a JSON
 object of speaker ID to name; every name is saved in one transaction or none
 is, and the reply lists exactly what was saved,
-`{"schema_version":1,"meeting_id","manifest_revision","speakers":[{"speaker_id","name","voice_profile_enrolled"}]}`.
+`{"schema_version":1,"meeting_id":"UUID","manifest_revision":1,"speakers":[{"speaker_id":"incoming:SPEAKER_00","name":"Name","voice_profile_enrolled":true}]}`.
 `identify` saves one name the same way. Both use each speaker's saved
 observation and enroll it only because Mike saved that name. A speaker whose
 pyannote embedding is empty, non-finite or all zeros has no embedding: it is
@@ -231,7 +231,7 @@ An OpenRouter outage never holds up transcription or Notion. The page is
 published without a summary and updated in place once one arrives. Rate limits
 (429), timeouts (408), server errors and network failures retry with backoff
 from 1 minute, doubling to an hour, never sooner than a `Retry-After` header
-asks, and become a `permanent_failure` after 8 attempts. Running out of
+asks (up to a day), and become a `permanent_failure` after 8 attempts. Running out of
 credits (402) waits an hour between tries, so a top-up within about seven
 hours lets it carry on by itself. An answer that runs out of room is asked for
 again with 16,000 tokens, and one that isn't valid JSON in the expected shape
