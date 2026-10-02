@@ -470,8 +470,6 @@ private struct PermissionRow: View {
         switch status {
         case .notRequested:
             return permission == .calendar ? "Not requested · Connect" : "Not requested · Allow"
-        case .needsAccess:
-            return "Needs access · Open Settings"
         case .granted:
             return "Granted"
         case .denied:
