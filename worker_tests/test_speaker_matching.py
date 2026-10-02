@@ -462,15 +462,30 @@ class MeetingMatchTests(unittest.TestCase):
         self.assertIsNone(match["automatic_name"])
 
     def test_disagreeing_evidence_becomes_a_suggestion_not_a_name(self) -> None:
-        self._confirm_elsewhere("Sean", unit(1.0, 0.3, 0.0), speaker_id="incoming:SPEAKER_00")
+        self._confirm_elsewhere("Blake", unit(1.0, 0.3, 0.0), speaker_id="incoming:SPEAKER_00")
         self._observe("incoming:SPEAKER_00", unit(1.0, 0.0, 0.8))
         self._observe("incoming:SPEAKER_01", [1.0, 0.0, 0.0])
-        self.registry.confirm_observation(self.meeting, 1, "incoming:SPEAKER_00", "Micah")
+        self.registry.confirm_observation(self.meeting, 1, "incoming:SPEAKER_00", "Alex")
 
         match = self._matches("incoming:SPEAKER_00", "incoming:SPEAKER_01")["incoming:SPEAKER_01"]
 
+        # 0.96 to Blake beats 0.78 to the Alex saved here, so Blake is filled in.
         self.assertIsNone(match["automatic_name"])
-        self.assertEqual(match["suggested_name"], "Micah")
+        self.assertEqual(match["suggested_name"], "Blake")
+        self.assertEqual(match["suggestion_kind"], "tentative")
+
+    def test_disagreeing_evidence_suggests_whichever_voice_is_closer(self) -> None:
+        self._confirm_elsewhere("Blake", unit(1.0, 0.0, 0.9), speaker_id="incoming:SPEAKER_00")
+        self._confirm_elsewhere("Blake", unit(1.0, 0.0, 0.9), speaker_id="incoming:SPEAKER_00")
+        self._observe("incoming:SPEAKER_00", unit(1.0, 0.3, 0.0))
+        self._observe("incoming:SPEAKER_01", [1.0, 0.0, 0.0])
+        self.registry.confirm_observation(self.meeting, 1, "incoming:SPEAKER_00", "Alex")
+
+        match = self._matches("incoming:SPEAKER_00", "incoming:SPEAKER_01")["incoming:SPEAKER_01"]
+
+        # 0.96 to the Alex saved here beats 0.74 to Blake from two meetings.
+        self.assertIsNone(match["automatic_name"])
+        self.assertEqual(match["suggested_name"], "Alex")
         self.assertEqual(match["suggestion_kind"], "tentative")
 
     def test_a_saved_name_hides_any_other_name_for_that_voice(self) -> None:

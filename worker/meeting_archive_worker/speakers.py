@@ -795,21 +795,24 @@ class SpeakerRegistry:
                 # Mike's saved name wins. Any other name would only contradict it.
                 match.update(suggested_name=None, automatic_name=None, suggestion_kind=None)
             else:
-                candidates: list[tuple[str, str]] = []
+                # Each candidate is (score, kind, name).
+                candidates: list[tuple[float, str, str]] = []
                 sibling = cls._same_meeting_name(speaker, records, assignments)
                 if sibling is not None:
-                    candidates.append(("same_meeting", sibling))
+                    candidates.append((sibling[0], "same_meeting", sibling[1]))
                 if match["automatic_name"]:
-                    candidates.append(("strong", str(match["automatic_name"])))
+                    candidates.append((ranked[0][0], "strong", str(match["automatic_name"])))
                 if microphones == [speaker] and cls._sounds_like_microphone_owner(
                     connection, ranked, model_id, len(embedding), meeting_id,
                 ):
-                    candidates.append(("own_microphone", ranked[0][1]))
+                    candidates.append((ranked[0][0], "own_microphone", ranked[0][1]))
                 if candidates:
-                    kind, name = candidates[0]
-                    if len({candidate for _, candidate in candidates}) == 1:
+                    _, kind, name = candidates[0]
+                    if len({candidate for _, _, candidate in candidates}) == 1:
                         match.update(suggested_name=name, automatic_name=name, suggestion_kind=kind)
                     else:
+                        # Suggest whichever name has the closest voice.
+                        _, _, name = max(candidates, key=lambda candidate: candidate[0])
                         match.update(suggested_name=name, automatic_name=None, suggestion_kind="tentative")
             result[speaker] = match
         return result
@@ -820,8 +823,9 @@ class SpeakerRegistry:
         speaker: str,
         records: dict[str, tuple[list[float], str]],
         assignments: dict[str, str],
-    ) -> str | None:
-        """The name Mike saved for a voice in this meeting that this one matches."""
+    ) -> tuple[float, str] | None:
+        """The name Mike saved for a voice in this meeting that this one
+        matches, with its score."""
         embedding, model_id = records[speaker]
         by_name: dict[str, float] = {}
         for other, name in assignments.items():
@@ -836,7 +840,7 @@ class SpeakerRegistry:
             return None
         if len(ranked) > 1 and ranked[0][0] - ranked[1][0] < MATCH_MARGIN:
             return None
-        return ranked[0][1]
+        return ranked[0]
 
     @classmethod
     def _sounds_like_microphone_owner(
