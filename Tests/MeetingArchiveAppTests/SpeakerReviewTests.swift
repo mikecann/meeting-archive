@@ -207,7 +207,12 @@ final class SpeakerReviewTests: XCTestCase {
                 meetingID: meetingID, revision: 3, names: ["incoming:SPEAKER_00": "Sean"], configuration: .bruce
             )
             XCTFail("A different name back must not count as saved")
-        } catch {}
+        } catch {
+            XCTAssertEqual(
+                error as? SpeakerReviewError,
+                .invalidResponse("identify-speakers returned different names from the ones sent")
+            )
+        }
     }
 
     func testReviewRequestUsesResolvedArchiveDirectoryAndWorkerTimeout() throws {
