@@ -280,10 +280,6 @@ class VoiceEmbeddingTests(unittest.TestCase):
             self.assertTrue(transcript["processing"]["speaker_observations_committed"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class DiarizationDeviceTests(unittest.TestCase):
     def test_the_gpu_is_used_when_there_is_one_unless_the_cpu_is_asked_for(self) -> None:
         from meeting_archive_worker.model_processor import diarization_device
@@ -376,3 +372,7 @@ class EchoTests(unittest.TestCase):
 
         self.assertEqual(removed, 0)
         self.assertEqual(len(kept), 6)
+
+
+if __name__ == "__main__":
+    unittest.main()
