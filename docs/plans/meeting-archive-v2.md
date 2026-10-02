@@ -1,6 +1,6 @@
 # Meeting Archive v2: audio only, started by the mic
 
-Status: approved by Mike on 2026-10-01, in progress on `claude/meeting-archive-v2`.
+Status: approved by Mike on 2026-10-01. Installed on Mike's Mac and Bruce on 2026-10-02 from `claude/meeting-archive-v2`; live testing continues.
 
 ## Why
 
@@ -146,9 +146,21 @@ its first ones.
 Deploy the worker before the app: **Save names** needs `identify-speakers` on
 Bruce, and an older worker answers it with an error the window shows.
 
-## Live tests before installing for real
+## Live tests
 
-Each with headphones and once on speakers:
+Each with headphones and once on speakers. Results so far (2 Oct 2026):
+
+- A fake call (an app holding the mic while the Mac spoke) was detected within a
+  second, recorded on both tracks, stopped 30 s after release, kept, uploaded,
+  transcribed and published to Notion in about two minutes. On speakers the mic
+  repeated the call audio, which led to the echo cleanup on Bruce.
+- A 34 minute Zoom call and a 33 minute Slack huddle were caught on their own
+  overnight. Zoom holding the mic for 38 s before the huddle was thrown away as
+  under a minute, and the huddle started in the same second. Each took about 15
+  minutes to process on Bruce with GPU diarization, against 2.5 hours for a
+  61 minute call before.
+- Still to try: Teams and Meet in Chrome, FaceTime, AirPods switching, and a
+  deliberate quit mid-call.
 
 | Scenario | Expected |
 | --- | --- |
@@ -165,13 +177,13 @@ Each with headphones and once on speakers:
 
 ## Open items
 
-- The calendar only ever matched one family event, so the Convex Google account
-  is probably missing from macOS Internet Accounts. Mike to check.
-- AI titles and summaries are built: Claude Opus 5.5, through Mike's existing
-  OpenRouter account, writes a title, three to five summary points and action
-  items for each meeting, shown in Notion and synced to the app's library.
-  They stay off until the updated worker is on Bruce, `openRouterApiKey` is in
-  its protected credentials file and the worker is restarted. No extra package
-  is needed. The first start then summarizes earlier meetings too, at roughly
-  5 to 15 US cents each. Only titles nobody chose are replaced; calendar
-  titles and renames stay.
+- The Convex calendar can't be added to macOS (SSO), and it's shared with
+  Mike's personal account as free/busy only, so work calls rarely get a
+  calendar title. AI titles cover that instead.
+- AI titles and summaries are live: Claude Opus 5.5 through Mike's existing
+  OpenRouter key writes a title, three to five summary points and action items
+  for each meeting, shown in Notion and synced to the app's library. All
+  earlier meetings were summarized on 2 Oct, at about 5 US cents for a half
+  hour call. Only titles nobody chose are replaced.
+- Speaker review excerpts play both tracks mixed, which makes some voices hard
+  to tell apart. Playing just the speaker's own track would help.
