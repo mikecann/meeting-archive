@@ -4,7 +4,9 @@ import Foundation
 import MeetingArchiveCore
 
 struct MicUsageSnapshot: Equatable, Sendable {
-    /// Apps holding the mic, in the order each one took it, without ignored apps.
+    /// Apps holding the mic, without ignored apps, in the order each one took
+    /// it. Apps first seen in the same scan, as at launch, keep Core Audio's
+    /// order, since nothing says which of them came first.
     var users: [MicUser]
     /// Ignored apps holding the mic, in the same order.
     var ignored: [MicUser]
