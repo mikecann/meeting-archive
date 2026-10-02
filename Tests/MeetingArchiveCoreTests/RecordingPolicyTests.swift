@@ -733,6 +733,22 @@ final class RecordingPolicyTests: XCTestCase {
         )
     }
 
+    func testARestoredMicRestartDoesNotStartWhilePaused() {
+        // Pausing stops a mic recording, so this needs a saved state that has both.
+        let persisted = RecordingPolicyState(
+            isPaused: true,
+            active: ActiveRecording(
+                meetingID: id(50), seriesID: id(40), part: 1, trigger: .microphone(zoom),
+                startedAt: t(0), lastHeldAt: t(0), isCapturing: true
+            )
+        )
+        var policy = RecordingPolicy(restoringPersistedState: persisted, now: t(500), makeID: ids.next)
+
+        XCTAssertEqual(policy.handle(.tick(micUsers: [zoom], at: t(501))), [])
+        XCTAssertNil(policy.state.active)
+        XCTAssertNil(policy.state.pendingRestart)
+    }
+
     func testRestoreLeavesAWaitingRestartPauseAndSuppressionAlone() {
         let persisted = RecordingPolicyState(
             isPaused: true,

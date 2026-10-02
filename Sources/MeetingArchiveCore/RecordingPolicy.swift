@@ -315,7 +315,8 @@ public struct RecordingPolicy: Sendable {
             case .microphone(let app):
                 let stillHeld = holds(app, users)
                 if date >= pending.notBefore {
-                    if stillHeld { return [startNextPart(of: pending, at: date)] }
+                    // Pause holds back the mic, and that includes a restart.
+                    if stillHeld, !state.isPaused { return [startNextPart(of: pending, at: date)] }
                     state.pendingRestart = nil
                 } else if stillHeld {
                     // The app is still on its call, so its own restart comes
