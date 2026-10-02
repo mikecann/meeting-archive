@@ -254,7 +254,7 @@ struct SpeakerReviewCard: Identifiable, Equatable, Sendable {
 
     /// Names that only differ by case, accents or spacing are one person.
     static func groupingKey(_ name: String) -> String {
-        name.trimmingCharacters(in: .whitespacesAndNewlines)
+        name.split(whereSeparator: \.isWhitespace).joined(separator: " ")
             .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
     }
 
@@ -644,7 +644,9 @@ final class SpeakerReviewModel: ObservableObject {
     }
 
     /// Once a name is finished, a card with the same name as another is the
-    /// same person, so the two become one card under the name already there.
+    /// same person, so the two become one card. Bruce matches people by their
+    /// exact name, so the other card keeps a spelling Bruce already holds for
+    /// one of its voices. Otherwise the name just typed wins.
     func commitName(forCard cardID: SpeakerReviewCard.ID) {
         guard let index = cards.firstIndex(where: { $0.id == cardID }) else { return }
         let key = SpeakerReviewCard.groupingKey(cards[index].name)
@@ -652,6 +654,7 @@ final class SpeakerReviewModel: ObservableObject {
               let other = cards.firstIndex(where: { $0.id != cardID && SpeakerReviewCard.groupingKey($0.name) == key })
         else { return }
         var merged = cards[other]
+        if !hasBrucesSpelling(merged) { merged.name = cards[index].name }
         merged.speakerIDs = index < other
             ? cards[index].speakerIDs + cards[other].speakerIDs
             : cards[other].speakerIDs + cards[index].speakerIDs
@@ -660,13 +663,34 @@ final class SpeakerReviewModel: ObservableObject {
         cards.insert(merged, at: position)
     }
 
+    /// Whether Bruce saved, recognized or suggested a card's exact name for
+    /// any of its voices.
+    private func hasBrucesSpelling(_ card: SpeakerReviewCard) -> Bool {
+        let name = card.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return card.speakerIDs.contains { speakerID in
+            let voice = speaker(speakerID)
+            return [savedNames[speakerID], voice?.automaticName, voice?.suggestedName]
+                .contains { $0?.trimmingCharacters(in: .whitespacesAndNewlines) == name }
+        }
+    }
+
     func chooseName(_ name: String, forCard cardID: SpeakerReviewCard.ID) {
         setName(name, forCard: cardID)
         commitName(forCard: cardID)
     }
 
+    /// The name Bruce gave one of a card's voices itself. It stays on the
+    /// transcript until another name is saved, even when the card is cleared
+    /// or the voice is separated here, since Bruce can't forget a name yet.
+    func recognizedName(for card: SpeakerReviewCard) -> String? {
+        card.speakerIDs.lazy
+            .compactMap { self.speaker($0)?.automaticName?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+    }
+
     /// Takes a voice out of its card when it isn't that person after all. It
-    /// starts without a name.
+    /// starts without a name, and keeps any name Bruce saved or recognized
+    /// for it until another one is saved.
     func separate(_ speakerID: String) {
         guard let index = cards.firstIndex(where: { $0.speakerIDs.contains(speakerID) }),
               cards[index].speakerIDs.count > 1
@@ -1048,6 +1072,10 @@ struct SpeakerReviewView: View {
         case .unknown:
             if let saved = card.speakerIDs.compactMap({ model.savedNames[$0] }).first {
                 return "Saved as \(saved). Type another name to change it."
+            }
+            // Leaving it blank keeps Bruce's name on the transcript.
+            if let recognized = model.recognizedName(for: card) {
+                return "Recognized as \(recognized). Type another name to change it."
             }
             return "Leave it blank if you don't know who this is."
         case .saved:

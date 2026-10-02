@@ -24,6 +24,72 @@ private struct LegacyCaptureJournal: Decodable {
     let startedAt: Date
 }
 
+/// What an interrupted part left on disk, measured the way a recording
+/// measures itself, so recovery keeps it by the same rule as a part saved on
+/// quit: anything heard keeps it.
+struct RecoveredPart: Equatable, Sendable {
+    /// The longest track, in seconds.
+    var duration: TimeInterval
+    /// Seconds of sound on each track. A track that never started heard
+    /// nothing. Nil is one that couldn't be read to the end.
+    var incomingActivity: TimeInterval?
+    var microphoneActivity: TimeInterval?
+
+    static func measure(_ directory: URL) async throws -> RecoveredPart {
+        var part = RecoveredPart(duration: 0, incomingActivity: 0, microphoneActivity: 0)
+        for (url, kind) in try SpoolBundle.mediaFiles(in: directory) {
+            let asset = AVURLAsset(url: url)
+            let seconds = try await asset.load(.duration).seconds
+            if seconds.isFinite { part.duration = max(part.duration, seconds) }
+            switch kind {
+            case .incomingAudio: part.incomingActivity = await activitySeconds(of: asset)
+            case .microphoneAudio: part.microphoneActivity = await activitySeconds(of: asset)
+            default: break
+            }
+        }
+        return part
+    }
+
+    func keepDecision(for entry: CaptureJournal, policy: KeepPolicy = KeepPolicy()) -> KeepDecision {
+        // Silence only counts once a track has been read to the end.
+        guard let incomingActivity, let microphoneActivity else { return .keep }
+        return policy.decide(
+            trigger: entry.trigger, stopReason: .appQuit, part: entry.part, duration: duration,
+            incomingActivity: incomingActivity, microphoneActivity: microphoneActivity
+        )
+    }
+
+    /// Decodes a track and counts its sound in the recorder's 100 ms windows.
+    /// A crash leaves the file readable up to its last whole fragment.
+    private static func activitySeconds(of asset: AVURLAsset) async -> TimeInterval? {
+        guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
+              let reader = try? AVAssetReader(asset: asset) else { return nil }
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+            AVLinearPCMIsBigEndianKey: false,
+        ])
+        guard reader.canAdd(output) else { return nil }
+        reader.add(output)
+        guard reader.startReading() else { return nil }
+        var meter: ActivityMeter?
+        while let sample = output.copyNextSampleBuffer() {
+            guard CMSampleBufferGetNumSamples(sample) > 0 else { continue }
+            guard let buffer = AVAudioPCMBuffer.copying(sample) else {
+                reader.cancelReading()
+                return nil
+            }
+            if meter == nil { meter = ActivityMeter(sampleRate: buffer.format.sampleRate, channels: Int(buffer.format.channelCount)) }
+            meter?.add(buffer)
+        }
+        guard reader.status == .completed else { return nil }
+        meter?.finish()
+        return meter?.activeSeconds ?? 0
+    }
+}
+
 /// What the user is told about recordings. Kept apart from the controller so
 /// the wording, and when it is shown, can be tested.
 enum CaptureNotice {
@@ -507,13 +573,19 @@ final class ArchiveController: ObservableObject {
             var meeting = makeRecord(entry, ended: ended, microphone: result.microphone)
             adoptDefaultCalendarsIfNeeded()
             let events = calendar.suggestions(start: entry.startedAt, end: callEnded, selectedCalendarIDs: settings.selectedCalendarIDs)
-            if let match = CalendarRanking.best(events, start: entry.startedAt, end: callEnded) {
+            let match = CalendarRanking.best(events, start: entry.startedAt, end: callEnded)
+            if let match {
                 meeting.title = entry.part > 1 ? "\(match.title) (part \(entry.part))" : match.title
                 // Bruce never gives a calendar title an AI one in its place.
                 meeting.titleSource = .calendar
             }
-            try ModelCodec.encoder.encode(events).write(to: directory.appendingPathComponent("calendar.json"), options: .atomic)
-            try store?.insertMeeting(meeting)
+            try SpoolBundle.saveCalendar(events, match: match, in: directory)
+            guard let store else {
+                // The journal stays, so a launch that opens the library recovers this part.
+                fail("The meeting library isn't open, so this recording stays on this Mac until a relaunch can recover it.")
+                return
+            }
+            try store.insertMeeting(meeting)
             savedParts[entry.seriesID, default: []].append(entry.id)
             try? FileManager.default.removeItem(at: directory.appendingPathComponent("capture-journal.json"))
             if reason != .appQuit {
@@ -580,6 +652,9 @@ final class ArchiveController: ObservableObject {
     }
 
     private func recoverInterruptedCaptures() async {
+        // Without the library a part has nowhere to go, so every journal
+        // stays for a launch that can open it.
+        guard let store else { return }
         var issues: [String] = []
         do {
             for directory in try FileManager.default.contentsOfDirectory(at: AppPaths.spool, includingPropertiesForKeys: nil) {
@@ -587,14 +662,10 @@ final class ArchiveController: ObservableObject {
                     let path = directory.appendingPathComponent("capture-journal.json")
                     guard let data = try? Data(contentsOf: path) else { continue }
                     let entry = try Self.decodeJournal(data)
-                    guard try store?.fetchMeeting(id: entry.id) == nil else { continue }
-                    let media = try SpoolBundle.mediaFiles(in: directory)
-                    var duration = 0.0
-                    for (url, _) in media {
-                        let value = try await AVURLAsset(url: url).load(.duration).seconds
-                        if value.isFinite { duration = max(duration, value) }
-                    }
-                    guard duration > 0 else {
+                    guard try store.fetchMeeting(id: entry.id) == nil else { continue }
+                    // Decoding takes a few seconds per hour of audio, so it runs off the main thread.
+                    let part = try await Task.detached(priority: .userInitiated) { try await RecoveredPart.measure(directory) }.value
+                    guard part.duration > 0 else {
                         // Nothing reached a file before the app stopped.
                         removeJournalOnlyDirectory(directory)
                         if FileManager.default.fileExists(atPath: directory.path) {
@@ -602,14 +673,19 @@ final class ArchiveController: ObservableObject {
                         }
                         continue
                     }
-                    if duration < Self.minimumRecoveredDuration {
-                        // A few seconds cut off by a crash or logout is a stray mic grab, not a call.
+                    // The rule for a part saved on quit: a crash in the first
+                    // seconds of a call keeps its opening, a silent mic grab goes.
+                    if case .discard(let why) = part.keepDecision(for: entry, policy: keepPolicy) {
                         try FileManager.default.removeItem(at: directory)
+                        Log.controller.notice("Not keeping recovered \(entry.id.uuidString, privacy: .public): \(why, privacy: .public)")
                         continue
                     }
                     // Saved like any other part, so it gets the same window to be discarded.
-                    let record = makeRecord(entry, ended: entry.startedAt.addingTimeInterval(duration), microphone: nil)
-                    try store?.insertMeeting(record)
+                    let record = makeRecord(entry, ended: entry.startedAt.addingTimeInterval(part.duration), microphone: nil)
+                    try store.insertMeeting(record)
+                    // The call carries on as the next part of this series, so
+                    // discarding it discards this part too while it's pending.
+                    savedParts[entry.seriesID, default: []].append(entry.id)
                     try FileManager.default.removeItem(at: path)
                     let notice = CaptureNotice.recovered(title: record.title)
                     notify(notice.title, body: notice.body, id: record.id.uuidString + "-finish", category: NotificationRouter.savedCategory, meetingID: record.id)
@@ -622,8 +698,6 @@ final class ArchiveController: ObservableObject {
         } catch { issues.append(error.localizedDescription) }
         if !issues.isEmpty { fail("Interrupted recordings were kept for recovery: " + issues.prefix(3).joined(separator: "; ")) }
     }
-
-    static let minimumRecoveredDuration: TimeInterval = 5
 
     private static func decodeJournal(_ data: Data) throws -> CaptureJournal {
         if let entry = try? ModelCodec.decoder.decode(CaptureJournal.self, from: data) { return entry }

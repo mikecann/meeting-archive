@@ -21,7 +21,9 @@ final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate, @unc
     private static let discardAction = "discard"
     private static let discardSavedAction = "discard-saved"
 
-    private var handler: (@MainActor (Action) -> Void)?
+    /// Set by `install`. Tests set it directly, since installing needs a
+    /// notification center that only an app bundle has.
+    var handler: (@MainActor (Action) -> Void)?
 
     @MainActor
     func install(_ handler: @escaping @MainActor (Action) -> Void) {
@@ -60,11 +62,27 @@ final class NotificationRouter: NSObject, UNUserNotificationCenterDelegate, @unc
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        let action = Self.action(identifier: response.actionIdentifier, userInfo: response.notification.request.content.userInfo)
-        if let action {
-            Task { @MainActor in self.handler?(action) }
+        respond(
+            to: Self.action(identifier: response.actionIdentifier, userInfo: response.notification.request.content.userInfo),
+            completion: completionHandler
+        )
+    }
+
+    /// Runs the button's action, then tells macOS the response is handled.
+    /// In that order, since macOS may stop an app it woke for the button once
+    /// it hears back.
+    func respond(to action: Action?, completion: @escaping () -> Void) {
+        let completion = Completion(call: completion)
+        Task { @MainActor in
+            if let action { self.handler?(action) }
+            completion.call()
         }
-        completionHandler()
+    }
+
+    /// macOS's completion handler isn't marked Sendable, but it may be called
+    /// from any thread, so it can wait for the main actor.
+    private struct Completion: @unchecked Sendable {
+        let call: () -> Void
     }
 
     /// A menu-bar app is often frontmost while a call runs, so show banners

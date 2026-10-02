@@ -132,6 +132,19 @@ final class SpeakerReviewTests: XCTestCase {
         XCTAssertEqual(cards.map(\.name), ["Micah", "", "", "Mike Cann"])
     }
 
+    func testNamesThatOnlyDifferInSpacingShareOneCard() {
+        XCTAssertEqual(SpeakerReviewCard.groupingKey(" Alex  Chen "), SpeakerReviewCard.groupingKey("alex chen"))
+        XCTAssertEqual(SpeakerReviewCard.groupingKey("Alex\tChen"), SpeakerReviewCard.groupingKey("Alex Chen"))
+        XCTAssertNotEqual(SpeakerReviewCard.groupingKey("Alex Chen"), SpeakerReviewCard.groupingKey("AlexChen"))
+
+        let cards = SpeakerReviewCard.make(speakers: [
+            makeSpeaker(id: "incoming:SPEAKER_00", name: "Alex Chen"),
+            makeSpeaker(id: "incoming:SPEAKER_01", suggestion: "Alex  Chen", suggestionKind: "tentative"),
+        ])
+
+        XCTAssertEqual(cards.map(\.speakerIDs), [["incoming:SPEAKER_00", "incoming:SPEAKER_01"]])
+    }
+
     func testRemoteShellQuotesArbitraryNamesAsOneLiteralArgument() {
         let name = "D'Angelo $(touch /tmp/nope); `whoami`\nSecond line"
 
@@ -207,7 +220,12 @@ final class SpeakerReviewTests: XCTestCase {
                 meetingID: meetingID, revision: 3, names: ["incoming:SPEAKER_00": "Sean"], configuration: .bruce
             )
             XCTFail("A different name back must not count as saved")
-        } catch {}
+        } catch {
+            XCTAssertEqual(
+                error as? SpeakerReviewError,
+                .invalidResponse("identify-speakers returned different names from the ones sent")
+            )
+        }
     }
 
     func testReviewRequestUsesResolvedArchiveDirectoryAndWorkerTimeout() throws {
@@ -369,6 +387,42 @@ final class SpeakerReviewTests: XCTestCase {
         XCTAssertEqual(model.namesToSave, ["b": "Micah"])
     }
 
+    /// Bruce matches people by their exact name, so a spelling it already
+    /// holds wins a merge. Between two names Mike typed, the newer one does.
+    @MainActor
+    func testAMergeKeepsBrucesSpellingOtherwiseTheNameJustTyped() async throws {
+        let meetingID = UUID()
+        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: makeResponse(
+            meetingID: meetingID,
+            speakers: [
+                makeSpeaker(id: "suggested", suggestion: "Avery Example", suggestionKind: "tentative"),
+                makeSpeaker(id: "recognized", automaticName: "Zoë Example", suggestionKind: "strong", confirmationCount: 2),
+                makeSpeaker(id: "a"),
+                makeSpeaker(id: "b"),
+                makeSpeaker(id: "c"),
+                makeSpeaker(id: "d"),
+            ]
+        )))
+        await model.load()
+        func type(_ name: String, into speakerID: String) throws {
+            let card = try XCTUnwrap(model.card(containing: speakerID))
+            model.setName(name, forCard: card.id)
+            model.commitName(forCard: card.id)
+        }
+
+        try type("AVERY EXAMPLE", into: "a")
+        try type("zoe example", into: "b")
+        try type("drew example", into: "c")
+        try type("Drew Example", into: "d")
+
+        XCTAssertEqual(model.card(containing: "a")?.speakerIDs, ["suggested", "a"])
+        XCTAssertEqual(model.card(containing: "a")?.name, "Avery Example")
+        XCTAssertEqual(model.card(containing: "b")?.speakerIDs, ["b", "recognized"])
+        XCTAssertEqual(model.card(containing: "b")?.name, "Zoë Example")
+        XCTAssertEqual(model.card(containing: "d")?.speakerIDs, ["c", "d"])
+        XCTAssertEqual(model.card(containing: "d")?.name, "Drew Example", "Mike's correction stands")
+    }
+
     @MainActor
     func testChoosingACalendarAttendeeMergesStraightAway() async throws {
         let meetingID = UUID()
@@ -404,6 +458,35 @@ final class SpeakerReviewTests: XCTestCase {
         _ = await model.save()
         let calls = await client.savedNameCalls()
         XCTAssertEqual(calls, [["a": "Sean"]])
+    }
+
+    /// Bruce can't forget a name yet, so a voice taken out of its card keeps
+    /// a name Bruce gave it until another is saved, and its card says so.
+    @MainActor
+    func testASeparatedVoiceKnowsTheNameBruceKeepsForIt() async throws {
+        let meetingID = UUID()
+        let model = makeModel(meetingID: meetingID, client: StubSpeakerReviewClient(response: makeResponse(
+            meetingID: meetingID,
+            speakers: [
+                makeSpeaker(id: "saved", name: "Robin Example"),
+                makeSpeaker(id: "recognized", automaticName: "Robin Example", suggestionKind: "strong", confirmationCount: 2),
+                makeSpeaker(id: "suggested", suggestion: "Robin Example", suggestionKind: "tentative"),
+            ]
+        )))
+        await model.load()
+        XCTAssertEqual(model.cards.count, 1)
+
+        model.separate("recognized")
+        model.separate("suggested")
+
+        let recognized = try XCTUnwrap(model.card(containing: "recognized"))
+        XCTAssertEqual(model.status(of: recognized), .unknown)
+        XCTAssertEqual(model.recognizedName(for: recognized), "Robin Example")
+        XCTAssertNil(
+            model.recognizedName(for: try XCTUnwrap(model.card(containing: "suggested"))),
+            "a suggestion never reaches the transcript"
+        )
+        XCTAssertEqual(model.namesToSave, [:])
     }
 
     @MainActor

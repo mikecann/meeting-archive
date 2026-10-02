@@ -97,12 +97,32 @@ enum SpoolBundle {
         return manifest
     }
 
+    /// The events around a call, and the one it matched, if any. The title
+    /// came from that match, so the attendees do too. Ranking again against
+    /// the part's end would count the release grace after the call.
+    static func saveCalendar(_ events: [CalendarSuggestion], match: CalendarSuggestion?, in directory: URL) throws {
+        try ModelCodec.encoder.encode(events).write(to: directory.appendingPathComponent("calendar.json"), options: .atomic)
+        try ModelCodec.encoder.encode(CalendarMatch(eventID: match?.id))
+            .write(to: directory.appendingPathComponent(calendarMatchName), options: .atomic)
+    }
+
     /// Only the event that clearly matches the recording counts. Attendees of
     /// a neighbouring event are not people who might have spoken.
     static func matchedAttendees(in directory: URL, record: MeetingRecord) throws -> [CalendarAttendee] {
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("calendar.json")) else { return [] }
         let events = try ModelCodec.decoder.decode([CalendarSuggestion].self, from: data)
+        if let saved = try? Data(contentsOf: directory.appendingPathComponent(calendarMatchName)) {
+            let match = try ModelCodec.decoder.decode(CalendarMatch.self, from: saved)
+            return events.first { $0.id == match.eventID }?.attendees ?? []
+        }
+        // A bundle saved before the match was kept.
         return CalendarRanking.best(events, start: record.startedAt, end: record.endedAt)?.attendees ?? []
+    }
+
+    private static let calendarMatchName = "calendar-match.json"
+
+    private struct CalendarMatch: Codable {
+        var eventID: String?
     }
 
     static func hash(_ url: URL) throws -> String {
