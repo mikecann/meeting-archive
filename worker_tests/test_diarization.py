@@ -345,6 +345,27 @@ class DiarizationDeviceTests(unittest.TestCase):
         self.assertEqual(transcriber.diarizer.calls, ["mps", "cpu"])
         self.assertEqual(transcriber.diarizer_device, "cpu")
 
+    def test_a_pipeline_that_wont_move_to_the_cpu_is_not_run_again_on_the_gpu(self) -> None:
+        class Pipeline:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def to(self, device) -> None:
+                raise RuntimeError("MPS device lost")
+
+            def __call__(self, audio, **options):
+                self.calls += 1
+                raise RuntimeError("MPS backend out of memory")
+
+        transcriber = object.__new__(WhisperPyannoteTranscriber)
+        transcriber.diarizer = Pipeline()
+        transcriber.diarizer_device = "mps"
+
+        with self.assertRaisesRegex(RuntimeError, "out of memory"):
+            transcriber._run_diarizer(object())
+        self.assertEqual(transcriber.diarizer.calls, 1)
+        self.assertEqual(transcriber.diarizer_device, "mps")
+
     def test_a_cpu_failure_is_not_retried(self) -> None:
         class Pipeline:
             def __call__(self, audio, **options):
