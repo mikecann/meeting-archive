@@ -167,6 +167,23 @@ final class AudioTrackWriterTests: XCTestCase {
         XCTAssertEqual(try ReadBack(writer.url).rms(from: 0.1, to: 0.9), 0.05 / 2.squareRoot(), accuracy: 0.005)
     }
 
+    func testAChunkStampedADayBehindTheTrackIsDropped() async throws {
+        let writer = AudioTrackWriter.microphone(directory: directory, origin: origin)
+        let input = try format(.pcmFormatFloat32, rate: 48_000, channels: 1)
+        feed(writer, signal(input, from: 0, seconds: 1, value: sine(440, amplitude: 0.1)))
+        // Trimming it would take more frames than a buffer can count. All of
+        // it overlaps audio the track already has, so none of it is written.
+        feed(writer, signal(input, from: -100_000, seconds: 0.1, value: sine(440, amplitude: 0.3)))
+        feed(writer, signal(input, from: 1, seconds: 1, value: sine(440, amplitude: 0.1)))
+
+        let summary = await writer.finish()
+
+        XCTAssertNil(summary.error)
+        let file = try ReadBack(writer.url)
+        XCTAssertEqual(file.duration, 2, accuracy: 0.05)
+        XCTAssertEqual(file.rms(from: 0.1, to: 1.9), 0.1 / 2.squareRoot(), accuracy: 0.01)
+    }
+
     func testATrackStartsAtTheSharedOriginEvenWhenItsSourceStartsLate() async throws {
         let writer = AudioTrackWriter.incoming(directory: directory, origin: origin)
         let input = try format(.pcmFormatFloat32, rate: 48_000, channels: 2)
