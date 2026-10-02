@@ -508,8 +508,9 @@ public struct KeepPolicy: Equatable, Sendable {
         return .keep
     }
 
+    /// Rounded up, so a discarded part is always under the bar it names.
     private var underMinimumDuration: String {
-        let seconds = Int(minimumDuration.rounded())
+        let seconds = Int(minimumDuration.rounded(.up))
         if seconds == 60 { return "under a minute" }
         if seconds > 60, seconds % 60 == 0 { return "under \(seconds / 60) minutes" }
         return "under \(seconds) seconds"

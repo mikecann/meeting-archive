@@ -892,6 +892,15 @@ final class RecordingPolicyTests: XCTestCase {
             KeepPolicy(minimumDuration: 45).decide(trigger: mic, stopReason: .micReleased, part: 1, duration: 30, incomingActivity: 20, microphoneActivity: 20),
             .discard(reason: "under 45 seconds")
         )
+        // A bar between whole seconds rounds up, so the reason stays true.
+        XCTAssertEqual(
+            KeepPolicy(minimumDuration: 45.4).decide(trigger: mic, stopReason: .micReleased, part: 1, duration: 45.2, incomingActivity: 20, microphoneActivity: 20),
+            .discard(reason: "under 46 seconds")
+        )
+        XCTAssertEqual(
+            KeepPolicy(minimumDuration: 119.2).decide(trigger: mic, stopReason: .micReleased, part: 1, duration: 119.1, incomingActivity: 20, microphoneActivity: 20),
+            .discard(reason: "under 2 minutes")
+        )
     }
 
     // MARK: Helpers
