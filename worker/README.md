@@ -88,8 +88,9 @@ also asks for word timestamps, which slow Whisper down, and gives each word to
 the pyannote speaker active at the word's midpoint (the nearest speaker turn if
 none is). A Whisper line is split into separate turns where the speaker
 changes, so someone cutting in mid-sentence no longer has their words labelled
-as the previous speaker's. One or two words under 0.3 seconds sitting between
-the same speaker on both sides stay with that speaker instead of making a turn.
+as the previous speaker's. A run of one or two words spanning under 0.3 seconds
+in total, sitting between the same speaker on both sides, stays with that
+speaker instead of making a turn.
 A track held to one speaker skips word timestamps. Diarization decodes through
 ffmpeg into a disk-backed 16 kHz mono buffer so pyannote does not depend on
 torchcodec's FFmpeg ABI support. The float waveform has a default 1.5 GiB
@@ -168,7 +169,8 @@ Matching gates come from Mike's own voices on Bruce on 2 Oct 2026: 22 confirmed
 voices from 9 meetings. Two different people scored at most 0.654 against each
 other across meetings and 0.640 within one meeting; the same person scored
 anywhere from 0.04 to 0.82, because short and split voices give noisy
-embeddings. So only the mic's single voice is ever named below 0.72:
+embeddings. So similarity-based naming only names the mic's single voice below 0.72
+(naming from the conversation, below, is a separate signal):
 
 | Rule | Gate | Result |
 | --- | --- | --- |

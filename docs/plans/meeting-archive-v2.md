@@ -124,7 +124,8 @@ that names its labels from what people say (`worker/meeting_archive_worker/
 naming.py`, described in `worker/README.md`). On real meetings the chosen model
 and prompt named 36 of 42 voices correctly and none wrongly. Names at high or
 medium confidence become automatic names, below a saved name and a voice match
-and above nothing; the summary waits for them.
+and above nothing; the summary waits for them while naming is queued or
+running, but not while it is waiting to retry or has failed.
 
 Voices now also teach themselves when two signals agree. A voice the
 conversation named at high confidence is enrolled as an automatic (`context`)

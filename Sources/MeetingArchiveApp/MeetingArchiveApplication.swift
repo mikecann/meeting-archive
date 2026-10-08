@@ -312,7 +312,7 @@ struct MeetingFollowUpView: View {
                         else { Image(systemName: "clock.badge.exclamationmark").font(.largeTitle) }
                         Text(phase.detail).font(.headline)
                     }
-                    Text("Your recording is saved. You can close this window. Once Bruce has worked out who spoke, any voices it doesn't recognize are listed in the menu bar to review whenever you like.")
+                    Text("Your recording is saved. You can close this window. Once Bruce has worked out who spoke, any voices it doesn't recognize can be named from Speakers… in the library whenever you like.")
                         .foregroundStyle(.secondary)
                     Spacer()
                     HStack {
