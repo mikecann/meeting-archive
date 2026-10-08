@@ -858,7 +858,6 @@ final class ArchiveController: ObservableObject {
         return .afterArchive(
             expectedRevision: record.metadataRevision, workerRevision: remote?.manifestRevision,
             processingSucceeded: remote?.processingState == .succeeded,
-            remainingNames: remote?.unconfirmedSpeakerCount,
             processingError: remote?.retryStage == .processing ? remote?.detail : nil,
             connectionError: workerStatusFailure
         )
@@ -870,24 +869,6 @@ final class ArchiveController: ObservableObject {
             return followUpPhase(for: record).isBusy
         }
     }
-
-    var speakerAttentionCandidates: [SpeakerAttentionCandidate] {
-        meetings.compactMap { record in
-            guard case .accepted = record.acceptance,
-                  let remote = workerStatuses[record.id],
-                  remote.manifestRevision == record.metadataRevision,
-                  remote.processingState == .succeeded,
-                  let count = remote.unconfirmedSpeakerCount, count > 0 else { return nil }
-            return SpeakerAttentionCandidate(meetingID: record.id, remainingCount: count)
-        }
-    }
-
-    var meetingsNeedingSpeakerNames: [MeetingRecord] {
-        let ids = Set(speakerAttentionCandidates.map(\.meetingID))
-        return meetings.filter { ids.contains($0.id) }
-    }
-
-    var speakersNeedingNames: Int { speakerAttentionCandidates.reduce(0) { $0 + $1.remainingCount } }
 
     /// Only ever opened by a click: the menu bar, the library or the viewer's
     /// link. Speaker review never pops up by itself.

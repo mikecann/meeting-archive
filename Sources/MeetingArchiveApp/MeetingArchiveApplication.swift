@@ -32,13 +32,6 @@ struct MeetingArchiveApplication: App {
             }
             Button(controller.isPaused ? "Resume automatic recording" : "Pause automatic recording") { controller.togglePause() }
             Divider()
-            if !controller.meetingsNeedingSpeakerNames.isEmpty {
-                Text("\(controller.speakersNeedingNames) speaker\(controller.speakersNeedingNames == 1 ? " needs a name" : "s need names")")
-                ForEach(controller.meetingsNeedingSpeakerNames, id: \.id) { meeting in
-                    Button("Review speakers: \(meeting.title)") { controller.showFollowUp(meeting.id) }
-                }
-                Divider()
-            }
             if !controller.processingMeetings.isEmpty {
                 ForEach(controller.processingMeetings, id: \.id) { meeting in
                     Button("Processing: \(meeting.title)") { controller.showFollowUp(meeting.id) }
@@ -51,12 +44,11 @@ struct MeetingArchiveApplication: App {
             Button("Quit Meeting Archive") { controller.quit() }.keyboardShortcut("q")
         } label: {
             HStack(spacing: 3) {
-                Image(systemName: controller.isRecording ? "record.circle.fill" : controller.speakersNeedingNames > 0 ? "person.crop.circle.badge.exclamationmark" : controller.failure != nil ? "exclamationmark.circle" : controller.isPaused ? "pause.circle" : "waveform.circle")
-                if controller.speakersNeedingNames > 0 { Text("\(controller.speakersNeedingNames)") }
-                else if !controller.processingMeetings.isEmpty { Image(systemName: "hourglass") }
+                Image(systemName: controller.isRecording ? "record.circle.fill" : controller.failure != nil ? "exclamationmark.circle" : controller.isPaused ? "pause.circle" : "waveform.circle")
+                if !controller.processingMeetings.isEmpty { Image(systemName: "hourglass") }
             }
             .foregroundStyle(controller.isRecording ? .red : .primary)
-            .accessibilityLabel(controller.isRecording ? "Meeting Archive: recording" : controller.speakersNeedingNames > 0 ? "Meeting Archive: \(controller.speakersNeedingNames) speakers need names" : "Meeting Archive")
+            .accessibilityLabel(controller.isRecording ? "Meeting Archive: recording" : "Meeting Archive")
         }
         Window("Meeting Archive", id: "library") {
             LibraryView(controller: controller)
@@ -220,7 +212,7 @@ struct LibraryView: View {
                                 .help("Listen with the transcript in Bruce's viewer")
                             Button("Transcript") { controller.openTranscript(record.id) }
                                 .help("Download the transcript as Markdown")
-                            Button(currentWorkerStatus(record)?.unconfirmedSpeakerCount ?? 0 > 0 ? "Name speakers…" : "Speakers…") { controller.showFollowUp(record.id) }
+                            Button("Speakers…") { controller.showFollowUp(record.id) }
                             if currentWorkerStatus(record)?.retryStage != nil {
                                 Button("Retry") { controller.retryWorker(record.id) }
                             }
