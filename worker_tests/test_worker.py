@@ -622,16 +622,34 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(calls.count("process"), 1)
 
     def test_long_job_heartbeat_keeps_second_worker_out(self) -> None:
+        # The queue reads a clock the test moves by hand, so a slow CI runner
+        # can stall a renewal for as long as it likes without the lease running
+        # out. Real time only paces the renewals, so that pace is checked directly.
         with tempfile.TemporaryDirectory() as temporary:
             database = Path(temporary) / "worker.sqlite3"
-            queue = JobQueue(database)
+            now = [100.0]
+            queue = JobQueue(database, clock=lambda: now[0])
             for digest in ("a", "b"):
                 meeting_id = str(uuid.uuid4())
                 queue.enqueue(meeting_id, 1, digest * 64, meeting_id)
-            job = queue.claim_ready("slow-worker", lease_seconds=0.15)
-            with _Heartbeat(queue, job, 0.15):  # type: ignore[arg-type]
-                time.sleep(0.25)
-                self.assertIsNone(queue.claim_ready("second-worker", 0.15))
+            job = queue.claim_ready("slow-worker", lease_seconds=0.25)
+            with _Heartbeat(queue, job, 0.25) as heartbeat:  # type: ignore[arg-type]
+                self.assertLess(heartbeat.interval, 0.25)
+                now[0] = 100.125
+                deadline = time.monotonic() + 10
+                while queue.status()["jobs"][0]["lease_expires_at"] != 100.375:
+                    self.assertIsNone(heartbeat.error)
+                    self.assertLess(time.monotonic(), deadline, "The heartbeat never renewed the lease.")
+                    time.sleep(0.01)
+                # Past the lease the job was claimed with, inside the renewed one.
+                now[0] = 100.3125
+                self.assertIsNone(queue.claim_ready("second-worker", 0.25))
+            self.assertIsNone(heartbeat.error)
+
+            # Once the heartbeat stops, the lease runs out and a second worker gets in.
+            now[0] = queue.status()["jobs"][0]["lease_expires_at"]
+            self.assertIsNotNone(queue.claim_ready("second-worker", 0.25))
+
     def test_only_one_heavy_job_can_be_leased_at_a_time(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
