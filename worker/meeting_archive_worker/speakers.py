@@ -1,4 +1,6 @@
-"""Explicit-confirmation speaker assignments; predictions never enroll themselves."""
+"""Speaker assignments. Mike's saved names enroll voices. A prediction never enrolls
+itself; the one exception is learn_from_context, where the conversation and the
+voice must agree."""
 
 from __future__ import annotations
 
@@ -41,8 +43,22 @@ MATCH_MARGIN = 0.08
 # least this close to it, so those meetings are refreshed.
 REFRESH_SIMILARITY = TENTATIVE_MATCH_THRESHOLD - MATCH_MARGIN
 
+# A voice the conversation named with high confidence is enrolled when it also
+# scores this against an enrolled profile of that same name, or against a voice
+# another meeting's conversation gave that name. The highest score between two
+# different people was 0.654, so the matching name, not the score, is what
+# makes this safe.
+CONTEXT_ENROLL_THRESHOLD = 0.55
+# A voice heard for less than this, or in fewer words, is a junk cluster of
+# interjections and never makes a profile.
+CONTEXT_MINIMUM_SPEECH_SECONDS = 15.0
+CONTEXT_MINIMUM_WORDS = 40
+#: How sure the naming model was. Only these two are kept.
+CONTEXT_CONFIDENCES = ("high", "medium")
+
 #: Kinds of automatic name, as written to transcript speaker_matches.
-AUTOMATIC_KINDS = frozenset({"strong", "own_microphone", "same_meeting"})
+#: "context" is a name the conversation gave a voice, not a voice match.
+AUTOMATIC_KINDS = frozenset({"strong", "own_microphone", "same_meeting", "context"})
 #: Bump when the rules above change. The service then refreshes every meeting
 #: with an unnamed voice once, so older meetings get the new rules without
 #: anyone opening them.
@@ -117,12 +133,24 @@ class SpeakerRegistry:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS speaker_matching_rules (version INTEGER NOT NULL)",
             )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS context_names (
+                meeting_id TEXT NOT NULL, manifest_revision INTEGER NOT NULL,
+                speaker_id TEXT NOT NULL, name TEXT NOT NULL,
+                confidence TEXT NOT NULL, evidence TEXT NOT NULL,
+                speech_seconds REAL NOT NULL, word_count INTEGER NOT NULL,
+                named_at TEXT NOT NULL,
+                PRIMARY KEY(meeting_id, manifest_revision, speaker_id))""",
+            )
             self._ensure_columns(connection, "voice_profiles", {
                 "model_id": "TEXT NOT NULL DEFAULT 'legacy'",
                 "dimension": "INTEGER NOT NULL DEFAULT 0",
                 "source_meeting_id": "TEXT",
                 "source_revision": "INTEGER",
                 "source_speaker_id": "TEXT",
+                # "confirmed" for a name Mike saved, "context" for a voice
+                # enrolled because the conversation and the voice agreed.
+                "source": "TEXT NOT NULL DEFAULT 'confirmed'",
             })
             self._ensure_columns(connection, "speaker_refreshes", {"retry_after": "REAL"})
             self._ensure_columns(connection, "observed_voices", {"model_id": "TEXT NOT NULL DEFAULT 'legacy'", "dimension": "INTEGER NOT NULL DEFAULT 0"})
@@ -229,6 +257,7 @@ class SpeakerRegistry:
         source_meeting_id: str | None = None,
         source_revision: int | None = None,
         source_speaker_id: str | None = None,
+        source: str = "confirmed",
     ) -> None:
         confirmed = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         with closing_connection(lambda: sqlite3.connect(self.database)) as connection:
@@ -241,6 +270,7 @@ class SpeakerRegistry:
                 source_meeting_id=source_meeting_id,
                 source_revision=source_revision,
                 source_speaker_id=source_speaker_id,
+                source=source,
             )
 
     @staticmethod
@@ -254,6 +284,7 @@ class SpeakerRegistry:
         source_meeting_id: str | None,
         source_revision: int | None,
         source_speaker_id: str | None,
+        source: str = "confirmed",
     ) -> None:
         if not name.strip() or not embedding or not all(math.isfinite(value) for value in embedding):
             raise ValueError("A confirmed profile needs a name and finite embedding.")
@@ -274,27 +305,28 @@ class SpeakerRegistry:
             confirmed,
             model_id,
             len(embedding),
+            source,
         )
         if source_meeting_id is None:
             connection.execute(
                 "INSERT INTO voice_profiles "
-                "(display_name,embedding_json,confirmed_at,model_id,dimension) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "(display_name,embedding_json,confirmed_at,model_id,dimension,source) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 values,
             )
             return
         updated = connection.execute(
             "UPDATE voice_profiles SET display_name=?, embedding_json=?, "
-            "confirmed_at=?, model_id=?, dimension=? WHERE "
+            "confirmed_at=?, model_id=?, dimension=?, source=? WHERE "
             "source_meeting_id=? AND source_revision=? AND source_speaker_id=?",
             values + (source_meeting_id, source_revision, source_speaker_id),
         )
         if updated.rowcount == 0:
             connection.execute(
                 "INSERT INTO voice_profiles "
-                "(display_name,embedding_json,confirmed_at,model_id,dimension,"
+                "(display_name,embedding_json,confirmed_at,model_id,dimension,source,"
                 "source_meeting_id,source_revision,source_speaker_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 values + (source_meeting_id, source_revision, source_speaker_id),
             )
 
@@ -323,6 +355,310 @@ class SpeakerRegistry:
                 (meeting_id, revision, speaker_id),
             ).fetchone()
         return (json.loads(row[0]), row[1]) if row else None
+
+    def set_context_names(
+        self,
+        meeting_id: str,
+        revision: int,
+        names: list[dict],
+        speech: dict[str, tuple[float, int]] | None = None,
+    ) -> int:
+        """Replace the names the conversation gave this meeting's voices.
+
+        `names` are the naming model's entries (speaker, name, confidence,
+        evidence). Only high and medium confidence entries with a name are
+        kept. `speech` maps a speaker to its seconds of speech and words, which
+        decide later whether the voice is worth learning. Returns how many
+        were kept.
+        """
+        self._validate_refresh_identity(meeting_id, revision)
+        named_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        rows = []
+        for entry in names:
+            speaker = entry.get("speaker")
+            name = entry.get("name")
+            if (
+                not isinstance(speaker, str)
+                or not speaker.strip()
+                or not isinstance(name, str)
+                or not " ".join(name.split())
+                or entry.get("confidence") not in CONTEXT_CONFIDENCES
+            ):
+                continue
+            seconds, words = (speech or {}).get(speaker, (0.0, 0))
+            evidence = entry.get("evidence")
+            rows.append((
+                meeting_id, revision, speaker, " ".join(name.split()), entry["confidence"],
+                " ".join(evidence.split()) if isinstance(evidence, str) else "",
+                float(seconds), int(words), named_at,
+            ))
+        with closing_connection(
+            lambda: sqlite3.connect(self.database, timeout=30, isolation_level=None),
+        ) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM context_names WHERE meeting_id=? AND manifest_revision=?",
+                (meeting_id, revision),
+            )
+            connection.executemany(
+                "INSERT OR REPLACE INTO context_names (meeting_id,manifest_revision,speaker_id,name,"
+                "confidence,evidence,speech_seconds,word_count,named_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            connection.commit()
+        return len(rows)
+
+    def context_names(self, meeting_id: str, revision: int) -> dict[str, dict]:
+        with closing_connection(lambda: sqlite3.connect(self.database)) as connection:
+            return self._context_names_from_connection(connection, meeting_id, revision)
+
+    @staticmethod
+    def _context_names_from_connection(
+        connection: sqlite3.Connection,
+        meeting_id: str,
+        revision: int,
+    ) -> dict[str, dict]:
+        """Speaker to {name, confidence, evidence, speech_seconds, word_count}.
+
+        Read on read-only connections too, where the table may not exist yet.
+        """
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='context_names'",
+        ).fetchone() is None:
+            return {}
+        rows = connection.execute(
+            "SELECT speaker_id, name, confidence, evidence, speech_seconds, word_count "
+            "FROM context_names WHERE meeting_id=? AND manifest_revision=? ORDER BY speaker_id",
+            (meeting_id, revision),
+        ).fetchall()
+        return {
+            speaker: {
+                "name": name, "confidence": confidence, "evidence": evidence,
+                "speech_seconds": seconds, "word_count": words,
+            }
+            for speaker, name, confidence, evidence, seconds, words in rows
+        }
+
+    # Learning voices from the conversation
+
+    def learn_from_context(self, meeting_id: str, revision: int) -> list[dict[str, str]]:
+        """Enroll voices the conversation named when the voice agrees. Returns what was enrolled.
+
+        The only place a prediction becomes a profile, and only when two
+        independent signals agree on a voice the conversation named at high
+        confidence:
+
+        - its embedding scores CONTEXT_ENROLL_THRESHOLD or more against an
+          enrolled profile of that same name ("matching_profile"); or
+        - nobody of that name is enrolled yet, and another meeting's
+          conversation gave the same name at high confidence to a voice that
+          scores that against this one ("two_meetings"), which enrolls both.
+
+        Never a zero or non-finite embedding, a junk voice (under
+        CONTEXT_MINIMUM_SPEECH_SECONDS or CONTEXT_MINIMUM_WORDS), the
+        microphone, a voice Mike named, or an automated voice. The profiles
+        are marked source "context", so they are easy to list and remove
+        (forget_context_profiles). Profiles this meeting taught earlier are
+        dropped first, so a changed name doesn't leave the old one behind.
+        """
+        self._validate_refresh_identity(meeting_id, revision)
+        now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        enrolled: list[dict[str, str]] = []
+        voices: list[tuple[list[float], str]] = []
+        with closing_connection(
+            lambda: sqlite3.connect(self.database, timeout=30, isolation_level=None),
+        ) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM voice_profiles WHERE source='context' "
+                "AND source_meeting_id=? AND source_revision=?",
+                (meeting_id, revision),
+            )
+            for speaker, context in self._context_names_from_connection(connection, meeting_id, revision).items():
+                voice = self._context_voice(connection, meeting_id, revision, speaker, context)
+                if voice is None:
+                    continue
+                embedding, model_id = voice
+                name = context["name"]
+                ranked = self._ranked_names(connection, embedding, model_id, meeting_id)
+                same = next((item for item in ranked if item[1].casefold() == name.casefold()), None)
+                partner: tuple[str, int, str, list[float]] | None = None
+                if same is not None:
+                    if same[0] < CONTEXT_ENROLL_THRESHOLD:
+                        continue
+                    name, rule = same[1], "matching_profile"
+                elif self._has_profile(connection, name, model_id, len(embedding), meeting_id):
+                    continue
+                else:
+                    partner = self._context_partner(connection, meeting_id, name, embedding, model_id)
+                    if partner is None:
+                        continue
+                    rule = "two_meetings"
+                self._enroll_confirmed_with_connection(
+                    connection, name, embedding, model_id, now,
+                    source_meeting_id=meeting_id, source_revision=revision,
+                    source_speaker_id=speaker, source="context",
+                )
+                voices.append((embedding, model_id))
+                enrolled.append({"speaker": speaker, "name": name, "rule": rule})
+                if partner is not None:
+                    other_meeting, other_revision, other_speaker, other_embedding = partner
+                    self._enroll_confirmed_with_connection(
+                        connection, name, other_embedding, model_id, now,
+                        source_meeting_id=other_meeting, source_revision=other_revision,
+                        source_speaker_id=other_speaker, source="context",
+                    )
+                    voices.append((other_embedding, model_id))
+            # Other meetings with a voice like these can now be named.
+            self._request_refresh_for_similar_voices(connection, voices, meeting_id, now)
+            connection.commit()
+        return enrolled
+
+    @classmethod
+    def _context_voice(
+        cls,
+        connection: sqlite3.Connection,
+        meeting_id: str,
+        revision: int,
+        speaker: str,
+        context: dict,
+    ) -> tuple[list[float], str] | None:
+        """The embedding and model of a voice that may teach a profile, or None."""
+        if (
+            context["confidence"] != "high"
+            or speaker.startswith("microphone:")
+            or context["name"].casefold() == "ai"
+            or context["speech_seconds"] < CONTEXT_MINIMUM_SPEECH_SECONDS
+            or context["word_count"] < CONTEXT_MINIMUM_WORDS
+        ):
+            return None
+        if connection.execute(
+            "SELECT 1 FROM speaker_assignments WHERE meeting_id=? AND manifest_revision=? AND speaker_id=?",
+            (meeting_id, revision, speaker),
+        ).fetchone() is not None:
+            return None
+        # Whoever enrolled this voice first keeps it: Mike's name is never replaced.
+        profile = connection.execute(
+            "SELECT source FROM voice_profiles WHERE source_meeting_id=? AND source_revision=? AND source_speaker_id=?",
+            (meeting_id, revision, speaker),
+        ).fetchone()
+        if profile is not None and profile[0] != "context":
+            return None
+        row = connection.execute(
+            "SELECT embedding_json, model_id FROM observed_voices "
+            "WHERE meeting_id=? AND manifest_revision=? AND speaker_id=?",
+            (meeting_id, revision, speaker),
+        ).fetchone()
+        embedding = cls._finite_embedding(row[0]) if row else None
+        return (embedding, row[1]) if embedding is not None else None
+
+    @staticmethod
+    def _has_profile(
+        connection: sqlite3.Connection,
+        name: str,
+        model_id: str,
+        dimension: int,
+        exclude_meeting_id: str,
+    ) -> bool:
+        """Whether anyone of this name is enrolled from another meeting, matching or not."""
+        rows = connection.execute(
+            "SELECT display_name FROM voice_profiles WHERE model_id=? AND dimension=? "
+            "AND (source_meeting_id IS NULL OR source_meeting_id<>?)",
+            (model_id, dimension, exclude_meeting_id),
+        ).fetchall()
+        return any(display.casefold() == name.casefold() for (display,) in rows)
+
+    @classmethod
+    def _context_partner(
+        cls,
+        connection: sqlite3.Connection,
+        meeting_id: str,
+        name: str,
+        embedding: list[float],
+        model_id: str,
+    ) -> tuple[str, int, str, list[float]] | None:
+        """The voice in another meeting that the conversation gave this name at
+        high confidence and that sounds most like this one, or None."""
+        best: tuple[float, tuple[str, int, str, list[float]]] | None = None
+        rows = connection.execute(
+            "SELECT meeting_id, manifest_revision, speaker_id, name, confidence, evidence, "
+            "speech_seconds, word_count FROM context_names WHERE meeting_id<>? ORDER BY meeting_id, "
+            "manifest_revision, speaker_id",
+            (meeting_id,),
+        ).fetchall()
+        for other_meeting, other_revision, other_speaker, other_name, confidence, evidence, seconds, words in rows:
+            if other_name.casefold() != name.casefold():
+                continue
+            voice = cls._context_voice(connection, other_meeting, other_revision, other_speaker, {
+                "name": other_name, "confidence": confidence, "evidence": evidence,
+                "speech_seconds": seconds, "word_count": words,
+            })
+            if voice is None or voice[1] != model_id or len(voice[0]) != len(embedding):
+                continue
+            score = cls._cosine(embedding, voice[0])
+            if score >= CONTEXT_ENROLL_THRESHOLD and (best is None or score > best[0]):
+                best = (score, (other_meeting, other_revision, other_speaker, voice[0]))
+        return best[1] if best else None
+
+    def learn_all_from_context(self) -> list[dict[str, str]]:
+        """learn_from_context for every meeting with context names, oldest first."""
+        with closing_connection(lambda: sqlite3.connect(self.database)) as connection:
+            meetings = connection.execute(
+                "SELECT meeting_id, manifest_revision FROM context_names "
+                "GROUP BY meeting_id, manifest_revision ORDER BY MIN(named_at), meeting_id, manifest_revision",
+            ).fetchall()
+        results = []
+        for meeting_id, revision in meetings:
+            for item in self.learn_from_context(meeting_id, revision):
+                results.append({"meeting_id": meeting_id, "manifest_revision": revision, **item})
+        return results
+
+    def context_profiles(self) -> list[dict]:
+        """Every voice profile learned from the conversation."""
+        with closing_connection(lambda: sqlite3.connect(self.database)) as connection:
+            rows = connection.execute(
+                "SELECT display_name, source_meeting_id, source_revision, source_speaker_id, confirmed_at "
+                "FROM voice_profiles WHERE source='context' ORDER BY display_name, source_meeting_id, source_speaker_id",
+            ).fetchall()
+        return [
+            {"name": name, "meeting_id": meeting, "manifest_revision": revision, "speaker_id": speaker, "learned_at": at}
+            for name, meeting, revision, speaker, at in rows
+        ]
+
+    def forget_context_profiles(
+        self,
+        *,
+        name: str | None = None,
+        meeting_id: str | None = None,
+    ) -> dict[str, int]:
+        """Remove voice profiles learned from the conversation (all, or by name or meeting).
+
+        Mike's own profiles are never touched. Every accepted meeting with an
+        unnamed voice is then queued for a refresh, so names that rested on
+        these profiles go away.
+        """
+        query = "DELETE FROM voice_profiles WHERE source='context'"
+        parameters: list[object] = []
+        if meeting_id is not None:
+            query += " AND source_meeting_id=?"
+            parameters.append(meeting_id)
+        requested_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        with closing_connection(
+            lambda: sqlite3.connect(self.database, timeout=30, isolation_level=None),
+        ) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if name is not None:
+                query += " AND display_name=? COLLATE NOCASE"
+                parameters.append(name.strip())
+            removed = connection.execute(query, parameters).rowcount
+            meetings = sorted({
+                (meeting, revision)
+                for meeting, revision, _, _ in self._unnamed_accepted_voices(connection)
+            }) if removed else []
+            for meeting, revision in meetings:
+                self._request_refresh_with_connection(connection, meeting, revision, requested_at)
+            connection.commit()
+        return {"removed": removed, "refreshes_queued": len(meetings)}
 
     def request_refresh(self, meeting_id: str, revision: int) -> None:
         self._validate_refresh_identity(meeting_id, revision)
@@ -762,12 +1098,14 @@ class SpeakerRegistry:
         """Suggestions and automatic names for one meeting's speakers.
 
         Only reads, so it is safe on a read-only connection. A speaker Mike
-        has not named can be named automatically three ways: its voice matches
+        has not named can be named automatically four ways: its voice matches
         someone confirmed in other meetings; it is the only voice on the
         microphone and sounds like the microphone's usual owner; or it sounds
         like a voice Mike saved in this meeting, which pyannote split off. When
-        those disagree it is only a suggestion. A speaker he has named gets no
-        other name. Nothing here is ever enrolled.
+        those disagree it is only a suggestion. The fourth is the name the
+        conversation gave it (context_names), used only when none of those
+        three named it. A speaker he has named gets no other name. Nothing
+        here is ever enrolled.
         """
         speakers = sorted(set(speaker_ids))
         assignments = dict(connection.execute(
@@ -775,6 +1113,7 @@ class SpeakerRegistry:
             "WHERE meeting_id=? AND manifest_revision=?",
             (meeting_id, revision),
         ).fetchall())
+        contexts = cls._context_names_from_connection(connection, meeting_id, revision)
         records: dict[str, tuple[list[float], str]] = {}
         for speaker in sorted(set(speakers) | set(assignments)):
             row = connection.execute(
@@ -789,6 +1128,10 @@ class SpeakerRegistry:
         result: dict[str, dict[str, str | float | int | None]] = {}
         for speaker in sorted(set(targets)) if targets is not None else speakers:
             if speaker not in records:
+                # A voice with no usable embedding (a few seconds of speech)
+                # can still be named from the conversation.
+                if speaker in contexts and speaker not in assignments:
+                    result[speaker] = cls._with_context(cls._match_from_ranking([]), contexts[speaker])
                 continue
             embedding, model_id = records[speaker]
             ranked = cls._ranked_names(connection, embedding, model_id, meeting_id)
@@ -816,8 +1159,32 @@ class SpeakerRegistry:
                         # Suggest whichever name has the closest voice.
                         _, _, name = max(candidates, key=lambda candidate: candidate[0])
                         match.update(suggested_name=name, automatic_name=None, suggestion_kind="tentative")
+                if speaker in contexts:
+                    match = cls._with_context(match, contexts[speaker])
             result[speaker] = match
         return result
+
+    @staticmethod
+    def _with_context(match: dict, context: dict) -> dict:
+        """Add the name the conversation gave this voice.
+
+        It becomes the automatic name only when no voice match named the
+        voice: a name from the voice wins a disagreement, and a name Mike
+        saved wins over both (those voices never get here).
+        """
+        match = dict(match)
+        match.update(
+            context_name=context["name"],
+            context_confidence=context["confidence"],
+            context_evidence=context["evidence"],
+        )
+        if not match.get("automatic_name"):
+            match.update(
+                suggested_name=context["name"],
+                automatic_name=context["name"],
+                suggestion_kind="context",
+            )
+        return match
 
     @classmethod
     def _same_meeting_name(

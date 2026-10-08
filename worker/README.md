@@ -143,7 +143,9 @@ the JSON and Markdown views with fsync plus atomic replacement, then requests a
 fresh idempotent Notion publication without retranscribing media.
 
 `review-speakers` returns nullable confirmed, automatic, and tentative names,
-the kind of each automatic name (`strong`, `own_microphone` or `same_meeting`),
+the kind of each automatic name (`strong`, `own_microphone`, `same_meeting` or
+`context`), what the conversation called the voice (`context_name`,
+`context_confidence`, `context_evidence`),
 cosine similarity and separation values, whether an embedding exists, the three
 wordiest timestamped lines per diarized speaker in the order they were said, an
 optional absolute playback path, and normalized
@@ -175,6 +177,7 @@ embeddings. So only the mic's single voice is ever named below 0.72:
 | Voice is close to someone confirmed in two or more meetings | 0.65, margin 0.08 | Suggested only |
 | The only voice on the mic is its usual owner | 0.65, margin 0.08 | Named automatically |
 | Voice matches one Mike saved in the same meeting | 0.72, margin 0.08 | Named automatically |
+| The conversation named the voice (see below) and no rule above did | high or medium confidence | Named automatically |
 
 The mic's owner is whoever Mike confirmed on the microphone in the most
 meetings; other people heard through his mic scored at most 0.612 against him,
@@ -187,8 +190,8 @@ Profile provenance is migrated from unambiguous existing assignments and
 observations; repeated confirmations update one source profile.
 
 Automatic names are written as transcript names with `name_source` set to
-`voice_match` and count as reviewed; they are recomputed on every refresh and
-never enrolled. Explicit corrections use `confirmed`. Tentative matches stay in
+`voice_match` (or `context`, below) and count as reviewed; they are recomputed
+on every refresh and never enrolled by that alone. Explicit corrections use `confirmed`. Tentative matches stay in
 the review evidence. Saving a name also queues a refresh of every other accepted
 meeting with an unnamed voice within 0.57 of the saved voice, or of any sample
 of someone whose confirmed meetings crossed two or who became or stopped being
@@ -203,6 +206,80 @@ Per-meeting locks serialize review/confirmation writes.
 The worker no longer reads names off video frames. `review-speakers` still
 returns `evidence_labels` for each speaker, always as an empty list, because
 the app decodes it. A `visual-labels.json` left in an older meeting is ignored.
+
+## Naming voices from the conversation
+
+With the same OpenRouter key, each transcript gets one request that names its
+speaker labels from what people say: introductions, being thanked or addressed
+by name and answering, and the calendar attendees once other clues say which is
+which. It is its own durable stage on its own service thread, like the
+summary: a `naming_jobs` table with the summary's attempts, backoff and
+`Retry-After` handling, strict JSON schema, low reasoning effort and
+`provider.require_parameters`. `MEETING_ARCHIVE_NAMING_MODEL` picks the model
+(default `anthropic/claude-opus-5.5`, which named 36 of 42 voices correctly and
+none wrongly on real meetings with this prompt). Without a key it is off. A
+failure never blocks transcription, Notion or the summary.
+
+The request is a "Meeting details" block (app, length, a title someone chose,
+recorded by Mike Cann, calendar attendees), a roster of each label's turns and
+words, then every line as `[time] label: text` with the raw diarization label.
+Names written onto the transcript and an AI title are never sent, so the
+stage cannot read its own output; a speaker refresh asks for naming again only
+when the request would differ, which it never does for names alone. The answer
+goes to `transcripts/vN/naming.json` with its `input_sha256` (prompt, schema
+and model), so an unchanged transcript is never paid for twice, and its
+`usage` and cost.
+
+Only `high` and `medium` names are kept, in the `context_names` table with
+their evidence quote and the voice's seconds of speech and words. A kept name
+is the automatic name of a voice that Mike hasn't named and no voice-match rule
+named: a saved name always wins, and a voice match wins over a conflicting
+conversation name (the conversation's is still recorded). It is written to the
+turns with `name_source` `context`, and into `speaker_matches` as
+`suggestion_kind` `context` with `context_name`, `context_confidence` and
+`context_evidence`, so `transcript.md`, search and Notion show it like any
+automatic name. A voice with no embedding can be named this way too.
+
+The summary waits while a meeting's naming is ready or running, so it uses the
+names, but not while naming waits to retry or has failed. When naming finishes
+the transcript is rewritten, Notion is refreshed and the summary is asked for
+again at once.
+
+### Learning voices when two signals agree
+
+Only names Mike saves enroll voice profiles, with one exception. When the
+conversation named a voice at `high` confidence and the voice agrees, naming
+also enrolls it as a profile marked `source = 'context'` (`voice_profiles.source`
+is `confirmed` otherwise). It agrees when either:
+
+- its embedding scores 0.55 or more against an enrolled profile of the same
+  name (compared ignoring case; the profile's spelling is kept), or
+- nobody of that name is enrolled yet, and another meeting's conversation gave
+  the same name at high confidence to a voice scoring 0.55 or more against this
+  one. This voice and the closest such voice are both enrolled.
+
+The measured highest score between two different people was 0.654, so the
+score alone proves nothing; the matching name is what makes this safe. Never
+enrolled: a zero or non-finite embedding, a voice with under 15 seconds of
+speech or under 40 words, a `microphone:` voice (Mike's own is handled by
+his saved profile), the name "AI", or a voice Mike has named. A voice learned
+this way counts as a confirmed meeting when matching other voices, and a name
+Mike saves for it later replaces the automatic profile. A meeting's context
+profiles are rebuilt each time it is named, so a changed name doesn't leave
+the old one.
+
+`context-voices` lists these profiles. `forget-context-voices [--name NAME]
+[--meeting-id UUID]` removes them (all, or by name or meeting), never Mike's
+own, and queues a refresh of every meeting with an unnamed voice so names that
+rested on them go. `learn-context-voices` learns again from every meeting's
+saved names, for example after `forget-context-voices`.
+
+`name-speakers --db WORKER_DB [--meeting-id UUID ...]` queues naming for those
+meetings, or every processed one, for the service to run. A meeting named
+before and unchanged costs nothing. It is also what the service does by itself
+the first time it starts with a key. `status` and `retry` report and release the
+`naming` stage like the others. Cost is about the summary's, since the prompt
+carries the same transcript: roughly 5 to 15 US cents per meeting.
 
 ## AI titles and summaries
 
@@ -232,7 +309,9 @@ reports, its `usage` (requests, tokens and `cost` in US dollars, added up
 across any retries) and an `input_sha256` of everything sent. A retry with the
 same transcript and model reuses it without calling OpenRouter. Confirming
 speaker names asks for a fresh summary five minutes after the last name, so it
-can use them. A summary that failed is left to its own backoff, or to `retry`.
+can use them. When voices are named from the conversation the summary waits
+for that and is asked again as soon as the names are in. A summary that failed
+is left to its own backoff, or to `retry`.
 
 An OpenRouter outage never holds up transcription or Notion. The page is
 published without a summary and updated in place once one arrives. Rate limits

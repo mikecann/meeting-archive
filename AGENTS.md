@@ -58,8 +58,16 @@ archive worker. All source paths and commands below are relative to this clone.
   Viewer/Tailscale routing remains separate. Uninstallers remove only their
   own service, retaining archive data, models, queues and credentials.
 - Strong voice matches and tentative suggestions are separate. Predictions
-  must not enroll themselves as confirmed profiles. Confirmed observations
-  preserve meeting, revision and speaker provenance.
+  must not enroll themselves as confirmed profiles. The one exception is a
+  context profile (`voice_profiles.source = 'context'`), enrolled by
+  `SpeakerRegistry.learn_from_context` only when two signals agree: the
+  conversation named the voice at high confidence AND its embedding scores 0.55
+  or more against an enrolled profile of that same name, or against a voice
+  another meeting's conversation named the same at high confidence when nobody
+  of that name is enrolled yet. Never for zero or non-finite embeddings, junk
+  voices (under 15 s or 40 words), the microphone or the name "AI", and never
+  over a voice Mike named. Keep them removable with `forget-context-voices`.
+  Confirmed observations preserve meeting, revision and speaker provenance.
 
 ## Checks
 

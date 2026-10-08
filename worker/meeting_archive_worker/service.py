@@ -22,6 +22,7 @@ from .db import closing_connection
 from .notion import publish
 from .processor import process
 from .queue import JobQueue, QueueConflict
+from .naming import NamingQueue, make_openrouter_namer, naming_enabled
 from .summaries import SummaryQueue, summaries_enabled, summarize_with_openrouter
 
 
@@ -355,12 +356,46 @@ def run_summary(database: Path, summarize=None) -> bool:
         if not summaries_enabled():
             return False
         summarize = summarize_with_openrouter
+    jobs = JobQueue(database).status()["jobs"]
+    if naming_enabled():
+        # Before the summary can be picked, so it waits for its names.
+        NamingQueue(database).reconcile(jobs)
     summaries = SummaryQueue(database)
-    summaries.reconcile(JobQueue(database).status()["jobs"])
+    summaries.reconcile(jobs)
     return summaries.run_one(
         summarize,
         on_success=lambda job_id, archive_path: PublicationQueue(database).refresh(job_id, archive_path),
     )
+
+
+def run_naming(database: Path, name=None) -> bool:
+    """Name the voices of one due meeting from its conversation.
+
+    Without OPENROUTER_API_KEY nothing is queued or run. The names go into
+    the transcript straight away, and the summary, which waits for this, then
+    uses them.
+    """
+    if name is None:
+        if not naming_enabled():
+            return False
+        name = make_openrouter_namer(database)
+    names = NamingQueue(database)
+    names.reconcile(JobQueue(database).status()["jobs"])
+    return names.run_one(name, on_success=lambda job_id, archive_path: _apply_names(database, archive_path))
+
+
+def _apply_names(database: Path, archive_path: str) -> None:
+    """Put the stored context names into the transcript and tell Notion."""
+    from .speaker_refresh import reconcile_speaker_refresh
+    from .speakers import SpeakerRegistry
+    from .summaries import MAX_METADATA_BYTES, _read_json_object
+
+    metadata = _read_json_object(Path(archive_path) / "metadata.json", MAX_METADATA_BYTES, "metadata.json")
+    meeting_id, revision = metadata["meeting_id"], metadata.get("manifest_revision", 1)
+    SpeakerRegistry(database).request_refresh(meeting_id, revision)
+    # Not raised when it can't finish: the request stays durable and the
+    # speaker sweep carries on, and the names are saved either way.
+    reconcile_speaker_refresh(database, meeting_id, revision, summary_delay_seconds=0.0)
 
 
 def run_processing(database: Path, processor=process_isolated, lease_seconds: float = 900) -> bool:
@@ -399,7 +434,10 @@ def run_processing(database: Path, processor=process_isolated, lease_seconds: fl
         # its title land. Only added if missing, since the summary loop may
         # already have taken it.
         try:
-            SummaryQueue(database).reconcile([{"id": job.id, "archive_path": job.archive_path, "state": "succeeded"}])
+            succeeded = [{"id": job.id, "archive_path": job.archive_path, "state": "succeeded"}]
+            if naming_enabled():
+                NamingQueue(database).reconcile(succeeded)
+            SummaryQueue(database).reconcile(succeeded)
         except Exception:
             _log("could not queue the summary:\n" + traceback.format_exc())
     return True
@@ -430,6 +468,17 @@ def _publication_loop(database: Path, poll_seconds: float, stop: threading.Event
                 pass
         except Exception:
             _log("publication pass failed:\n" + traceback.format_exc())
+        stop.wait(max(1, poll_seconds))
+
+
+def _naming_loop(database: Path, poll_seconds: float, stop: threading.Event, name=None) -> None:
+    """Naming waits on OpenRouter too, so it has its own thread."""
+    while not stop.is_set():
+        try:
+            while run_naming(database, name) and not stop.is_set():
+                pass
+        except Exception:
+            _log("naming pass failed:\n" + traceback.format_exc())
         stop.wait(max(1, poll_seconds))
 
 
@@ -507,6 +556,13 @@ def main() -> int:
         light.start()
         # Credentials are loaded once at start, so this is decided once too.
         # Without a key summaries are simply off.
+        if naming_enabled():
+            threading.Thread(
+                target=_naming_loop,
+                args=(args.db, args.poll_seconds, stop),
+                name="meeting-archive-naming",
+                daemon=True,
+            ).start()
         if summaries_enabled():
             threading.Thread(
                 target=_summary_loop,
