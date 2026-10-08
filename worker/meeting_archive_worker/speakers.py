@@ -464,23 +464,24 @@ class SpeakerRegistry:
         self._validate_refresh_identity(meeting_id, revision)
         now = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         enrolled: list[dict[str, str]] = []
+        kept: set[tuple[str, int, str, str]] = set()
         voices: list[tuple[list[float], str]] = []
         with closing_connection(
             lambda: sqlite3.connect(self.database, timeout=30, isolation_level=None),
         ) as connection:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                "DELETE FROM voice_profiles WHERE source='context' "
-                "AND source_meeting_id=? AND source_revision=?",
-                (meeting_id, revision),
-            )
+            # What this meeting taught before is dropped, and so is any profile
+            # that only this one vouched for (the partner of a two-meeting proof).
+            dropped = self._drop_context_profiles(connection, meeting_id, revision)
             for speaker, context in self._context_names_from_connection(connection, meeting_id, revision).items():
                 voice = self._context_voice(connection, meeting_id, revision, speaker, context)
                 if voice is None:
                     continue
                 embedding, model_id = voice
                 name = context["name"]
-                ranked = self._ranked_names(connection, embedding, model_id, meeting_id)
+                # Voices Mike confirmed in this meeting count; what the
+                # conversation said about this meeting's voices does not.
+                ranked = self._ranked_names(connection, embedding, model_id, None, skip_context_of=meeting_id)
                 same = next((item for item in ranked if item[1].casefold() == name.casefold()), None)
                 partner: tuple[str, int, str, list[float]] | None = None
                 if same is not None:
@@ -500,6 +501,7 @@ class SpeakerRegistry:
                     source_speaker_id=speaker, source="context",
                 )
                 voices.append((embedding, model_id))
+                kept.add((meeting_id, revision, speaker, name.casefold()))
                 enrolled.append({"speaker": speaker, "name": name, "rule": rule})
                 if partner is not None:
                     other_meeting, other_revision, other_speaker, other_embedding = partner
@@ -509,10 +511,95 @@ class SpeakerRegistry:
                         source_speaker_id=other_speaker, source="context",
                     )
                     voices.append((other_embedding, model_id))
-            # Other meetings with a voice like these can now be named.
+                    kept.add((other_meeting, other_revision, other_speaker, name.casefold()))
+            # Other meetings with a voice like these can now be named, and
+            # those that matched a profile that is gone lose that name.
+            voices.extend(
+                (embedding, model_id)
+                for key, embedding, model_id in dropped
+                if key not in kept
+            )
             self._request_refresh_for_similar_voices(connection, voices, meeting_id, now)
             connection.commit()
         return enrolled
+
+    @classmethod
+    def _drop_context_profiles(
+        cls,
+        connection: sqlite3.Connection,
+        meeting_id: str | None = None,
+        revision: int | None = None,
+    ) -> list[tuple[tuple[str, int, str, str], list[float], str]]:
+        """Delete the conversation-taught profiles of a meeting, then any
+        conversation-taught profile left with nobody else vouching for it.
+
+        Returns each deleted profile as (meeting, revision, speaker, lowercase
+        name), its embedding and model, so the caller can refresh meetings that
+        matched it.
+        """
+        dropped: list[tuple[tuple[str, int, str, str], list[float], str]] = []
+        if meeting_id is not None:
+            for row in connection.execute(
+                "SELECT display_name, embedding_json, model_id, source_speaker_id FROM voice_profiles "
+                "WHERE source='context' AND source_meeting_id=? AND source_revision=?",
+                (meeting_id, revision),
+            ).fetchall():
+                embedding = cls._finite_embedding(row[1])
+                if embedding is not None:
+                    dropped.append(((meeting_id, revision, row[3], row[0].casefold()), embedding, row[2]))
+            connection.execute(
+                "DELETE FROM voice_profiles WHERE source='context' "
+                "AND source_meeting_id=? AND source_revision=?",
+                (meeting_id, revision),
+            )
+        while True:
+            changed = False
+            for rowid, name, raw, model_id, dimension, meeting, rev, speaker in connection.execute(
+                "SELECT rowid, display_name, embedding_json, model_id, dimension, source_meeting_id, "
+                "source_revision, source_speaker_id FROM voice_profiles WHERE source='context' "
+                "AND source_meeting_id IS NOT NULL ORDER BY rowid",
+            ).fetchall():
+                embedding = cls._finite_embedding(raw)
+                if embedding is not None and cls._context_profile_vouched(
+                    connection, rowid, name, embedding, model_id, dimension, meeting,
+                ):
+                    continue
+                connection.execute("DELETE FROM voice_profiles WHERE rowid=?", (rowid,))
+                if embedding is not None:
+                    dropped.append(((meeting, rev, speaker, name.casefold()), embedding, model_id))
+                changed = True
+            if not changed:
+                return dropped
+
+    @classmethod
+    def _context_profile_vouched(
+        cls,
+        connection: sqlite3.Connection,
+        rowid: int,
+        name: str,
+        embedding: list[float],
+        model_id: str,
+        dimension: int,
+        meeting_id: str,
+    ) -> bool:
+        """Whether another profile of the same name still scores CONTEXT_ENROLL_THRESHOLD
+        against this one: one Mike confirmed (even in the same meeting), or one
+        the conversation taught from a different meeting."""
+        for other_name, other_raw in connection.execute(
+            "SELECT display_name, embedding_json FROM voice_profiles WHERE rowid<>? "
+            "AND model_id=? AND dimension=? AND source_meeting_id IS NOT NULL "
+            "AND (source<>'context' OR source_meeting_id<>?)",
+            (rowid, model_id, dimension, meeting_id),
+        ):
+            other = cls._finite_embedding(other_raw)
+            if (
+                other is not None
+                and len(other) == len(embedding)
+                and other_name.casefold() == name.casefold()
+                and cls._cosine(embedding, other) >= CONTEXT_ENROLL_THRESHOLD
+            ):
+                return True
+        return False
 
     @classmethod
     def _context_voice(
@@ -651,6 +738,8 @@ class SpeakerRegistry:
                 query += " AND display_name=? COLLATE NOCASE"
                 parameters.append(name.strip())
             removed = connection.execute(query, parameters).rowcount
+            # A profile the removed ones vouched for goes too.
+            removed += len(self._drop_context_profiles(connection)) if removed else 0
             meetings = sorted({
                 (meeting, revision)
                 for meeting, revision, _, _ in self._unnamed_accepted_voices(connection)
@@ -780,6 +869,9 @@ class SpeakerRegistry:
                 revision,
                 confirmed,
             )
+            # A name saved here can leave a conversation-taught profile with
+            # nobody vouching for it (the partner of a two-meeting proof).
+            voices.extend((embedding, model) for _, embedding, model in self._drop_context_profiles(connection))
             # Besides voices near the new samples, a save changes names that
             # rest on how many meetings confirmed someone, or on who owns the
             # mic. Those voices sit near that person's other samples.
@@ -1006,8 +1098,14 @@ class SpeakerRegistry:
         embedding: list[float],
         model_id: str,
         exclude_meeting_id: str | None,
+        *,
+        skip_context_of: str | None = None,
     ) -> list[tuple[float, str, int]]:
-        """Each enrolled name's best score, with how many meetings confirmed it."""
+        """Each enrolled name's best score, with how many meetings confirmed it.
+
+        `skip_context_of` leaves out the profiles the conversation taught from
+        that meeting, so its own predictions are never evidence for themselves.
+        """
         query = (
             "SELECT display_name, embedding_json, source_meeting_id "
             "FROM voice_profiles WHERE model_id=? AND dimension=? "
@@ -1018,6 +1116,9 @@ class SpeakerRegistry:
         if exclude_meeting_id is not None:
             query += " AND source_meeting_id<>?"
             parameters.append(exclude_meeting_id)
+        if skip_context_of is not None:
+            query += " AND NOT (source='context' AND source_meeting_id=?)"
+            parameters.append(skip_context_of)
         rows = connection.execute(query, parameters).fetchall()
 
         by_name: dict[str, dict[str, object]] = {}

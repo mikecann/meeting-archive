@@ -195,6 +195,34 @@ class TwoMeetingTests(ContextLearningTestCase):
         self.assertNotIn(far, {profile[2] for profile in self.context_profiles()})
 
 
+class SameMeetingTests(ContextLearningTestCase):
+    def test_a_voice_mike_confirmed_in_this_meeting_can_vouch_for_another(self) -> None:
+        meeting = str(uuid.uuid4())
+        self.registry.save_observation(meeting, 1, "incoming:SPEAKER_00", [1.0, 0.0], "model@1")
+        self.registry.save_observation(meeting, 1, "incoming:SPEAKER_01", with_cosine(0.6), "model@1")
+        self.registry.confirm_observation(meeting, 1, "incoming:SPEAKER_00", "Sam")
+        self.registry.set_context_names(
+            meeting, 1, [entry("incoming:SPEAKER_01", "Sam")], {"incoming:SPEAKER_01": (60, 200)},
+        )
+
+        learned = self.registry.learn_from_context(meeting, 1)
+
+        self.assertEqual(learned, [{"speaker": "incoming:SPEAKER_01", "name": "Sam", "rule": "matching_profile"}])
+
+    def test_this_meetings_own_predictions_are_not_evidence_for_each_other(self) -> None:
+        meeting = str(uuid.uuid4())
+        for speaker, vector in (("incoming:SPEAKER_00", [1.0, 0.0]), ("incoming:SPEAKER_01", with_cosine(0.6))):
+            self.registry.save_observation(meeting, 1, speaker, vector, "model@1")
+        self.registry.set_context_names(
+            meeting, 1,
+            [entry("incoming:SPEAKER_00", "Sam"), entry("incoming:SPEAKER_01", "Sam")],
+            {"incoming:SPEAKER_00": (60, 200), "incoming:SPEAKER_01": (60, 200)},
+        )
+
+        self.assertEqual(self.registry.learn_from_context(meeting, 1), [])
+        self.assertEqual(self.context_profiles(), [])
+
+
 class NeverEnrollTests(ContextLearningTestCase):
     def assert_nothing_learned(self, meeting: str) -> None:
         self.assertEqual(self.registry.learn_from_context(meeting, 1), [])
@@ -256,6 +284,57 @@ class LifecycleTests(ContextLearningTestCase):
         self.assertEqual(self.registry.learn_from_context(meeting, 1), [])
 
         self.assertEqual(self.context_profiles(), [], "no profile of Sam left from a voice now called Dana")
+
+    def test_a_partner_enrolled_by_two_meetings_goes_when_the_other_side_changes_its_name(self) -> None:
+        first = self.heard("Priya", [1.0, 0.0])
+        second = self.heard("Priya", with_cosine(0.6))
+        self.registry.learn_from_context(second, 1)
+        self.assertEqual(len(self.context_profiles()), 2)
+
+        self.registry.set_context_names(second, 1, [entry("incoming:SPEAKER_00", "Dana")], {"incoming:SPEAKER_00": (60, 200)})
+        self.registry.learn_from_context(second, 1)
+
+        self.assertEqual(self.context_profiles(), [], f"{first} was only vouched for by the meeting that changed")
+
+    def test_a_partner_goes_when_the_other_side_is_corrected_to_someone_else(self) -> None:
+        first = self.heard("Priya", [1.0, 0.0])
+        second = self.heard("Priya", with_cosine(0.6))
+        self.registry.learn_from_context(second, 1)
+
+        self.registry.confirm_observation(second, 1, "incoming:SPEAKER_00", "Dana Example")
+
+        self.assertEqual([p[:3] for p in self.profiles() if p[2] == first], [])
+
+    def test_a_partner_stays_when_the_other_side_is_confirmed_under_the_same_name(self) -> None:
+        first = self.heard("Priya", [1.0, 0.0])
+        second = self.heard("Priya", with_cosine(0.6))
+        self.registry.learn_from_context(second, 1)
+
+        self.registry.confirm_observation(second, 1, "incoming:SPEAKER_00", "Priya")
+
+        self.assertEqual([p[0] for p in self.context_profiles()], ["Priya"])
+        self.assertEqual(self.context_profiles()[0][2], first)
+
+    def test_a_profile_dropped_for_its_name_asks_meetings_that_matched_it_to_refresh(self) -> None:
+        self.saved("Sam")
+        elsewhere = str(uuid.uuid4())
+        self.registry.save_observation(elsewhere, 1, "incoming:SPEAKER_00", with_cosine(0.6), "model@1")
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO acceptances VALUES (?, 1, ?, ?, ?, ?)",
+                (elsewhere, "a" * 64, "/archive", json.dumps({"meeting_id": elsewhere}), "2026-09-17T00:00:00Z"),
+            )
+        meeting = self.heard("Sam", with_cosine(0.6))
+        self.registry.learn_from_context(meeting, 1)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("DELETE FROM speaker_refreshes")
+
+        self.registry.set_context_names(meeting, 1, [entry("incoming:SPEAKER_00", "Dana")], {"incoming:SPEAKER_00": (60, 200)})
+        self.registry.learn_from_context(meeting, 1)
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            queued = connection.execute("SELECT meeting_id FROM speaker_refreshes").fetchall()
+        self.assertIn((elsewhere,), queued)
 
     def test_learning_twice_does_not_duplicate(self) -> None:
         self.saved("Sam")
