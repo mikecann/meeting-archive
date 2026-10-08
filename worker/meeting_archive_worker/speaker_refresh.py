@@ -243,6 +243,16 @@ def reconcile_speaker_refresh(
             from .naming import NamingQueue, naming_enabled, naming_is_stale, naming_model
             from .summaries import SPEAKER_NAMES_SETTLE_SECONDS, SummaryQueue
 
+            if summary_delay_seconds is None:
+                # A request made with a delay keeps it across retries.
+                with closing_connection(lambda: _connect(database)) as connection:
+                    row = connection.execute(
+                        "SELECT summary_delay FROM speaker_refreshes WHERE meeting_id=? "
+                        "AND manifest_revision=? AND generation=?",
+                        (meeting_id, revision, generation),
+                    ).fetchone()
+                if row is not None and row[0] is not None:
+                    summary_delay_seconds = float(row[0])
             registry = SpeakerRegistry(database)
             refresh_speaker_matches(transcript, registry)
             _write_transcript_artifacts(transcript_path.parent, transcript)

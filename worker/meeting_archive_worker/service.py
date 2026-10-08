@@ -392,10 +392,10 @@ def _apply_names(database: Path, archive_path: str) -> None:
 
     metadata = _read_json_object(Path(archive_path) / "metadata.json", MAX_METADATA_BYTES, "metadata.json")
     meeting_id, revision = metadata["meeting_id"], metadata.get("manifest_revision", 1)
-    SpeakerRegistry(database).request_refresh(meeting_id, revision)
+    SpeakerRegistry(database).request_refresh(meeting_id, revision, summary_delay_seconds=0.0)
     # Not raised when it can't finish: the request stays durable and the
     # speaker sweep carries on, and the names are saved either way.
-    reconcile_speaker_refresh(database, meeting_id, revision, summary_delay_seconds=0.0)
+    reconcile_speaker_refresh(database, meeting_id, revision)
 
 
 def run_processing(database: Path, processor=process_isolated, lease_seconds: float = 900) -> bool:

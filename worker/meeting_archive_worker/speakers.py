@@ -152,7 +152,7 @@ class SpeakerRegistry:
                 # enrolled because the conversation and the voice agreed.
                 "source": "TEXT NOT NULL DEFAULT 'confirmed'",
             })
-            self._ensure_columns(connection, "speaker_refreshes", {"retry_after": "REAL"})
+            self._ensure_columns(connection, "speaker_refreshes", {"retry_after": "REAL", "summary_delay": "REAL"})
             self._ensure_columns(connection, "observed_voices", {"model_id": "TEXT NOT NULL DEFAULT 'legacy'", "dimension": "INTEGER NOT NULL DEFAULT 0"})
             self._backfill_profile_provenance(connection)
             self._deduplicate_profile_sources(connection)
@@ -749,7 +749,15 @@ class SpeakerRegistry:
             connection.commit()
         return {"removed": removed, "refreshes_queued": len(meetings)}
 
-    def request_refresh(self, meeting_id: str, revision: int) -> None:
+    def request_refresh(
+        self,
+        meeting_id: str,
+        revision: int,
+        *,
+        summary_delay_seconds: float | None = None,
+    ) -> None:
+        """Queue a refresh. `summary_delay_seconds` is kept with the request until
+        it succeeds, so a retry still asks for the summary as soon as it meant to."""
         self._validate_refresh_identity(meeting_id, revision)
         requested_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         with closing_connection(
@@ -761,6 +769,7 @@ class SpeakerRegistry:
                 meeting_id,
                 revision,
                 requested_at,
+                summary_delay_seconds,
             )
             connection.commit()
 
@@ -781,14 +790,16 @@ class SpeakerRegistry:
         meeting_id: str,
         revision: int,
         requested_at: str,
+        summary_delay_seconds: float | None = None,
     ) -> None:
         connection.execute(
             "INSERT INTO speaker_refreshes "
-            "(meeting_id,manifest_revision,generation,attempts,last_error,requested_at) "
-            "VALUES (?, ?, 1, 0, NULL, ?) ON CONFLICT(meeting_id,manifest_revision) "
+            "(meeting_id,manifest_revision,generation,attempts,last_error,requested_at,summary_delay) "
+            "VALUES (?, ?, 1, 0, NULL, ?, ?) ON CONFLICT(meeting_id,manifest_revision) "
             "DO UPDATE SET generation=speaker_refreshes.generation+1, "
-            "last_error=NULL, retry_after=NULL, requested_at=excluded.requested_at",
-            (meeting_id, revision, requested_at),
+            "last_error=NULL, retry_after=NULL, requested_at=excluded.requested_at, "
+            "summary_delay=COALESCE(excluded.summary_delay, speaker_refreshes.summary_delay)",
+            (meeting_id, revision, requested_at, summary_delay_seconds),
         )
 
     def confirm_observation(self, meeting_id: str, revision: int, speaker_id: str, name: str) -> bool:

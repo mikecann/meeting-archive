@@ -527,6 +527,25 @@ class NamingStageTests(FakeServiceTestCase):
         self.assertEqual(job["state"], "ready")
         self.assertLess(job["available_at"], self.queue_clock() + 5, "not the five minute wait for hand-typed names")
 
+    def test_a_failed_refresh_after_naming_still_asks_for_the_summary_at_once(self) -> None:
+        self.run_naming(http_error(503, "No provider"))
+        self.run_summary(completion(SUMMARY_ANSWER))
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("UPDATE naming_jobs SET available_at=0")
+
+        with patch("meeting_archive_worker.speaker_evidence.refresh_speaker_matches", side_effect=OSError("locked")), \
+                patch("sys.stderr", io.StringIO()):
+            self.run_naming(completion(NAMES))
+        self.assertEqual(self.summary_job()["state"], "succeeded", "the refresh failed, so no request yet")
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("UPDATE speaker_refreshes SET retry_after=NULL")
+
+        self.assertTrue(reconcile_speaker_refresh(self.database, MEETING_ID, 1))
+
+        job = self.summary_job()
+        self.assertEqual(job["state"], "ready")
+        self.assertLess(job["available_at"], self.queue_clock() + 5)
+
     def queue_clock(self) -> float:
         import time
 
