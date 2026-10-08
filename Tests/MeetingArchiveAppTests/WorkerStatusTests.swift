@@ -29,11 +29,9 @@ final class WorkerStatusTests: XCTestCase {
         XCTAssertEqual(statuses[failedID]?.retryStage, .processing)
         XCTAssertEqual(statuses[failedID]?.lastError, "audio is corrupt")
         XCTAssertEqual(statuses[publishedID]?.manifestRevision, 1)
-        XCTAssertNil(statuses[publishedID]?.totalSpeakerCount)
-        XCTAssertNil(statuses[publishedID]?.unconfirmedSpeakerCount)
     }
 
-    func testSpeakerCountsAndCurrentRevisionReachStatusDetails() throws {
+    func testUnnamedVoicesNeverReachStatusDetails() throws {
         let queuedID = UUID()
         let activeID = UUID()
         let publishedID = UUID()
@@ -73,10 +71,8 @@ final class WorkerStatusTests: XCTestCase {
         XCTAssertEqual(statuses[queuedID]?.detail, "Archived • transcription and speaker separation queued")
         XCTAssertEqual(statuses[activeID]?.detail, "Transcribing and separating speakers")
         XCTAssertEqual(statuses[publishedID]?.manifestRevision, 1)
-        XCTAssertEqual(statuses[publishedID]?.totalSpeakerCount, 3)
-        XCTAssertEqual(statuses[publishedID]?.unconfirmedSpeakerCount, 2)
-        XCTAssertEqual(statuses[publishedID]?.detail, "Published to Notion • 2 speakers need names")
-        XCTAssertEqual(statuses[completeID]?.detail, "Speaker review complete • publishing to Notion")
+        XCTAssertEqual(statuses[publishedID]?.detail, "Published to Notion")
+        XCTAssertEqual(statuses[completeID]?.detail, "Publishing to Notion")
     }
 
     func testRejectsPartialOrImpossibleSpeakerCounts() throws {
@@ -604,8 +600,7 @@ final class WorkerStatusPollingTests: XCTestCase {
         let id = UUID()
         var status = WorkerMeetingStatus(
             meetingID: id, phase: .published, processingState: .succeeded, publicationState: .succeeded,
-            speakerReview: .available, retryStage: nil, lastError: nil, manifestRevision: 2,
-            totalSpeakerCount: 3, unconfirmedSpeakerCount: 1
+            speakerReview: .available, retryStage: nil, lastError: nil, manifestRevision: 2
         )
         XCTAssertFalse(WorkerStatusPolling.isSettled(nil, revision: 2))
         XCTAssertTrue(WorkerStatusPolling.isSettled(status, revision: 2))
