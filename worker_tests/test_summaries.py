@@ -26,7 +26,7 @@ sys.path.insert(0, str(WORKER_ROOT))
 
 from meeting_archive_worker.cli import main as cli_main  # noqa: E402
 from meeting_archive_worker.queue import MAX_ATTEMPTS, JobQueue  # noqa: E402
-from meeting_archive_worker.service import PublicationQueue, run_once, run_summary  # noqa: E402
+from meeting_archive_worker.service import PublicationQueue, run_naming, run_once, run_summary  # noqa: E402
 from meeting_archive_worker.summaries import (  # noqa: E402
     DEFAULT_MODEL,
     ENDPOINT,
@@ -615,6 +615,10 @@ class SummaryStageTests(unittest.TestCase):
     def summary_job(self) -> dict:
         return SummaryQueue(self.database).status({self.job_id})["jobs"][0]
 
+    def name_speakers_first(self) -> None:
+        # With a key the summary waits for naming (see test_naming.py).
+        self.assertTrue(run_naming(self.database, lambda _archive: None))
+
     def test_missing_key_skips_quietly(self) -> None:
         self.complete_processing()
         self.assertEqual(summaries_disabled_reason({}), "OPENROUTER_API_KEY is not set")
@@ -637,6 +641,7 @@ class SummaryStageTests(unittest.TestCase):
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": f"  {API_KEY}\n"}), \
                 patch("urllib.request.urlopen", openrouter):
             os.environ.pop("MEETING_ARCHIVE_SUMMARY_MODEL", None)
+            self.name_speakers_first()
             self.assertTrue(run_summary(self.database))
 
         self.assertEqual(openrouter.requests[0]["headers"]["authorization"], f"Bearer {API_KEY}")
@@ -653,6 +658,7 @@ class SummaryStageTests(unittest.TestCase):
         with patch.dict(os.environ, {
             "OPENROUTER_API_KEY": API_KEY, "MEETING_ARCHIVE_SUMMARY_MODEL": "openai/gpt-6",
         }), patch("urllib.request.urlopen", openrouter):
+            self.name_speakers_first()
             self.assertTrue(run_summary(self.database))
 
         self.assertEqual(openrouter.bodies[0]["model"], "openai/gpt-6")
@@ -662,6 +668,7 @@ class SummaryStageTests(unittest.TestCase):
         openrouter = FakeOpenRouter(http_error(401, "User not found."))
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": API_KEY}), patch("urllib.request.urlopen", openrouter):
             os.environ.pop("MEETING_ARCHIVE_SUMMARY_MODEL", None)
+            self.name_speakers_first()
             self.assertFalse(run_summary(self.database))
 
         job = self.summary_job()

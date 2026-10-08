@@ -116,6 +116,16 @@ voices.
   voice once, which takes Bruce from 12 voices needing names to 9. Automatic
   names still never train the profiles.
 
+### Naming voices from the conversation (8 Oct 2026)
+
+Mike never wants to name speakers by hand, and voice matching only helps once
+someone has been named. So each transcript now gets one OpenRouter request
+that names its labels from what people say (`worker/meeting_archive_worker/
+naming.py`, described in `worker/README.md`). On real meetings the chosen model
+and prompt named 36 of 42 voices correctly and none wrongly. Names at high or
+medium confidence become automatic names, below a saved name and a voice match
+and above nothing; the summary waits for them.
+
 The gates come from the voices on Bruce on 2 Oct, read from a copy of
 `worker.sqlite`: 43 voices observed in 11 meetings, 22 of them confirmed in 9.
 

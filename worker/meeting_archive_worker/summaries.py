@@ -170,7 +170,8 @@ def _speaker_label(turn: dict[str, Any]) -> str:
     return f"{side} speaker {number}" if number is not None else f"{side} speaker"
 
 
-def _transcript_lines(transcript: dict[str, Any]) -> list[str]:
+def _transcript_lines(transcript: dict[str, Any], labeller: Callable[[dict[str, Any]], str] = _speaker_label) -> list[str]:
+    """Merged "[time] label: text" lines. The labeller picks each turn's label."""
     lines: list[str] = []
     label: str | None = None
     started = 0.0
@@ -192,7 +193,7 @@ def _transcript_lines(transcript: dict[str, Any]) -> list[str]:
             start = 0.0
         if not math.isfinite(start) or start < 0:
             start = 0.0
-        speaker = _speaker_label(turn)
+        speaker = labeller(turn)
         if speaker == label and start - started <= MERGE_TURN_SECONDS:
             parts.append(text)
             continue
@@ -458,7 +459,7 @@ def _choice(completion: dict[str, Any]) -> dict[str, Any]:
     return choice
 
 
-def _answer(choice: dict[str, Any]) -> dict[str, Any]:
+def _answer(choice: dict[str, Any], validate: Callable[[Any], dict[str, Any]] = validate_answer) -> dict[str, Any]:
     message = choice.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, str):
@@ -467,7 +468,7 @@ def _answer(choice: dict[str, Any]) -> dict[str, Any]:
         answer = json.loads(content)
     except json.JSONDecodeError:
         raise UnusableAnswerError("The answer was not valid JSON.") from None
-    return validate_answer(answer)
+    return validate(answer)
 
 
 def _add_usage(total: dict[str, Any], usage: Any) -> None:
@@ -490,7 +491,19 @@ def _add_usage(total: dict[str, Any], usage: Any) -> None:
 
 
 class OpenRouterSummarizer:
-    """Asks a model on OpenRouter for a title, summary and action items as structured JSON."""
+    """Asks a model on OpenRouter for a title, summary and action items as structured JSON.
+
+    Naming speakers is the same request with another prompt, schema and
+    check, so it subclasses this and changes only these.
+    """
+
+    system_prompt = SYSTEM_PROMPT
+    schema: dict[str, Any] = OUTPUT_SCHEMA
+    schema_name = "meeting_summary"
+
+    @staticmethod
+    def validate(answer: Any) -> dict[str, Any]:
+        return validate_answer(answer)
 
     def __init__(self, api_key: str, *, model: str = DEFAULT_MODEL) -> None:
         if not _API_KEY_PATTERN.fullmatch(api_key):
@@ -516,7 +529,7 @@ class OpenRouterSummarizer:
                 max_tokens = LONG_MAX_TOKENS
                 continue
             try:
-                answer = _answer(choice)
+                answer = _answer(choice, self.validate)
             except UnusableAnswerError as error:
                 if asked_again:
                     raise PermanentSummaryError(f"Asked twice and neither answer was usable. {error}") from None
@@ -532,7 +545,7 @@ class OpenRouterSummarizer:
         body = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": self.system_prompt},
                 {"role": "user", "content": prompt},
             ],
             "max_tokens": max_tokens,
@@ -540,7 +553,7 @@ class OpenRouterSummarizer:
             "usage": {"include": True},
             "response_format": {
                 "type": "json_schema",
-                "json_schema": {"name": "meeting_summary", "strict": True, "schema": OUTPUT_SCHEMA},
+                "json_schema": {"name": self.schema_name, "strict": True, "schema": self.schema},
             },
             # Only route to providers that honour every field above. Some of
             # this model's endpoints don't enforce strict JSON.
@@ -699,20 +712,36 @@ def summarize_with_openrouter(archive_directory: Path) -> dict[str, Any]:
 
 class SummaryQueue:
     """One summary job per succeeded processing job, kept apart from
-    transcription and Notion so an OpenRouter outage only delays the summary."""
+    transcription and Notion so an OpenRouter outage only delays the summary.
+
+    Naming speakers is another stage with the same life cycle, so its queue
+    subclasses this with its own table and running state.
+    """
+
+    TABLE = "summary_jobs"
+    RUNNING = "summarizing"
+    # What the stage makes, for its log lines.
+    WHAT = "summary"
+    # A table of jobs that go first: a meeting's summary waits while its
+    # speakers are being named, so the summary can use the names.
+    GO_FIRST: str | None = "naming_jobs"
+    GO_FIRST_STATES = ("ready", "naming")
 
     def __init__(self, database: Path | str, clock: Callable[[], float] = time.time) -> None:
         self.database = Path(database)
         self.clock = clock
         with closing_connection(self._connect) as connection:
-            connection.execute(
-                """CREATE TABLE IF NOT EXISTS summary_jobs (
-                processing_job_id INTEGER PRIMARY KEY, archive_path TEXT NOT NULL,
-                state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-                available_at REAL NOT NULL, last_error TEXT,
-                lease_owner TEXT, lease_expires_at REAL,
-                refresh_requested INTEGER NOT NULL DEFAULT 0)""",
-            )
+            for table in (self.TABLE, self.GO_FIRST):
+                if table is None:
+                    continue
+                connection.execute(
+                    f"""CREATE TABLE IF NOT EXISTS {table} (
+                    processing_job_id INTEGER PRIMARY KEY, archive_path TEXT NOT NULL,
+                    state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                    available_at REAL NOT NULL, last_error TEXT,
+                    lease_owner TEXT, lease_expires_at REAL,
+                    refresh_requested INTEGER NOT NULL DEFAULT 0)""",
+                )
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.database, timeout=30, isolation_level=None)
@@ -726,7 +755,7 @@ class SummaryQueue:
         with closing_connection(self._connect) as connection:
             connection.execute("BEGIN IMMEDIATE")
             connection.executemany(
-                "INSERT OR IGNORE INTO summary_jobs "
+                f"INSERT OR IGNORE INTO {self.TABLE} "
                 "(processing_job_id, archive_path, state, attempts, available_at) VALUES (?, ?, 'ready', 0, ?)",
                 rows,
             )
@@ -754,22 +783,31 @@ class SummaryQueue:
             connection.execute("BEGIN IMMEDIATE")
             if create:
                 connection.execute(
-                    "INSERT OR IGNORE INTO summary_jobs "
+                    f"INSERT OR IGNORE INTO {self.TABLE} "
                     "(processing_job_id, archive_path, state, attempts, available_at) VALUES (?, ?, 'ready', 0, ?)",
                     (processing_job_id, archive_path, available_at),
                 )
             # SQLite evaluates every CASE against the row as it was.
             cursor = connection.execute(
-                "UPDATE summary_jobs SET archive_path=?, available_at=?, "
-                "state=CASE WHEN state='summarizing' THEN state ELSE 'ready' END, "
-                "attempts=CASE WHEN state='summarizing' THEN attempts ELSE 0 END, "
-                "last_error=CASE WHEN state='summarizing' THEN last_error ELSE NULL END, "
-                "refresh_requested=CASE WHEN state='summarizing' THEN 1 ELSE 0 END "
-                "WHERE processing_job_id=? AND state IN ('ready','summarizing','succeeded')",
+                f"UPDATE {self.TABLE} SET archive_path=?, available_at=?, "
+                f"state=CASE WHEN state='{self.RUNNING}' THEN state ELSE 'ready' END, "
+                f"attempts=CASE WHEN state='{self.RUNNING}' THEN attempts ELSE 0 END, "
+                f"last_error=CASE WHEN state='{self.RUNNING}' THEN last_error ELSE NULL END, "
+                f"refresh_requested=CASE WHEN state='{self.RUNNING}' THEN 1 ELSE 0 END "
+                f"WHERE processing_job_id=? AND state IN ('ready','{self.RUNNING}','succeeded')",
                 (archive_path, available_at, processing_job_id),
             )
             connection.commit()
         return cursor.rowcount == 1
+
+    def _go_first_clause(self) -> str:
+        if self.GO_FIRST is None:
+            return ""
+        states = ",".join(f"'{state}'" for state in self.GO_FIRST_STATES)
+        return (
+            f"AND NOT EXISTS (SELECT 1 FROM {self.GO_FIRST} AS first WHERE "
+            f"first.processing_job_id={self.TABLE}.processing_job_id AND first.state IN ({states})) "
+        )
 
     def retry_failed(self, processing_job_id: int) -> dict[str, Any] | None:
         """Operator retry of a failed summary, with a fresh attempt budget."""
@@ -777,7 +815,7 @@ class SummaryQueue:
         with closing_connection(self._connect) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT state FROM summary_jobs WHERE processing_job_id=?",
+                f"SELECT state FROM {self.TABLE} WHERE processing_job_id=?",
                 (processing_job_id,),
             ).fetchone()
             if row is None:
@@ -786,7 +824,7 @@ class SummaryQueue:
             retried = row[0] in ("retry_wait", "permanent_failure")
             if retried:
                 connection.execute(
-                    "UPDATE summary_jobs SET state='ready', available_at=?, attempts=0, last_error=NULL, "
+                    f"UPDATE {self.TABLE} SET state='ready', available_at=?, attempts=0, last_error=NULL, "
                     "lease_owner=NULL, lease_expires_at=NULL WHERE processing_job_id=?",
                     (now, processing_job_id),
                 )
@@ -800,7 +838,7 @@ class SummaryQueue:
     def status(self, processing_job_ids: set[int] | None = None) -> dict[str, Any]:
         query = (
             "SELECT processing_job_id, archive_path, state, attempts, available_at, "
-            "last_error, lease_owner, lease_expires_at, refresh_requested FROM summary_jobs"
+            f"last_error, lease_owner, lease_expires_at, refresh_requested FROM {self.TABLE}"
         )
         with closing_connection(self._connect) as connection:
             connection.row_factory = sqlite3.Row
@@ -820,7 +858,7 @@ class SummaryQueue:
         for job in jobs:
             counts[job["state"]] = counts.get(job["state"], 0) + 1
         phase = next(
-            (state for state in ("summarizing", "retry_wait", "ready", "permanent_failure") if state in counts),
+            (state for state in (self.RUNNING, "retry_wait", "ready", "permanent_failure") if state in counts),
             "succeeded" if jobs else "not_queued",
         )
         return {
@@ -846,31 +884,32 @@ class SummaryQueue:
             connection.execute("BEGIN IMMEDIATE")
             # A worker that died mid-summary counts as a failed attempt.
             for job_id, attempts in connection.execute(
-                "SELECT processing_job_id, attempts FROM summary_jobs WHERE state='summarizing' "
+                f"SELECT processing_job_id, attempts FROM {self.TABLE} WHERE state='{self.RUNNING}' "
                 "AND (lease_expires_at IS NULL OR lease_expires_at<=?)",
                 (now,),
             ).fetchall():
                 connection.execute(
-                    "UPDATE summary_jobs SET state=?, available_at=?, last_error=?, "
+                    f"UPDATE {self.TABLE} SET state=?, available_at=?, last_error=?, "
                     "lease_owner=NULL, lease_expires_at=NULL WHERE processing_job_id=?",
                     (
                         "permanent_failure" if attempts >= MAX_ATTEMPTS else "retry_wait",
                         now + _retry_delay(attempts, RETRY_BASE_SECONDS, RETRY_MAXIMUM_SECONDS),
-                        "The worker stopped before the summary finished.",
+                        f"The worker stopped before the {self.WHAT} finished.",
                         job_id,
                     ),
                 )
             row = connection.execute(
-                "SELECT processing_job_id, archive_path, attempts FROM summary_jobs "
+                f"SELECT processing_job_id, archive_path, attempts FROM {self.TABLE} "
                 "WHERE state IN ('ready','retry_wait') AND available_at<=? "
-                "ORDER BY available_at, processing_job_id LIMIT 1",
+                + self._go_first_clause()
+                + "ORDER BY available_at, processing_job_id LIMIT 1",
                 (now,),
             ).fetchone()
             if row is None:
                 connection.commit()
                 return False
             connection.execute(
-                "UPDATE summary_jobs SET state='summarizing', attempts=attempts+1, "
+                f"UPDATE {self.TABLE} SET state='{self.RUNNING}', attempts=attempts+1, "
                 "lease_owner=?, lease_expires_at=?, refresh_requested=0 WHERE processing_job_id=?",
                 (owner, now + lease_seconds, row[0]),
             )
@@ -886,16 +925,16 @@ class SummaryQueue:
             permanent = isinstance(error, PermanentSummaryError) or attempts >= MAX_ATTEMPTS
             message = str(error) if isinstance(error, SummaryError) else f"{type(error).__name__}: {error}"
             message = message[:1000]
-            _log(f"summary for processing job {job_id} failed: {message}")
+            _log(f"{self.WHAT} for processing job {job_id} failed: {message}")
             delay = _retry_delay(attempts, RETRY_BASE_SECONDS, RETRY_MAXIMUM_SECONDS)
             if isinstance(error, TransientSummaryError):
                 # Never sooner than OpenRouter asked, or an hour for an empty balance.
                 delay = max(delay, error.retry_after)
             with closing_connection(self._connect) as connection:
                 connection.execute(
-                    "UPDATE summary_jobs SET state=?, available_at=?, last_error=?, refresh_requested=0, "
+                    f"UPDATE {self.TABLE} SET state=?, available_at=?, last_error=?, refresh_requested=0, "
                     "lease_owner=NULL, lease_expires_at=NULL "
-                    "WHERE processing_job_id=? AND state='summarizing' AND lease_owner=?",
+                    f"WHERE processing_job_id=? AND state='{self.RUNNING}' AND lease_owner=?",
                     (
                         "permanent_failure" if permanent else "retry_wait",
                         self.clock() + delay,
@@ -907,11 +946,11 @@ class SummaryQueue:
             return False
         with closing_connection(self._connect) as connection:
             cursor = connection.execute(
-                "UPDATE summary_jobs SET "
+                f"UPDATE {self.TABLE} SET "
                 "state=CASE WHEN refresh_requested=1 THEN 'ready' ELSE 'succeeded' END, "
                 "attempts=CASE WHEN refresh_requested=1 THEN 0 ELSE attempts END, "
                 "last_error=NULL, refresh_requested=0, lease_owner=NULL, lease_expires_at=NULL "
-                "WHERE processing_job_id=? AND state='summarizing' AND lease_owner=?",
+                f"WHERE processing_job_id=? AND state='{self.RUNNING}' AND lease_owner=?",
                 (job_id, owner),
             )
         return cursor.rowcount == 1

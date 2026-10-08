@@ -332,6 +332,18 @@ def parser() -> argparse.ArgumentParser:
         help="limit output to a meeting UUID; repeat up to 100 times",
     )
 
+    name_speakers = commands.add_parser(
+        "name-speakers",
+        help="queue naming of voices from the conversation for some or all meetings",
+    )
+    name_speakers.add_argument(
+        "--meeting-id",
+        action="append",
+        default=[],
+        help="a meeting UUID; repeat up to 100 times. Without any, every processed meeting",
+    )
+    name_speakers.add_argument("--db", type=Path, required=True)
+
     retry = commands.add_parser("retry", help="release failed processing or publication work")
     retry.add_argument("--meeting-id", required=True)
     retry.add_argument("--db", type=Path, required=True)
@@ -423,6 +435,37 @@ def _save_names(database: Path, meeting_id: str, revision: int, names: dict[str,
     return enrolled
 
 
+def _name_speakers(args: argparse.Namespace) -> dict[str, Any]:
+    """Ask for voices to be named from the conversation, for the service to do.
+
+    A meeting whose transcript hasn't changed since it was named costs
+    nothing: the request is recognised and only re-applies the saved names.
+    """
+    from .naming import NamingQueue
+
+    if len(args.meeting_id) > 100:
+        raise ValueError("name-speakers accepts at most 100 --meeting-id values.")
+    meeting_ids = {str(uuid.UUID(value)).lower() for value in args.meeting_id} or None
+    jobs = [job for job in JobQueue(args.db).status(meeting_ids)["jobs"] if job["state"] == "succeeded"]
+    queue = NamingQueue(args.db)
+    queue.reconcile(jobs)
+    # Only the newest revision of each meeting.
+    latest: dict[str, dict[str, Any]] = {}
+    for job in jobs:
+        current = latest.get(job["meeting_id"])
+        if current is None or (job["manifest_revision"], job["id"]) > (current["manifest_revision"], current["id"]):
+            latest[job["meeting_id"]] = job
+    for job in latest.values():
+        queue.request(int(job["id"]), job["archive_path"])
+    return {
+        "schema_version": 1,
+        "queued": [
+            {"meeting_id": job["meeting_id"], "manifest_revision": job["manifest_revision"]}
+            for job in sorted(latest.values(), key=lambda job: int(job["id"]))
+        ],
+    }
+
+
 def _rename(args: argparse.Namespace) -> int:
     from .service import PublicationQueue
     from .titles import normalize_title, write_title
@@ -483,12 +526,14 @@ def main(argv: list[str] | None = None) -> int:
             status = JobQueue(args.db).status(meeting_ids)
             _add_speaker_counts_to_status(status, Path(args.db))
             _add_titles_to_status(status)
+            from .naming import NamingQueue
             from .service import PublicationQueue
             from .summaries import SummaryQueue
 
             processing_job_ids = {int(job["id"]) for job in status["jobs"]}
             scope = processing_job_ids if meeting_ids is not None else None
             status["publication"] = PublicationQueue(args.db).status(scope)
+            status["naming"] = NamingQueue(args.db).status(scope)
             status["summary"] = SummaryQueue(args.db).status(scope)
             _print_json(status)
             return 0
@@ -496,21 +541,26 @@ def main(argv: list[str] | None = None) -> int:
             meeting_id = str(uuid.UUID(args.meeting_id)).lower()
             processing = JobQueue(args.db).retry_failed(meeting_id)
             publication = None
+            naming = None
             summary = None
             if processing["state"] == "succeeded":
+                from .naming import NamingQueue
                 from .service import PublicationQueue
                 from .summaries import SummaryQueue
 
                 publication = PublicationQueue(args.db).retry_failed(processing["job_id"])
+                naming = NamingQueue(args.db).retry_failed(processing["job_id"])
                 summary = SummaryQueue(args.db).retry_failed(processing["job_id"])
             _print_json({
                 "schema_version": 1,
                 "meeting_id": meeting_id,
                 "retried": processing["retried"]
                 or bool(publication and publication["retried"])
+                or bool(naming and naming["retried"])
                 or bool(summary and summary["retried"]),
                 "processing": processing,
                 "publication": publication,
+                "naming": naming,
                 "summary": summary,
             })
             return 0
@@ -556,6 +606,10 @@ def main(argv: list[str] | None = None) -> int:
                     "suggestion_score": match.get("suggestion_score"),
                     "suggestion_margin": match.get("suggestion_margin"),
                     "confirmation_count": match.get("confirmation_count", 0),
+                    # What the conversation called this voice, if it did.
+                    "context_name": match.get("context_name"),
+                    "context_confidence": match.get("context_confidence"),
+                    "context_evidence": match.get("context_evidence"),
                     "embedding_available": observation is not None, "excerpts": excerpts,
                     # Names are no longer read from video frames. The app still
                     # decodes this field, so it stays as an empty list.
@@ -579,6 +633,9 @@ def main(argv: list[str] | None = None) -> int:
                     for speaker, name in sorted(names.items())
                 ],
             })
+            return 0
+        if args.command == "name-speakers":
+            _print_json(_name_speakers(args))
             return 0
         if args.command == "locate":
             path = _accepted_archive_path(args.db, args.archive_root, args.meeting_id)
