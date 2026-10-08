@@ -110,10 +110,14 @@ class WhisperPyannoteTranscriber:
         *,
         single_speaker: bool = False,
     ) -> list[dict[str, Any]]:
-        segments, _ = self.whisper.transcribe(str(path), vad_filter=True)
+        # Word times are only needed to split a line between speakers, and
+        # make Whisper slower, so a track with at most one speaker skips them.
+        by_word = self.diarizer is not None and not single_speaker
+        segments, _ = self.whisper.transcribe(str(path), vad_filter=True, word_timestamps=by_word)
+        segments = [item for item in segments if item.text.strip()]
         turns = [
             {"start": float(item.start), "end": float(item.end), "text": item.text.strip()}
-            for item in segments if item.text.strip()
+            for item in segments
         ]
         # A channel with no transcribed speech has nothing to label, so skip
         # decoding it again and loading audio for pyannote.
@@ -141,13 +145,10 @@ class WhisperPyannoteTranscriber:
         self.embeddings.update(
             extract_speaker_embeddings(raw_embeddings, embedding_annotation, channel_origin),
         )
+        turns = [turn for item in segments for turn in segment_turns(item, speaker_turns)]
         for turn in turns:
-            overlaps = [
-                (max(0.0, min(turn["end"], end) - max(turn["start"], start)), speaker)
-                for start, end, speaker in speaker_turns
-            ]
-            if overlaps and max(overlaps)[0] > 0:
-                turn["speaker"] = f"{channel_origin}:{max(overlaps)[1]}"
+            if "speaker" in turn:
+                turn["speaker"] = f"{channel_origin}:{turn['speaker']}"
         return turns
 
     def _label_one_speaker(
@@ -232,6 +233,92 @@ class WhisperPyannoteTranscriber:
             # The CPU always works, just slower, so a GPU that won't take the
             # pipeline never fails a job.
             print(f"Diarization stays on {self.diarizer_device} ({type(error).__name__}).", file=sys.stderr)
+
+
+#: A run of this many words or fewer, shorter than the duration below, between
+#: two stretches of the same speaker is a backchannel or a diarization blip, not
+#: a turn of its own.
+SLIVER_MAX_WORDS = 2
+SLIVER_MAX_SECONDS = 0.3
+
+
+def speaker_at(speaker_turns: list[tuple[float, float, str]], moment: float) -> str | None:
+    """The diarization speaker talking at a moment, else the nearest turn's."""
+    active = [turn for turn in speaker_turns if turn[0] <= moment <= turn[1]]
+    if active:
+        # With overlapping speech the one who started most recently is the
+        # more likely owner of this word.
+        return max(active, key=lambda turn: turn[0])[2]
+    if not speaker_turns:
+        return None
+    return min(speaker_turns, key=lambda turn: min(abs(moment - turn[0]), abs(moment - turn[1])))[2]
+
+
+def _majority_speaker(start: float, end: float, speaker_turns: list[tuple[float, float, str]]) -> str | None:
+    overlaps = [
+        (max(0.0, min(end, turn_end) - max(start, turn_start)), speaker)
+        for turn_start, turn_end, speaker in speaker_turns
+    ]
+    return max(overlaps)[1] if overlaps and max(overlaps)[0] > 0 else None
+
+
+def segment_turns(segment, speaker_turns: list[tuple[float, float, str]]) -> list[dict[str, Any]]:
+    """Turns for one Whisper segment, split wherever the speaker changes.
+
+    Each word goes to the speaker active at its midpoint, so a line where
+    someone else cuts in is no longer given whole to whoever spoke most of it.
+    Speaker labels here are pyannote's own, with no channel prefix.
+    """
+    text = segment.text.strip()
+    if not text:
+        return []
+    words = [word for word in (getattr(segment, "words", None) or []) if word.word.strip()]
+    if not words:
+        turn: dict[str, Any] = {"start": float(segment.start), "end": float(segment.end), "text": text}
+        speaker = _majority_speaker(turn["start"], turn["end"], speaker_turns)
+        if speaker is not None:
+            turn["speaker"] = speaker
+        return [turn]
+    # Runs of consecutive words by one speaker, as [speaker, words].
+    runs: list[list[Any]] = []
+    for word in words:
+        speaker = speaker_at(speaker_turns, (float(word.start) + float(word.end)) / 2)
+        if runs and runs[-1][0] == speaker:
+            runs[-1][1].append(word)
+        else:
+            runs.append([speaker, [word]])
+    index = 1
+    while index < len(runs) - 1:
+        run_words = runs[index][1]
+        if (
+            runs[index - 1][0] == runs[index + 1][0]
+            and len(run_words) <= SLIVER_MAX_WORDS
+            and float(run_words[-1].end) - float(run_words[0].start) < SLIVER_MAX_SECONDS
+        ):
+            runs[index - 1][1] += run_words + runs[index + 1][1]
+            del runs[index:index + 2]
+        else:
+            index += 1
+    if len(runs) == 1:
+        # Nobody cut in, so keep Whisper's own text and times.
+        pieces = [(runs[0][0], float(segment.start), float(segment.end), text)]
+    else:
+        pieces = [
+            (
+                speaker,
+                float(run_words[0].start),
+                float(run_words[-1].end),
+                "".join(word.word for word in run_words).strip(),
+            )
+            for speaker, run_words in runs
+        ]
+    turns = []
+    for speaker, start, end, piece in pieces:
+        turn = {"start": start, "end": end, "text": piece}
+        if speaker is not None:
+            turn["speaker"] = speaker
+        turns.append(turn)
+    return turns
 
 
 def diarization_device(preference: str | None, mps_available: bool) -> str:

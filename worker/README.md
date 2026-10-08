@@ -83,7 +83,14 @@ meeting duration); speaker refresh and Notion publication run on a separate
 thread so they never wait behind a long transcription.
 
 Whisper defaults to two CPU threads and enables its voice-activity filter to
-avoid inventing text across long silent spans. Diarization decodes through
+avoid inventing text across long silent spans. On a track that is diarized it
+also asks for word timestamps, which slow Whisper down, and gives each word to
+the pyannote speaker active at the word's midpoint (the nearest speaker turn if
+none is). A Whisper line is split into separate turns where the speaker
+changes, so someone cutting in mid-sentence no longer has their words labelled
+as the previous speaker's. One or two words under 0.3 seconds sitting between
+the same speaker on both sides stay with that speaker instead of making a turn.
+A track held to one speaker skips word timestamps. Diarization decodes through
 ffmpeg into a disk-backed 16 kHz mono buffer so pyannote does not depend on
 torchcodec's FFmpeg ABI support. The float waveform has a default 1.5 GiB
 memory budget, configurable with

@@ -847,7 +847,7 @@ class ProcessingTests(unittest.TestCase):
             turns = transcriber.transcribe(Path("unused.m4a"), "microphone")
 
         self.assertEqual(calls["init"]["cpu_threads"], 2)
-        self.assertEqual(calls["transcribe"], {"vad_filter": True})
+        self.assertEqual(calls["transcribe"], {"vad_filter": True, "word_timestamps": False})
         self.assertEqual(turns[0]["text"], "hello")
 
     def test_media_validator_probes_and_fully_decodes_each_declared_stream(self) -> None:
@@ -1018,7 +1018,7 @@ class ProcessingTests(unittest.TestCase):
 
         transcriber.transcribe(Path("unused.m4a"), "incoming")
 
-        self.assertEqual(whisper_calls, {"vad_filter": True})
+        self.assertEqual(whisper_calls, {"vad_filter": True, "word_timestamps": True})
         self.assertEqual(
             transcriber.embeddings,
             {"incoming:SPEAKER_00": [1.0, 0.0], "incoming:SPEAKER_01": [0.0, 1.0]},
