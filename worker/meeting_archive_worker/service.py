@@ -453,6 +453,9 @@ def run_once(
     """One pass of every stage. The summary stage runs only with an explicit summarizer."""
     refresh_speakers(database)
     processed = run_processing(database, processor, lease_seconds)
+    if summarize is not None:
+        # A summary waits for its meeting's names, so name first.
+        run_naming(database)
     summarized = run_summary(database, summarize) if summarize is not None else False
     published = run_publication(database, publisher)
     return {"processed": processed, "summarized": summarized, "published": published}

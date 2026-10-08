@@ -31,7 +31,7 @@ from meeting_archive_worker.naming import (  # noqa: E402
     read_naming,
 )
 from meeting_archive_worker.queue import JobQueue  # noqa: E402
-from meeting_archive_worker.service import run_naming, run_summary  # noqa: E402
+from meeting_archive_worker.service import run_naming, run_once, run_summary  # noqa: E402
 from meeting_archive_worker.speaker_refresh import reconcile_speaker_refresh  # noqa: E402
 from meeting_archive_worker.speakers import SpeakerRegistry  # noqa: E402
 from meeting_archive_worker.summaries import (  # noqa: E402
@@ -436,6 +436,18 @@ class FakeServiceTestCase(NamingTestCase):
 
 
 class NamingStageTests(FakeServiceTestCase):
+    def test_run_once_names_the_meeting_before_its_summary(self) -> None:
+        summarized: list[Path] = []
+        with patch("urllib.request.urlopen", FakeOpenRouter(completion(NAMES))):
+            result = run_once(
+                self.database, processor=lambda *_: None, publisher=lambda *_: None,
+                summarize=summarized.append,
+            )
+
+        self.assertEqual(self.naming_job()["state"], "succeeded")
+        self.assertTrue(result["summarized"])
+        self.assertEqual(summarized, [self.archive])
+
     def test_without_a_key_nothing_is_queued_or_run(self) -> None:
         os.environ.pop("OPENROUTER_API_KEY")
         openrouter = FakeOpenRouter()
@@ -609,6 +621,17 @@ class NamingCommandTests(FakeServiceTestCase):
         self.assertEqual(openrouter.requests, [])
         other = "33333333-3333-4333-8333-333333333333"
         self.assertEqual(self.run_cli("name-speakers", "--meeting-id", other, "--db", str(self.database))["queued"], [])
+
+    def test_name_speakers_does_not_claim_a_failed_job_was_queued(self) -> None:
+        self.run_naming(http_error(401, "User not found."))
+        self.assertEqual(self.naming_job()["state"], "permanent_failure")
+
+        result = self.run_cli("name-speakers", "--db", str(self.database))
+
+        self.assertEqual(result["queued"], [])
+        self.assertEqual(result["needs_retry"], [{"meeting_id": MEETING_ID, "manifest_revision": 1}])
+        self.assertIn("retry", result["message"])
+        self.assertEqual(self.naming_job()["state"], "permanent_failure")
 
     def test_status_and_retry_cover_naming(self) -> None:
         self.run_naming(http_error(401, "User not found."))

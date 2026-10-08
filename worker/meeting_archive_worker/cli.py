@@ -473,15 +473,22 @@ def _name_speakers(args: argparse.Namespace) -> dict[str, Any]:
         current = latest.get(job["meeting_id"])
         if current is None or (job["manifest_revision"], job["id"]) > (current["manifest_revision"], current["id"]):
             latest[job["meeting_id"]] = job
-    for job in latest.values():
-        queue.request(int(job["id"]), job["archive_path"])
-    return {
-        "schema_version": 1,
-        "queued": [
-            {"meeting_id": job["meeting_id"], "manifest_revision": job["manifest_revision"]}
-            for job in sorted(latest.values(), key=lambda job: int(job["id"]))
-        ],
-    }
+    ordered = sorted(latest.values(), key=lambda job: int(job["id"]))
+    # A naming job waiting to retry or failed is left alone; only `retry` releases it.
+    accepted = [job for job in ordered if queue.request(int(job["id"]), job["archive_path"])]
+    refused = [job for job in ordered if job not in accepted]
+
+    def identity(job: dict[str, Any]) -> dict[str, Any]:
+        return {"meeting_id": job["meeting_id"], "manifest_revision": job["manifest_revision"]}
+
+    result: dict[str, Any] = {"schema_version": 1, "queued": [identity(job) for job in accepted]}
+    if refused:
+        result["needs_retry"] = [identity(job) for job in refused]
+        result["message"] = (
+            "Naming for needs_retry meetings is waiting to retry or has failed, so it was not queued. "
+            "Run retry --meeting-id for each to release it."
+        )
+    return result
 
 
 def _rename(args: argparse.Namespace) -> int:

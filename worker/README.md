@@ -276,7 +276,9 @@ saved names, for example after `forget-context-voices`.
 
 `name-speakers --db WORKER_DB [--meeting-id UUID ...]` queues naming for those
 meetings, or every processed one, for the service to run. A meeting named
-before and unchanged costs nothing. It is also what the service does by itself
+before and unchanged costs nothing. A meeting whose naming is waiting to retry
+or has failed is not queued: it is listed under `needs_retry`, and `retry`
+releases it. It is also what the service does by itself
 the first time it starts with a key. `status` and `retry` report and release the
 `naming` stage like the others. Cost is about the summary's, since the prompt
 carries the same transcript: roughly 5 to 15 US cents per meeting.
