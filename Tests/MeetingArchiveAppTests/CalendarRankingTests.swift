@@ -36,14 +36,14 @@ final class CalendarRankingTests: XCTestCase {
         XCTAssertNil(CalendarRanking.best([trip], start: start, end: end))
     }
 
-    func testABriefCallInsideALongBlockDoesNotTakeItsName() {
-        // A 20-minute call during a three-hour focus block.
+    func testAShortPartOfALongerMeetingKeepsItsTitle() {
+        // Ten minutes split off a one-hour meeting by a capture failure.
         let start = Date(timeIntervalSince1970: 400_000)
-        let block = CalendarSuggestion(
-            id: "focus", title: "Focus time", start: start.addingTimeInterval(-3600),
-            end: start.addingTimeInterval(2 * 3600), attendees: []
+        let meeting = CalendarSuggestion(
+            id: "review", title: "Quarterly review", start: start.addingTimeInterval(-1800),
+            end: start.addingTimeInterval(1800), attendees: []
         )
-        XCTAssertNil(CalendarRanking.best([block], start: start, end: start.addingTimeInterval(1200)))
+        XCTAssertEqual(CalendarRanking.best([meeting], start: start, end: start.addingTimeInterval(600))?.id, "review")
     }
 
     func testTheMeetingStillWinsWhenALongEventAlsoCoversTheCall() {

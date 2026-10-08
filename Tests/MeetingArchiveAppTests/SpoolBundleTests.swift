@@ -105,10 +105,10 @@ final class SpoolBundleTests: XCTestCase {
     /// can pick another event, or none.
     func testAttendeesComeFromTheEventTheTitleCameFrom() throws {
         let start = Date(timeIntervalSince1970: 1_790_000_000)
-        let callEnded = start.addingTimeInterval(600)
+        let callEnded = start.addingTimeInterval(60)
         var meeting = record()
         meeting.startedAt = start
-        meeting.endedAt = callEnded.addingTimeInterval(300)
+        meeting.endedAt = callEnded.addingTimeInterval(30)
         func event(_ id: String, from: TimeInterval, to: TimeInterval, attendee: String) -> CalendarSuggestion {
             CalendarSuggestion(id: id, title: id, start: start.addingTimeInterval(from), end: start.addingTimeInterval(to),
                                attendees: [CalendarAttendee(name: attendee, email: nil, response: "2")])
@@ -117,10 +117,10 @@ final class SpoolBundleTests: XCTestCase {
         // calls a tie. In the second pair the call was a tie, and the part's
         // end would pick the later event.
         let cases: [(events: [CalendarSuggestion], expected: [String])] = [
-            ([event("Design review", from: -300, to: 450, attendee: "Riley Example"),
-              event("Hiring sync", from: 450, to: 1200, attendee: "Jordan Example")], ["Riley Example"]),
-            ([event("Standup", from: -450, to: 300, attendee: "Casey Example"),
-              event("Planning", from: 300, to: 1050, attendee: "Morgan Example")], []),
+            ([event("Design review", from: -1800, to: 45, attendee: "Riley Example"),
+              event("Hiring sync", from: 45, to: 1845, attendee: "Jordan Example")], ["Riley Example"]),
+            ([event("Standup", from: -1800, to: 30, attendee: "Casey Example"),
+              event("Planning", from: 30, to: 1830, attendee: "Morgan Example")], []),
         ]
 
         for (events, expected) in cases {
