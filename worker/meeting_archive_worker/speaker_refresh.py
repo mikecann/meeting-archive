@@ -189,8 +189,14 @@ def reconcile_speaker_refresh(
     revision: int,
     *,
     clock=time.time,
+    summary_delay_seconds: float | None = None,
 ) -> bool:
-    """Apply one pending generation; leave it durable when inputs are not ready."""
+    """Apply one pending generation; leave it durable when inputs are not ready.
+
+    A summary written before these names is asked for again after
+    `summary_delay_seconds` (default: once names settle). Naming passes 0,
+    since the names are complete and the summary is waiting for them.
+    """
 
     database = Path(database)
     generation = _pending_generation(database, meeting_id, revision)
@@ -234,8 +240,19 @@ def reconcile_speaker_refresh(
             from .speaker_evidence import refresh_speaker_matches
             from .speakers import SpeakerRegistry
             from .service import PublicationQueue
+            from .naming import NamingQueue, naming_enabled, naming_is_stale, naming_model
             from .summaries import SPEAKER_NAMES_SETTLE_SECONDS, SummaryQueue
 
+            if summary_delay_seconds is None:
+                # A request made with a delay keeps it across retries.
+                with closing_connection(lambda: _connect(database)) as connection:
+                    row = connection.execute(
+                        "SELECT summary_delay FROM speaker_refreshes WHERE meeting_id=? "
+                        "AND manifest_revision=? AND generation=?",
+                        (meeting_id, revision, generation),
+                    ).fetchone()
+                if row is not None and row[0] is not None:
+                    summary_delay_seconds = float(row[0])
             registry = SpeakerRegistry(database)
             refresh_speaker_matches(transcript, registry)
             _write_transcript_artifacts(transcript_path.parent, transcript)
@@ -245,9 +262,13 @@ def reconcile_speaker_refresh(
             SummaryQueue(database).request(
                 processing_job_id,
                 str(archive),
-                delay_seconds=SPEAKER_NAMES_SETTLE_SECONDS,
+                delay_seconds=SPEAKER_NAMES_SETTLE_SECONDS if summary_delay_seconds is None else summary_delay_seconds,
                 create=False,
             )
+            # Names don't change what naming reads, so this is normally false
+            # and the loop of naming, refreshing and naming again can't start.
+            if naming_enabled() and naming_is_stale(archive, naming_model()):
+                NamingQueue(database).request(processing_job_id, str(archive), create=False)
             with closing_connection(lambda: _connect(database)) as connection:
                 connection.execute(
                     "DELETE FROM speaker_refreshes WHERE meeting_id=? "

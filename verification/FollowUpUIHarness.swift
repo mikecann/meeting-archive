@@ -49,9 +49,7 @@ private final class FollowUpHarnessDelegate: NSObject, NSApplicationDelegate {
                 speakerReview: .waitingForProcessing,
                 retryStage: nil,
                 lastError: nil,
-                manifestRevision: meeting.metadataRevision,
-                totalSpeakerCount: nil,
-                unconfirmedSpeakerCount: nil
+                manifestRevision: meeting.metadataRevision
             )
             self.controller = controller
             showControls(controller: controller, meeting: meeting)

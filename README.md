@@ -229,10 +229,11 @@ log show --predicate 'subsystem == "com.mikerosoft.meeting-archive"' --last 1d
 
 ## Review and current limits
 
-Speaker review never pops up. When Bruce has worked out who spoke, the menu
-bar shows how many voices still need a name, with a **Review speakers** entry
-for each meeting, and the library has a **Name speakers…** button. Review
-whenever you like; archiving and later recordings don't wait for it.
+Naming speakers is optional and never asked for. Nothing in the menu bar, the
+notifications or the library row nags about unnamed voices, and a meeting
+counts as done once Bruce has processed it. When you want to name people, press
+**Speakers…** on the meeting in the library. Archiving and later recordings
+don't wait for it.
 
 The review window has one card per person. pyannote often splits one person
 into several voices, so voices with the same name share a card, like

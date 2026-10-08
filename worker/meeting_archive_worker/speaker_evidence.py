@@ -6,7 +6,11 @@ from .speakers import AUTOMATIC_KINDS, classify_match
 
 
 def refresh_speaker_matches(transcript: dict, registry) -> None:
-    """Refresh derived names without ever enrolling an automatic prediction."""
+    """Refresh derived names without ever enrolling an automatic prediction.
+
+    Names come in three strengths: a saved one ("confirmed"), one from the
+    voice ("voice_match") and one from the conversation ("context").
+    """
     meeting_id = transcript["meeting_id"]
     revision = transcript["manifest_revision"]
     assignments = registry.assignments(meeting_id, revision)
@@ -24,7 +28,8 @@ def refresh_speaker_matches(transcript: dict, registry) -> None:
         if confirmed:
             turn.update(name=confirmed, name_source="confirmed")
         elif automatic:
-            turn.update(name=automatic, name_source="voice_match")
+            kind = matches[speaker].get("suggestion_kind")
+            turn.update(name=automatic, name_source="context" if kind == "context" else "voice_match")
         else:
             turn.pop("name", None)
             turn.pop("name_source", None)
@@ -46,7 +51,8 @@ def automatic_names(transcript: dict) -> dict[str, str]:
             match.get("confirmation_count", 0),
         ) != "automatic":
             continue
+        source = "context" if kind == "context" else "voice_match"
         turns = [turn for turn in transcript["turns"] if turn.get("speaker") == speaker]
-        if turns and all(turn.get("name") == name and turn.get("name_source") == "voice_match" for turn in turns):
+        if turns and all(turn.get("name") == name and turn.get("name_source") == source for turn in turns):
             result[speaker] = name
     return result

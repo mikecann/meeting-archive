@@ -62,12 +62,27 @@ def channel(path) -> str:
 
 
 def stub_transcriber(segments: dict, outputs: dict):
-    """A real adapter whose Whisper and pyannote calls return fixed results."""
+    """A real adapter whose Whisper and pyannote calls return fixed results.
+
+    A segment is (start, end, text), or (start, end, text, words) with each
+    word a (start, end, text) as faster-whisper gives them when asked.
+    """
     transcriber = object.__new__(WhisperPyannoteTranscriber)
-    transcriber.whisper = SimpleNamespace(transcribe=lambda path, **_options: (
-        [SimpleNamespace(start=start, end=end, text=text) for start, end, text in segments.get(channel(path), [])],
-        None,
-    ))
+    transcriber.whisper_options = []
+
+    def whisper(path, **options):
+        transcriber.whisper_options.append((channel(path), options))
+        return ([
+            SimpleNamespace(
+                start=start,
+                end=end,
+                text=text,
+                words=[SimpleNamespace(start=a, end=b, word=f" {word}") for a, b, word in rest[0]] if rest else None,
+            )
+            for start, end, text, *rest in segments.get(channel(path), [])
+        ], None)
+
+    transcriber.whisper = SimpleNamespace(transcribe=whisper)
     transcriber.diarizer = object()
     transcriber.diarization_enabled = True
     transcriber.embeddings = {}
@@ -268,6 +283,71 @@ class MicrophoneSpeakerTests(unittest.TestCase):
                 [turn["speaker"] for turn in saved_transcript(incoming)["turns"]],
                 ["microphone:SPEAKER_00", "microphone:SPEAKER_01"],
             )
+
+
+class WordSpeakerTests(unittest.TestCase):
+    CUT_IN = (
+        0.0, 4.0, " So yeah, this could get messy. So can I use this?",
+        [(0.0, 0.5, "So"), (0.5, 1.0, "yeah,"), (1.0, 1.5, "this"), (1.5, 2.0, "could"), (2.0, 2.5, "get"),
+         (2.5, 3.0, "messy."), (3.0, 3.3, "So"), (3.3, 3.6, "can"), (3.6, 3.8, "I"), (3.8, 3.9, "use"),
+         (3.9, 4.0, "this?")],
+    )
+
+    def test_a_line_where_someone_cuts_in_is_split_between_the_speakers(self) -> None:
+        transcriber, _ = stub_transcriber(
+            {"incoming": [self.CUT_IN]},
+            {"incoming": diarization(
+                [(0.0, 3.0, "SPEAKER_00"), (3.0, 4.0, "SPEAKER_01")],
+                [[0.6, 0.8], [0.8, -0.6]],
+            )},
+        )
+
+        turns = transcriber.transcribe(Path("incoming.m4a"), "incoming")
+
+        self.assertEqual(transcriber.whisper_options, [("incoming", {"vad_filter": True, "word_timestamps": True})])
+        self.assertEqual(
+            [(turn["speaker"], turn["start"], turn["end"], turn["text"]) for turn in turns],
+            [
+                ("incoming:SPEAKER_00", 0.0, 3.0, "So yeah, this could get messy."),
+                ("incoming:SPEAKER_01", 3.0, 4.0, "So can I use this?"),
+            ],
+        )
+
+    def test_a_one_speaker_microphone_skips_the_slower_word_times(self) -> None:
+        transcriber, _ = stub_transcriber(
+            {"microphone": [self.CUT_IN]},
+            {"microphone": diarization([(0.0, 4.0, "SPEAKER_00")], [MIKE])},
+        )
+
+        turns = transcriber.transcribe(Path("microphone.m4a"), "microphone", single_speaker=True)
+
+        self.assertEqual(transcriber.whisper_options, [("microphone", {"vad_filter": True, "word_timestamps": False})])
+        self.assertEqual([turn["speaker"] for turn in turns], ["microphone:SPEAKER_00"])
+        self.assertEqual(len(turns), 1)
+
+    def test_split_lines_flow_through_the_saved_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            incoming, _ = write_bundle(root)
+            transcriber, _ = stub_transcriber(
+                {"incoming": [self.CUT_IN]},
+                {"incoming": diarization(
+                    [(0.0, 3.0, "SPEAKER_00"), (3.0, 4.0, "SPEAKER_01")],
+                    [[0.6, 0.8], [0.8, -0.6]],
+                )},
+            )
+
+            run_process(incoming, transcriber, root / "worker.sqlite")
+
+            turns = saved_transcript(incoming)["turns"]
+            self.assertEqual(
+                [(turn["channel_origin"], turn["speaker"], turn["text"]) for turn in turns],
+                [
+                    ("incoming", "incoming:SPEAKER_00", "So yeah, this could get messy."),
+                    ("incoming", "incoming:SPEAKER_01", "So can I use this?"),
+                ],
+            )
+            self.assertEqual(set(transcriber.embeddings), {"incoming:SPEAKER_00", "incoming:SPEAKER_01"})
 
 
 class VoiceEmbeddingTests(unittest.TestCase):
