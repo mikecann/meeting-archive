@@ -20,9 +20,15 @@ enum CalendarRanking {
         let recording = max(1, end.timeIntervalSince(start))
         // Measure overlap against the shorter of the two, so a 30-minute slot
         // that ran over into an 80-minute call still counts as a match.
-        let ranked = events.map { event in
+        // A trip or all-day event isn't a meeting, and a short call during a
+        // long block, like a school run, doesn't take its name: the call has
+        // to cover at least a quarter of the event.
+        let ranked = events.compactMap { event -> (CalendarSuggestion, Double)? in
+            let length = event.end.timeIntervalSince(event.start)
+            guard length < 12 * 3600 else { return nil }
             let overlap = max(0, min(end, event.end).timeIntervalSince(max(start, event.start)))
-            return (event, overlap / max(1, min(recording, event.end.timeIntervalSince(event.start))))
+            guard overlap >= length / 4 else { return nil }
+            return (event, overlap / max(1, min(recording, length)))
         }.filter { $0.1 >= 0.5 }.sorted { $0.1 > $1.1 }
         guard let first = ranked.first else { return nil }
         if ranked.count > 1, first.1 - ranked[1].1 < 0.2 { return nil }
