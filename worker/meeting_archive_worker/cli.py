@@ -344,6 +344,24 @@ def parser() -> argparse.ArgumentParser:
     )
     name_speakers.add_argument("--db", type=Path, required=True)
 
+    context_voices = commands.add_parser(
+        "context-voices",
+        help="list the voice profiles learned from the conversation",
+    )
+    context_voices.add_argument("--db", type=Path, required=True)
+    learn_context = commands.add_parser(
+        "learn-context-voices",
+        help="learn voices from every meeting's conversation names again",
+    )
+    learn_context.add_argument("--db", type=Path, required=True)
+    forget_context = commands.add_parser(
+        "forget-context-voices",
+        help="remove voice profiles learned from the conversation, never the ones Mike saved",
+    )
+    forget_context.add_argument("--name", help="only profiles of this name")
+    forget_context.add_argument("--meeting-id", help="only profiles learned from this meeting")
+    forget_context.add_argument("--db", type=Path, required=True)
+
     retry = commands.add_parser("retry", help="release failed processing or publication work")
     retry.add_argument("--meeting-id", required=True)
     retry.add_argument("--db", type=Path, required=True)
@@ -636,6 +654,19 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "name-speakers":
             _print_json(_name_speakers(args))
+            return 0
+        if args.command == "context-voices":
+            _print_json({"schema_version": 1, "profiles": SpeakerRegistry(args.db).context_profiles()})
+            return 0
+        if args.command == "learn-context-voices":
+            _print_json({"schema_version": 1, "enrolled": SpeakerRegistry(args.db).learn_all_from_context()})
+            return 0
+        if args.command == "forget-context-voices":
+            meeting_id = str(uuid.UUID(args.meeting_id)).lower() if args.meeting_id else None
+            _print_json({
+                "schema_version": 1,
+                **SpeakerRegistry(args.db).forget_context_profiles(name=args.name, meeting_id=meeting_id),
+            })
             return 0
         if args.command == "locate":
             path = _accepted_archive_path(args.db, args.archive_root, args.meeting_id)

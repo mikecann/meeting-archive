@@ -345,7 +345,8 @@ def name_archive(
 
     Idempotent: a request made from the same transcript, prompt and model is
     reused without calling OpenRouter. Either way the names are saved to the
-    registry again, which is cheap and repairs a database that lost them.
+    registry again, which is cheap and repairs a database that lost them. Where
+    the voice agrees with a name at high confidence it is also learned.
     """
     archive, metadata, meeting_id, revision, transcript = _load(archive_directory)
     prompt = _prompt(archive, metadata, transcript)
@@ -386,7 +387,10 @@ def name_archive(
         [entry for entry in entries.values() if entry.get("confidence") in CONTEXT_CONFIDENCES],
         {speaker: (seconds, words) for speaker, (_, words, seconds) in roster.items()},
     )
-    return {"naming_written": written, "names": kept}
+    # The conversation and the voice may now agree on someone. Never raises: a
+    # profile that isn't learned today is learned when the next meeting names it.
+    learned = registry.learn_from_context(meeting_id, revision)
+    return {"naming_written": written, "names": kept, "voices_learned": len(learned)}
 
 
 def make_openrouter_namer(database: Path | str) -> Callable[[Path], dict[str, Any]]:

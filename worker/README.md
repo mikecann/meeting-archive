@@ -245,6 +245,35 @@ names, but not while naming waits to retry or has failed. When naming finishes
 the transcript is rewritten, Notion is refreshed and the summary is asked for
 again at once.
 
+### Learning voices when two signals agree
+
+Only names Mike saves enroll voice profiles, with one exception. When the
+conversation named a voice at `high` confidence and the voice agrees, naming
+also enrolls it as a profile marked `source = 'context'` (`voice_profiles.source`
+is `confirmed` otherwise). It agrees when either:
+
+- its embedding scores 0.55 or more against an enrolled profile of the same
+  name (compared ignoring case; the profile's spelling is kept), or
+- nobody of that name is enrolled yet, and another meeting's conversation gave
+  the same name at high confidence to a voice scoring 0.55 or more against this
+  one. This voice and the closest such voice are both enrolled.
+
+The measured highest score between two different people was 0.654, so the
+score alone proves nothing; the matching name is what makes this safe. Never
+enrolled: a zero or non-finite embedding, a voice with under 15 seconds of
+speech or under 40 words, a `microphone:` voice (Mike's own is handled by
+his saved profile), the name "AI", or a voice Mike has named. A voice learned
+this way counts as a confirmed meeting when matching other voices, and a name
+Mike saves for it later replaces the automatic profile. A meeting's context
+profiles are rebuilt each time it is named, so a changed name doesn't leave
+the old one.
+
+`context-voices` lists these profiles. `forget-context-voices [--name NAME]
+[--meeting-id UUID]` removes them (all, or by name or meeting), never Mike's
+own, and queues a refresh of every meeting with an unnamed voice so names that
+rested on them go. `learn-context-voices` learns again from every meeting's
+saved names, for example after `forget-context-voices`.
+
 `name-speakers --db WORKER_DB [--meeting-id UUID ...]` queues naming for those
 meetings, or every processed one, for the service to run. A meeting named
 before and unchanged costs nothing. It is also what the service does by itself

@@ -231,7 +231,7 @@ class NamingFileTests(NamingTestCase):
     def test_names_are_saved_with_what_they_cost_and_only_confident_ones_are_kept(self) -> None:
         result, _ = self.name(completion(NAMES))
 
-        self.assertEqual(result, {"naming_written": True, "names": 3})
+        self.assertEqual(result, {"naming_written": True, "names": 3, "voices_learned": 0})
         naming = read_naming(self.archive, self.metadata())
         self.assertEqual(naming["model"], "anthropic/claude-opus-5.5")
         self.assertEqual(len(naming["input_sha256"]), 64)
@@ -272,7 +272,7 @@ class NamingFileTests(NamingTestCase):
 
         result, openrouter = self.name()
 
-        self.assertEqual(result, {"naming_written": False, "names": 3})
+        self.assertEqual(result, {"naming_written": False, "names": 3, "voices_learned": 0})
         self.assertEqual(openrouter.requests, [])
         self.assertEqual(len(self.registry.context_names(MEETING_ID, 1)), 3)
 
@@ -565,6 +565,20 @@ class NamingStageTests(FakeServiceTestCase):
         self.assertEqual((job["state"], job["attempts"]), ("retry_wait", 1))
         self.assertIn("HTTP 429", job["last_error"])
         self.assertGreaterEqual(job["available_at"] - self.queue_clock(), 590)
+
+    def test_a_high_name_that_the_voice_agrees_with_is_learned_and_a_medium_one_is_not(self) -> None:
+        other = "44444444-4444-4444-8444-444444444444"
+        self.registry.save_observation(other, 1, "incoming:SPEAKER_00", [0.0, 1.0], "model@1")
+        self.registry.confirm_observation(other, 1, "incoming:SPEAKER_00", "Sam")
+
+        self.run_naming(completion(NAMES))
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            learned = connection.execute(
+                "SELECT display_name, source_speaker_id FROM voice_profiles WHERE source='context'",
+            ).fetchall()
+        # Sam is high and sounds like Sam; Priya is only medium.
+        self.assertEqual(learned, [("Sam", "incoming:SPEAKER_00")])
 
     def test_the_naming_model_can_be_chosen(self) -> None:
         os.environ["MEETING_ARCHIVE_NAMING_MODEL"] = "openai/gpt-6"
