@@ -218,6 +218,7 @@ class _Heartbeat:
         self.queue = queue
         self.job = job
         self.lease_seconds = lease_seconds
+        self.interval = max(0.05, lease_seconds / 3)
         self.stop = threading.Event()
         self.error: BaseException | None = None
         self.thread = threading.Thread(target=self._run, name="meeting-archive-lease", daemon=True)
@@ -231,8 +232,7 @@ class _Heartbeat:
         self.thread.join()
 
     def _run(self) -> None:
-        interval = max(0.05, self.lease_seconds / 3)
-        while not self.stop.wait(interval):
+        while not self.stop.wait(self.interval):
             try:
                 self.queue.renew(self.job, self.lease_seconds)
             except BaseException as error:
