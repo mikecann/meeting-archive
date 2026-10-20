@@ -82,6 +82,20 @@ one job at a time in a child process with a time budget of max(1 hour, 6x the
 meeting duration); speaker refresh and Notion publication run on a separate
 thread so they never wait behind a long transcription.
 
+Quiet hours keep heavy jobs out of the night. Bruce shares its 8 GB with
+Sammy Cam, which records and runs its detector and database from 22:00 to
+06:00, and memory can't be shared the way CPU priority can. Inside the window
+the service claims no processing job, so transcription, diarization, the
+playback ffmpeg pass and their model loads all wait, and anything queued or
+due for a retry starts at the end of it. A job that started before the window
+runs to the end. Speaker refresh, naming, summaries, Notion, the viewer and
+`status` carry on as normal. Set `MEETING_ARCHIVE_QUIET_HOURS` to `HH:MM-HH:MM`
+in Bruce's local time (a window can cross midnight), or `off`. It defaults to
+`22:00-06:00`, is read when the service starts, and a value it can't read is
+logged and falls back to the default. While jobs are held, `status` sets
+`quiet_hours_until` to the Unix time they can start, otherwise `null`, and the
+app shows a queued meeting as waiting for quiet hours to end.
+
 Whisper defaults to two CPU threads and enables its voice-activity filter to
 avoid inventing text across long silent spans. On a track that is diarized it
 also asks for word timestamps, which slow Whisper down, and gives each word to

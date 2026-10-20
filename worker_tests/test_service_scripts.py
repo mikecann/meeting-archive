@@ -41,6 +41,7 @@ class ServiceScriptContractTests(unittest.TestCase):
         self.assertIn("export MKL_NUM_THREADS=2", wrapper)
         self.assertIn("export MEETING_ARCHIVE_TORCH_THREADS=2", wrapper)
         self.assertIn("export MEETING_ARCHIVE_WHISPER_CPU_THREADS=2", wrapper)
+        self.assertIn('export MEETING_ARCHIVE_QUIET_HOURS="22:00-06:00"', wrapper)
 
     def test_worker_installer_stages_private_bounded_stderr_diagnostics(self) -> None:
         installer = (WORKER_ROOT / "install-service-bruce.sh").read_text(

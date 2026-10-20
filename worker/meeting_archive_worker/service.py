@@ -22,6 +22,7 @@ from .db import closing_connection
 from .notion import publish
 from .processor import process
 from .queue import JobQueue, QueueConflict
+from .quiet_hours import QuietHours, quiet_hours_from_environment, record_hold
 from .naming import NamingQueue, make_openrouter_namer, naming_enabled
 from .summaries import SummaryQueue, summaries_enabled, summarize_with_openrouter
 
@@ -398,8 +399,30 @@ def _apply_names(database: Path, archive_path: str) -> None:
     reconcile_speaker_refresh(database, meeting_id, revision)
 
 
-def run_processing(database: Path, processor=process_isolated, lease_seconds: float = 900) -> bool:
-    """Claim and run at most one heavy job; the queue allows only one lease."""
+def run_processing(
+    database: Path,
+    processor=process_isolated,
+    lease_seconds: float = 900,
+    quiet_hours: QuietHours | None = None,
+    clock=time.time,
+) -> bool:
+    """Claim and run at most one heavy job; the queue allows only one lease.
+
+    Inside quiet hours nothing is claimed, so ready jobs simply wait for the
+    morning. A job that started before the window keeps running to the end,
+    since stopping it would throw away hours of work only to redo it.
+    """
+    if quiet_hours is not None:
+        resumes_at = quiet_hours.resumes_at(clock())
+        if record_hold(database, resumes_at):
+            _log(
+                f"quiet hours {quiet_hours}: heavy jobs wait until "
+                f"{time.strftime('%H:%M', time.localtime(resumes_at))}"
+                if resumes_at is not None
+                else f"quiet hours {quiet_hours} are over; heavy jobs can start",
+            )
+        if resumes_at is not None:
+            return False
     queue = JobQueue(database)
     job = queue.claim_ready(f"{socket.gethostname()}:{uuid.uuid4()}", lease_seconds)
     if job is None:
@@ -546,6 +569,10 @@ def main() -> int:
     parser.add_argument("--db", type=Path, required=True)
     parser.add_argument("--poll-seconds", type=float, default=15)
     args = parser.parse_args()
+    # Read once at start, like the credentials. Only heavy processing waits;
+    # speaker refresh, names, summaries and Notion are light and carry on.
+    quiet_hours = quiet_hours_from_environment(log=_log)
+    _log(f"quiet hours {quiet_hours}" if quiet_hours else "quiet hours off")
     with _ServiceLock(args.db):
         # Heavy processing stays on this thread, one job at a time. Publication
         # and speaker refresh run beside it so they never wait for hours.
@@ -576,7 +603,7 @@ def main() -> int:
         try:
             while True:
                 try:
-                    run_processing(args.db)
+                    run_processing(args.db, quiet_hours=quiet_hours)
                 except Exception:
                     _log("processing pass failed:\n" + traceback.format_exc())
                 time.sleep(max(1, args.poll_seconds))

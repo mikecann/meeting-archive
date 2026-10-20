@@ -75,6 +75,35 @@ final class WorkerStatusTests: XCTestCase {
         XCTAssertEqual(statuses[completeID]?.detail, "Publishing to Notion")
     }
 
+    func testQueuedJobHeldByQuietHoursSaysItIsWaitingForTheMorning() throws {
+        let queuedID = UUID()
+        let activeID = UUID()
+        let morning = Date(timeIntervalSince1970: 1_800_000_000)
+        let response = try JSONDecoder().decode(
+            WorkerStatusResponse.self,
+            from: statusFixture(
+                jobs: [
+                    job(id: 40, meetingID: queuedID, state: "ready"),
+                    job(id: 41, meetingID: activeID, state: "leased"),
+                ],
+                publications: [],
+                quietHoursUntil: morning.timeIntervalSince1970
+            )
+        )
+
+        let statuses = try response.statuses(for: [queuedID, activeID])
+
+        XCTAssertEqual(statuses[queuedID]?.heldUntil, morning)
+        XCTAssertEqual(
+            statuses[queuedID]?.detail,
+            "Archived • transcription waits for Bruce's quiet hours to end at "
+                + morning.formatted(date: .omitted, time: .shortened)
+        )
+        // A job that started before quiet hours keeps running.
+        XCTAssertNil(statuses[activeID]?.heldUntil)
+        XCTAssertEqual(statuses[activeID]?.detail, "Transcribing and separating speakers")
+    }
+
     func testRejectsPartialOrImpossibleSpeakerCounts() throws {
         let meetingID = UUID()
         for counts in [(2, nil), (nil, 1), (1, 2), (-1, 0)] as [(Int?, Int?)] {
@@ -407,7 +436,8 @@ final class WorkerStatusTests: XCTestCase {
     private func statusFixture(
         jobs: [[String: Any]],
         publications: [[String: Any]],
-        summaries: [[String: Any]]? = nil
+        summaries: [[String: Any]]? = nil,
+        quietHoursUntil: Double? = nil
     ) -> Data {
         var value: [String: Any] = [
             "schema_version": 1,
@@ -422,6 +452,9 @@ final class WorkerStatusTests: XCTestCase {
         ]
         if let summaries {
             value["summary"] = ["counts": [:], "phase": "ready", "last_error": NSNull(), "jobs": summaries]
+        }
+        if let quietHoursUntil {
+            value["quiet_hours_until"] = quietHoursUntil
         }
         return try! JSONSerialization.data(withJSONObject: value)
     }
