@@ -61,6 +61,9 @@ struct WorkerMeetingStatus: Equatable, Sendable {
     /// The title Bruce shows, which may be an AI title or a rename made there.
     var title: String? = nil
     var summaryState: WorkerSummaryState? = nil
+    /// Set while Bruce's quiet hours hold a queued job, so it reads as
+    /// waiting for the morning rather than stuck.
+    var heldUntil: Date? = nil
 
     var detail: String {
         switch phase {
@@ -74,9 +77,14 @@ struct WorkerMeetingStatus: Equatable, Sendable {
             return "Published to Notion"
         case .processing:
             if processingState != .succeeded {
-                return processingState == .leased
-                    ? "Transcribing and separating speakers"
-                    : "Archived • transcription and speaker separation queued"
+                if processingState == .leased {
+                    return "Transcribing and separating speakers"
+                }
+                if let heldUntil {
+                    let time = heldUntil.formatted(date: .omitted, time: .shortened)
+                    return "Archived • transcription waits for Bruce's quiet hours to end at \(time)"
+                }
+                return "Archived • transcription and speaker separation queued"
             }
             switch publicationState {
             case .publishing:
@@ -99,10 +107,14 @@ struct WorkerStatusResponse: Codable, Equatable, Sendable {
     var publication: WorkerPublicationStatus
     /// Nil from a worker without AI summaries.
     var summary: WorkerSummaryStatus? = nil
+    /// When Bruce's quiet hours end, while they hold ready jobs. Nil outside
+    /// them and from older workers.
+    var quietHoursUntil: Double? = nil
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case counts, jobs, publication, summary
+        case quietHoursUntil = "quiet_hours_until"
     }
 
     func statuses(for meetingIDs: some Sequence<UUID>) throws -> [UUID: WorkerMeetingStatus] {
@@ -173,6 +185,9 @@ struct WorkerStatusResponse: Codable, Equatable, Sendable {
             var status = Self.makeStatus(job: job, publication: publicationByJob[job.id])
             status.title = job.title
             status.summaryState = summaryByJob[job.id]
+            if job.state == .ready, let quietHoursUntil {
+                status.heldUntil = Date(timeIntervalSince1970: quietHoursUntil)
+            }
             return (meetingID, status)
         })
     }

@@ -10,6 +10,7 @@ import socket
 import stat
 import sys
 import threading
+import time
 import uuid
 import os
 from collections.abc import Callable
@@ -552,6 +553,7 @@ def main(argv: list[str] | None = None) -> int:
             _add_speaker_counts_to_status(status, Path(args.db))
             _add_titles_to_status(status)
             from .naming import NamingQueue
+            from .quiet_hours import held_until
             from .service import PublicationQueue
             from .summaries import SummaryQueue
 
@@ -560,6 +562,9 @@ def main(argv: list[str] | None = None) -> int:
             status["publication"] = PublicationQueue(args.db).status(scope)
             status["naming"] = NamingQueue(args.db).status(scope)
             status["summary"] = SummaryQueue(args.db).status(scope)
+            # Set while quiet hours hold ready jobs, so the app can say they
+            # are waiting for the morning rather than looking stuck.
+            status["quiet_hours_until"] = held_until(args.db, time.time())
             _print_json(status)
             return 0
         if args.command == "retry":
