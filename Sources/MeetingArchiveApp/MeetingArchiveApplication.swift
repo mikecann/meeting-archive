@@ -7,7 +7,13 @@ struct MeetingArchiveApplication: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var controller = ArchiveController()
     var body: some Scene {
-        MenuBarExtra {
+        // Without isInserted, SwiftUI quits the app whenever its icon is
+        // removed. On macOS 26 that includes switching it off under System
+        // Settings › Menu Bar: Control Center hides it about 50 ms after every
+        // launch, so the app quit before it could record anything. With the
+        // binding, a hidden icon just turns this off and recording carries on.
+        // $appDelegate isn't synthesised for the adaptor, so use its projected value.
+        MenuBarExtra(isInserted: _appDelegate.projectedValue.showsMenuBarIcon) {
             Text(controller.status)
             if let failure = controller.failure {
                 Text(failure).lineLimit(3)
@@ -76,7 +82,19 @@ enum AppNames {
 
 /// Quitting, logging out and shutting down all come through here, so the part
 /// being recorded is always saved properly before the app goes.
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+    /// False while the menu bar icon is hidden, by the user or by System
+    /// Settings. Not saved: every launch asks for the icon again, and macOS
+    /// hides it straight away if it's still switched off. Switching it back on
+    /// only shows it after a relaunch; Control Center keeps a running copy blocked.
+    @Published var showsMenuBarIcon = true {
+        didSet {
+            if oldValue != showsMenuBarIcon {
+                Log.controller.notice("Menu bar icon \(self.showsMenuBarIcon ? "shown" : "hidden", privacy: .public); recording carries on either way")
+            }
+        }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let controller = ArchiveController.running else { return .terminateNow }
         Task { @MainActor in

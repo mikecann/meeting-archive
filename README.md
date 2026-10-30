@@ -96,6 +96,12 @@ in the room, and **Never record** adds an app to the ignore list. Dictation
 apps, AI voice apps and screen recorders are ignored out of the box, and you
 can change that list in Settings.
 
+You can hide the menu bar icon under System Settings › Menu Bar and it carries
+on recording in the background, with the call notifications still showing.
+To get the icon back, switch it on again, then quit and reopen the app. With
+the icon hidden you can still quit it with
+`osascript -e 'quit app "Meeting Archive"'`, and it saves any recording first.
+
 If something goes wrong mid-call, like the mic stalling or AirPods switching
 mode, it rebuilds that source and carries on with a bit of silence over the
 gap. If the whole recording breaks it saves what it has and starts a new part.
