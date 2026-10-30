@@ -118,6 +118,13 @@ all 8 of its speaker slots, since a call that big probably had more people.
 `transcript.json` records which one labelled each track under
 `processing.track_diarizers`.
 
+Transcription uses faster-whisper's `large-v3-turbo` (since 30 Oct 2026; it
+was `small.en`), in English unless `MEETING_ARCHIVE_WHISPER_LANGUAGE` says
+otherwise (`auto` lets Whisper guess). On a 7 minute call on Bruce it took
+94 seconds against small.en's 48 and peaked at 2.1 GB against 1.4 GB, with
+better punctuation and word choice. `MEETING_ARCHIVE_WHISPER_MODEL` picks
+another model.
+
 Whisper defaults to two CPU threads and enables its voice-activity filter to
 avoid inventing text across long silent spans. On a track that is diarized it
 also asks for word timestamps, which slow Whisper down, and gives each word to

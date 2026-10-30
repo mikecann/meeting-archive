@@ -31,6 +31,10 @@ RESERVED_GENERATED_NAMESPACES = frozenset({"playback", "transcripts"})
 DIARIZATION_SAMPLE_RATE = 16000
 PYANNOTE_PIPELINE = "pyannote/speaker-diarization-community-1"
 NEMOTRON_MODEL = "nvidia/Nemotron-3-Diarization"
+#: large-v3-turbo gets names and punctuation right more often than small.en.
+#: On Bruce's CPU it takes about 0.21x the audio's length (small.en 0.11x) and
+#: peaks at about 2.1 GB (small.en 1.4 GB), measured 30 Oct 2026.
+DEFAULT_WHISPER_MODEL = "large-v3-turbo"
 #: Nemotron 3 tracks at most this many speakers. A track that fills every slot
 #: probably had more people, so pyannote, which has no cap, diarizes it instead.
 NEMOTRON_MAX_SPEAKERS = 8
@@ -83,7 +87,12 @@ class WhisperPyannoteTranscriber:
             from faster_whisper import WhisperModel
         except ImportError as error:
             raise RuntimeError("faster-whisper is not installed in the worker environment.") from error
-        model = os.environ.get("MEETING_ARCHIVE_WHISPER_MODEL", "small.en")
+        model = os.environ.get("MEETING_ARCHIVE_WHISPER_MODEL", DEFAULT_WHISPER_MODEL)
+        # The large models are multilingual. Calls are in English, and guessing
+        # the language from a quiet opening can transcribe a whole track in
+        # the wrong one, so it is fixed unless set to "auto".
+        language = os.environ.get("MEETING_ARCHIVE_WHISPER_LANGUAGE", "en").strip().lower()
+        self.whisper_language = None if language == "auto" else language
         cpu_threads = max(
             1,
             min(4, int(os.environ.get("MEETING_ARCHIVE_WHISPER_CPU_THREADS", "2"))),
@@ -126,7 +135,10 @@ class WhisperPyannoteTranscriber:
         # Word times are only needed to split a line between speakers, and
         # make Whisper slower, so a track with at most one speaker skips them.
         by_word = self.diarizer is not None and not single_speaker
-        segments, _ = self.whisper.transcribe(str(path), vad_filter=True, word_timestamps=by_word)
+        options = {"vad_filter": True, "word_timestamps": by_word}
+        if getattr(self, "whisper_language", None):
+            options["language"] = self.whisper_language
+        segments, _ = self.whisper.transcribe(str(path), **options)
         segments = [item for item in segments if item.text.strip()]
         turns = [
             {"start": float(item.start), "end": float(item.end), "text": item.text.strip()}
@@ -584,7 +596,7 @@ def process(archive_directory: Path, job: Job) -> None:
     track_diarizers = getattr(transcriber, "track_diarizers", {})
     result["processing"] = {
         "manifest_sha256": manifest.manifest_sha256,
-        "whisper_model": os.environ.get("MEETING_ARCHIVE_WHISPER_MODEL", "small.en"),
+        "whisper_model": os.environ.get("MEETING_ARCHIVE_WHISPER_MODEL", DEFAULT_WHISPER_MODEL),
         "diarization_model": NEMOTRON_MODEL if "nemotron" in track_diarizers.values() else pyannote_pipeline,
         "speaker_embedding_model": pyannote_pipeline,
         "diarization_status": "enabled" if transcriber.diarization_enabled else "explicitly_disabled",
