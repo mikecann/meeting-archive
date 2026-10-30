@@ -12,7 +12,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:  # CI installs no model libraries
+    np = None
 
 WORKER_ROOT = Path(__file__).resolve().parents[1] / "worker"
 sys.path.insert(0, str(WORKER_ROOT))
@@ -56,7 +59,7 @@ def with_nemotron(transcriber, nemotron):
 
     @contextlib.contextmanager
     def samples(path):
-        yield np.zeros(10 * RATE, dtype="<i2")
+        yield [0] * (10 * RATE)
 
     transcriber._decoded_samples = samples
     return transcriber
@@ -132,6 +135,7 @@ class NemotronTurnTests(unittest.TestCase):
             self.assertEqual(models, {MODEL_ID})
 
 
+@unittest.skipIf(np is None, "numpy is only installed on Bruce")
 class SpeakerCentroidTests(unittest.TestCase):
     def test_each_speaker_averages_only_windows_where_they_talk_alone(self) -> None:
         samples = np.zeros(30 * RATE, dtype="<i2")
