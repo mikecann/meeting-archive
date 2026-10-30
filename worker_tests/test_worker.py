@@ -865,8 +865,31 @@ class ProcessingTests(unittest.TestCase):
             turns = transcriber.transcribe(Path("unused.m4a"), "microphone")
 
         self.assertEqual(calls["init"]["cpu_threads"], 2)
-        self.assertEqual(calls["transcribe"], {"vad_filter": True, "word_timestamps": False})
+        self.assertEqual(calls["transcribe"], {"vad_filter": True, "word_timestamps": False, "language": "en"})
         self.assertEqual(turns[0]["text"], "hello")
+
+    def test_whisper_defaults_to_large_v3_turbo_in_english(self) -> None:
+        calls = {}
+
+        class WhisperModel:
+            def __init__(self, model, **kwargs):
+                calls["model"] = model
+            def transcribe(self, _path, **kwargs):
+                calls["transcribe"] = kwargs
+                return [], None
+
+        module = SimpleNamespace(WhisperModel=WhisperModel)
+        allow = {"MEETING_ARCHIVE_ALLOW_TRANSCRIPTION_WITHOUT_DIARIZATION": "1"}
+        with patch.dict(sys.modules, {"faster_whisper": module}), patch.dict(os.environ, allow, clear=True):
+            WhisperPyannoteTranscriber().transcribe(Path("unused.m4a"), "incoming")
+        self.assertEqual(calls["model"], "large-v3-turbo")
+        self.assertEqual(calls["transcribe"]["language"], "en")
+
+        auto = {**allow, "MEETING_ARCHIVE_WHISPER_LANGUAGE": "auto", "MEETING_ARCHIVE_WHISPER_MODEL": "small.en"}
+        with patch.dict(sys.modules, {"faster_whisper": module}), patch.dict(os.environ, auto, clear=True):
+            WhisperPyannoteTranscriber().transcribe(Path("unused.m4a"), "incoming")
+        self.assertEqual(calls["model"], "small.en")
+        self.assertNotIn("language", calls["transcribe"])
 
     def test_media_validator_probes_and_fully_decodes_each_declared_stream(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
