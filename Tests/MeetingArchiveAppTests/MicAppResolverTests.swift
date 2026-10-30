@@ -148,7 +148,8 @@ final class MicAppResolverTests: XCTestCase {
     func testDefaultIgnoresMikesToolsDictationAIVoiceAppsAndRecorders() {
         let ignored = MicAppResolver.defaultIgnoredBundleIDs
         for bundleID in [
-            "com.mikerosoft.meeting-archive", "com.mikerosoft.voice-type", "com.mikerosoft.record-it",
+            "com.mikerosoft.meeting-archive", "com.mikerosoft.voice-type", "com.mikerosoft.voice-type-native",
+            "com.mikerosoft.record-it",
             "com.mikerosoft.record-meeting", "com.mikerosoft.telemprompit", "com.mikerosoft.tandem",
             "com.mikerosoft.video-hq",
             "com.apple.CoreSpeech", "com.apple.assistantd", "com.apple.Siri", "com.apple.inputmethod.ironwood",
