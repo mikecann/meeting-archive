@@ -1,7 +1,8 @@
-"""Lazy optional faster-whisper and pyannote adapter for Bruce."""
+"""Lazy optional faster-whisper, Nemotron and pyannote adapter for Bruce."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -28,6 +29,11 @@ PLAYBACK_RECEIPT_PATH = "playback/meeting-playback.json"
 PLAYBACK_RECIPE_VERSION = 2
 RESERVED_GENERATED_NAMESPACES = frozenset({"playback", "transcripts"})
 DIARIZATION_SAMPLE_RATE = 16000
+PYANNOTE_PIPELINE = "pyannote/speaker-diarization-community-1"
+NEMOTRON_MODEL = "nvidia/Nemotron-3-Diarization"
+#: Nemotron 3 tracks at most this many speakers. A track that fills every slot
+#: probably had more people, so pyannote, which has no cap, diarizes it instead.
+NEMOTRON_MAX_SPEAKERS = 8
 
 
 def _timeout(name: str, default: float) -> float:
@@ -92,16 +98,23 @@ class WhisperPyannoteTranscriber:
         self.diarizer_device = "cpu"
         self.diarization_enabled = bool(token)
         self.embeddings: dict[str, list[float]] = {}
+        self.nemotron: NemotronDiarizer | None = None
+        #: Which diarizer labelled each multi-speaker track, for the receipt.
+        self.track_diarizers: dict[str, str] = {}
         if token:
             try:
                 from pyannote.audio import Pipeline
             except ImportError as error:
                 raise RuntimeError("pyannote.audio is not installed in the worker environment.") from error
+            # pyannote stays loaded even when Nemotron does the labelling: its
+            # embedding model makes the voice samples the profiles are matched
+            # on, and it diarizes any track Nemotron can't.
             self.diarizer = Pipeline.from_pretrained(
-                os.environ.get("MEETING_ARCHIVE_DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1"),
+                os.environ.get("MEETING_ARCHIVE_DIARIZATION_MODEL", PYANNOTE_PIPELINE),
                 token=token,
             )
             self._move_diarizer(diarization_device(os.environ.get("MEETING_ARCHIVE_DIARIZATION_DEVICE"), _mps_available()))
+            self.nemotron = NemotronDiarizer.from_environment()
 
     def transcribe(
         self,
@@ -125,6 +138,48 @@ class WhisperPyannoteTranscriber:
             return turns
         if single_speaker:
             return self._label_one_speaker(path, channel_origin, turns)
+        speaker_turns = self._nemotron_turns(path, channel_origin)
+        if speaker_turns is None:
+            speaker_turns = self._pyannote_turns(path, channel_origin)
+        turns = [turn for item in segments for turn in segment_turns(item, speaker_turns)]
+        for turn in turns:
+            if "speaker" in turn:
+                turn["speaker"] = f"{channel_origin}:{turn['speaker']}"
+        return turns
+
+    def _nemotron_turns(self, path: Path, channel_origin: str) -> list[tuple[float, float, str]] | None:
+        """Nemotron's speaker turns and voice samples, or None to use pyannote.
+
+        Nemotron splits one person into two far less often than pyannote did
+        (the 30 Oct bake-off in the README), but gives no voice embeddings, so
+        each speaker's sample comes from pyannote's own embedding model over
+        that speaker's turns. That keeps the samples comparable with every
+        voice profile enrolled before the switch.
+        """
+        nemotron = getattr(self, "nemotron", None)
+        if nemotron is None:
+            return None
+        try:
+            speaker_turns = nemotron.speaker_turns(path)
+        except Exception as error:
+            print(f"Nemotron diarization failed ({error}); pyannote labels the {channel_origin} track.", file=sys.stderr)
+            return None
+        if len({speaker for _start, _end, speaker in speaker_turns}) >= NEMOTRON_MAX_SPEAKERS:
+            print(
+                f"Nemotron used all {NEMOTRON_MAX_SPEAKERS} speaker slots on the {channel_origin} track; "
+                "pyannote labels it instead.",
+                file=sys.stderr,
+            )
+            return None
+        with self._decoded_samples(path) as samples:
+            centroids = self._run_on_device(
+                lambda: speaker_centroids(self._embed_window, samples, DIARIZATION_SAMPLE_RATE, speaker_turns),
+            )
+        self.embeddings.update({f"{channel_origin}:{speaker}": vector for speaker, vector in centroids.items()})
+        self.track_diarizers[channel_origin] = "nemotron"
+        return speaker_turns
+
+    def _pyannote_turns(self, path: Path, channel_origin: str) -> list[tuple[float, float, str]]:
         output = self._diarize_without_torchcodec(path)
         annotation = getattr(output, "exclusive_speaker_diarization", None) or getattr(
             output, "speaker_diarization", output,
@@ -145,11 +200,17 @@ class WhisperPyannoteTranscriber:
         self.embeddings.update(
             extract_speaker_embeddings(raw_embeddings, embedding_annotation, channel_origin),
         )
-        turns = [turn for item in segments for turn in segment_turns(item, speaker_turns)]
-        for turn in turns:
-            if "speaker" in turn:
-                turn["speaker"] = f"{channel_origin}:{turn['speaker']}"
-        return turns
+        if hasattr(self, "track_diarizers"):
+            self.track_diarizers[channel_origin] = "pyannote"
+        return speaker_turns
+
+    def _embed_window(self, chunk, mask):
+        """pyannote's speaker embedding for one window, counting only the masked frames."""
+        import torch
+
+        waveform = torch.from_numpy(chunk)[None, None]
+        weights = torch.from_numpy(mask.astype("float32"))[None]
+        return self.diarizer._embedding(waveform, masks=weights)[0]
 
     def _label_one_speaker(
         self,
@@ -176,6 +237,15 @@ class WhisperPyannoteTranscriber:
 
     def _diarize_without_torchcodec(self, path: Path, **options):
         """Decode with ffmpeg 8, then pass a waveform so pyannote skips torchcodec."""
+        with self._decoded_samples(path) as samples:
+            import torch
+
+            waveform = torch.from_numpy(samples).to(torch.float32).div_(32768.0).unsqueeze(0)
+            return self._run_diarizer(waveform, **options)
+
+    @contextlib.contextmanager
+    def _decoded_samples(self, path: Path):
+        """The track as 16 kHz mono int16 samples, memory-mapped from scratch."""
         ffmpeg = find_executable("ffmpeg")
         if ffmpeg is None:
             raise RuntimeError("ffmpeg is required for speaker diarization.")
@@ -196,16 +266,17 @@ class WhisperPyannoteTranscriber:
             import torch
 
             torch.set_num_threads(max(1, min(4, int(os.environ.get("MEETING_ARCHIVE_TORCH_THREADS", "2")))))
-            samples = np.memmap(raw_path, mode="c", dtype="<i2")
-            waveform = torch.from_numpy(samples).to(torch.float32).div_(32768.0).unsqueeze(0)
-            return self._run_diarizer(waveform, **options)
+            yield np.memmap(raw_path, mode="c", dtype="<i2")
         finally:
             raw_path.unlink(missing_ok=True)
 
     def _run_diarizer(self, waveform, **options):
-        """Diarize on the chosen device, falling back to the CPU once if the GPU fails."""
+        return self._run_on_device(lambda: diarize_waveform(self.diarizer, waveform, 16000, **options))
+
+    def _run_on_device(self, work):
+        """Run pyannote work on the chosen device, falling back to the CPU once if the GPU fails."""
         try:
-            return diarize_waveform(self.diarizer, waveform, 16000, **options)
+            return work()
         except Exception as error:
             if self.diarizer_device == "cpu":
                 raise
@@ -215,7 +286,7 @@ class WhisperPyannoteTranscriber:
                 # Still on the device that just failed, so don't run it there
                 # again. The job retries with backoff in a fresh process.
                 raise
-            return diarize_waveform(self.diarizer, waveform, 16000, **options)
+            return work()
 
     def _move_diarizer(self, device: str) -> None:
         if device == self.diarizer_device:
@@ -345,6 +416,117 @@ def diarize_waveform(pipeline, waveform, sample_rate: int, **options):
     return pipeline({"waveform": waveform, "sample_rate": sample_rate}, **options)
 
 
+class NemotronDiarizer:
+    """Nemotron 3 Diarization on Apple Silicon, through FluidAudio's CLI.
+
+    install-bruce.sh builds the CLI at a pinned FluidAudio commit. Its CoreML
+    port matched NVIDIA's own model on the GPU for 99-100% of speech on the
+    archived calls, and labels a 30 minute track in seconds on Bruce.
+    """
+
+    def __init__(self, executable: str, variant: str = "offline") -> None:
+        self.executable = executable
+        # "offline" is FluidAudio's most accurate preset for recorded audio.
+        self.variant = variant
+
+    @classmethod
+    def from_environment(cls) -> NemotronDiarizer | None:
+        if os.environ.get("MEETING_ARCHIVE_DIARIZER", "nemotron").strip().lower() != "nemotron":
+            return None
+        executable = os.environ.get("MEETING_ARCHIVE_NEMOTRON_CLI", "").strip()
+        if not executable or not os.access(executable, os.X_OK):
+            print("Nemotron's FluidAudio CLI is not installed; pyannote labels speakers.", file=sys.stderr)
+            return None
+        return cls(executable, os.environ.get("MEETING_ARCHIVE_NEMOTRON_VARIANT", "offline").strip() or "offline")
+
+    def speaker_turns(self, path: Path) -> list[tuple[float, float, str]]:
+        scratch = Path(os.environ.get("MEETING_ARCHIVE_SCRATCH", tempfile.gettempdir()))
+        scratch.mkdir(parents=True, exist_ok=True)
+        descriptor, rttm_name = tempfile.mkstemp(prefix="nemotron-", suffix=".rttm", dir=scratch)
+        os.close(descriptor)
+        rttm = Path(rttm_name)
+        try:
+            completed = subprocess.run(
+                [self.executable, "nemotron3-diarize", str(path), "--variant", self.variant, "--output", str(rttm)],
+                capture_output=True,
+                text=True,
+                timeout=_timeout("MEETING_ARCHIVE_NEMOTRON_TIMEOUT_SECONDS", 1800),
+            )
+            if completed.returncode != 0:
+                detail = (completed.stderr or completed.stdout or "").strip()[-300:]
+                raise RuntimeError(f"exit {completed.returncode}: {detail or 'no output'}")
+            return read_rttm(rttm.read_text(encoding="utf-8"))
+        finally:
+            rttm.unlink(missing_ok=True)
+
+
+def read_rttm(text: str) -> list[tuple[float, float, str]]:
+    """Turns from RTTM, with FluidAudio's speaker_N renamed SPEAKER_0N like pyannote's."""
+    turns = []
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 8 or fields[0] != "SPEAKER":
+            continue
+        start, duration, label = float(fields[3]), float(fields[4]), fields[7]
+        if label.startswith("speaker_") and label[8:].isdigit():
+            label = f"SPEAKER_{int(label[8:]):02d}"
+        # RTTM times are in milliseconds; rounding keeps the sum from drifting.
+        turns.append((start, round(start + duration, 3), label))
+    return sorted(turns)
+
+
+def speaker_centroids(
+    embed,
+    samples,
+    sample_rate: int,
+    speaker_turns: list[tuple[float, float, str]],
+    *,
+    window: float = 10.0,
+    step: float = 5.0,
+    min_speech: float = 2.0,
+) -> dict[str, list[float]]:
+    """Each speaker's voice sample: the mean embedding over windows of their speech.
+
+    community-1 reports a speaker's embedding as the mean of its chunk
+    embeddings, so this lands in the same space. A window counts a speaker
+    only where nobody else is talking, and only with `min_speech` seconds of
+    it, so crosstalk and a stray "yeah" don't blur the voice.
+    """
+    import numpy as np
+
+    frames_per_second = 100
+    total_frames = math.ceil(len(samples) / sample_rate * frames_per_second)
+    speakers = sorted({speaker for _start, _end, speaker in speaker_turns})
+    if not speakers or total_frames == 0:
+        return {}
+    activity = np.zeros((len(speakers), total_frames), dtype=bool)
+    for start, end, speaker in speaker_turns:
+        activity[speakers.index(speaker), int(start * frames_per_second):int(end * frames_per_second)] = True
+    alone = activity & (activity.sum(axis=0) == 1)
+    vectors: dict[str, list] = {speaker: [] for speaker in speakers}
+    window_frames, step_frames = int(window * frames_per_second), int(step * frames_per_second)
+    for first in range(0, total_frames, step_frames):
+        last = min(total_frames, first + window_frames)
+        chunk = None
+        for index, speaker in enumerate(speakers):
+            mask = alone[index, first:last]
+            if mask.sum() < min_speech * frames_per_second:
+                continue
+            if chunk is None:
+                begin, end = first * sample_rate // frames_per_second, last * sample_rate // frames_per_second
+                chunk = np.asarray(samples[begin:end], dtype=np.float32) / 32768.0
+            vector = np.asarray(embed(chunk, mask), dtype=np.float64).reshape(-1)
+            if vector.size and np.all(np.isfinite(vector)):
+                vectors[speaker].append(vector)
+    result = {}
+    for speaker, found in vectors.items():
+        if found:
+            embedding = [float(value) for value in np.mean(found, axis=0)]
+            if usable_embedding(embedding):
+                result[speaker] = embedding
+    return result
+
+
 def process(archive_directory: Path, job: Job) -> None:
     """CLI processor callable. Outputs are versioned and source files stay untouched."""
     manifest = verify_incoming(archive_directory)
@@ -398,23 +580,24 @@ def process(archive_directory: Path, job: Job) -> None:
     result = processor.process(archive_directory, manifest)
     if processor.echo_turns_removed:
         print(f"Removed {processor.echo_turns_removed} microphone lines that echoed the call audio.", file=sys.stderr)
+    pyannote_pipeline = os.environ.get("MEETING_ARCHIVE_DIARIZATION_MODEL", PYANNOTE_PIPELINE)
+    track_diarizers = getattr(transcriber, "track_diarizers", {})
     result["processing"] = {
         "manifest_sha256": manifest.manifest_sha256,
         "whisper_model": os.environ.get("MEETING_ARCHIVE_WHISPER_MODEL", "small.en"),
-        "diarization_model": os.environ.get(
-            "MEETING_ARCHIVE_DIARIZATION_MODEL",
-            "pyannote/speaker-diarization-community-1",
-        ),
+        "diarization_model": NEMOTRON_MODEL if "nemotron" in track_diarizers.values() else pyannote_pipeline,
+        "speaker_embedding_model": pyannote_pipeline,
         "diarization_status": "enabled" if transcriber.diarization_enabled else "explicitly_disabled",
     }
+    if track_diarizers:
+        result["processing"]["track_diarizers"] = dict(sorted(track_diarizers.items()))
     try:
         result["processing"]["pyannote_audio_version"] = version("pyannote.audio")
     except PackageNotFoundError:
         result["processing"]["pyannote_audio_version"] = "unavailable"
-    embedding_model_id = (
-        f"{result['processing']['diarization_model']}@"
-        f"{result['processing']['pyannote_audio_version']}"
-    )
+    # Voice samples always come from pyannote's embedding model, whichever
+    # diarizer drew the turns, so profiles enrolled before Nemotron still match.
+    embedding_model_id = f"{pyannote_pipeline}@{result['processing']['pyannote_audio_version']}"
     worker_db = os.environ.get("MEETING_ARCHIVE_WORKER_DB")
     if worker_db:
         registry = SpeakerRegistry(worker_db)
