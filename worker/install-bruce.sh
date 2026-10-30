@@ -20,4 +20,28 @@ export TMPDIR="$ROOT/runtime/tmp"
 "$ROOT/runtime/venv/bin/python3" -m pip install -r "$ROOT/runtime/worker/requirements.txt"
 "$ROOT/runtime/venv/bin/python3" -m pip check
 "$ROOT/runtime/venv/bin/python3" -c 'import faster_whisper, pyannote.audio; print("Worker libraries import successfully")'
+
+# Nemotron 3 Diarization runs through FluidAudio's CLI, built here at a pinned
+# commit (v0.18.0; its tag is annotated, so pin the commit itself).
+FLUIDAUDIO_COMMIT="e15287985625dbf544a343df679436789ffb03fb"
+FLUIDAUDIO="$ROOT/runtime/fluidaudio"
+mkdir -p "$ROOT/runtime/bin"
+if [[ ! -d "$FLUIDAUDIO/.git" ]]; then
+  git clone --quiet https://github.com/FluidInference/FluidAudio.git "$FLUIDAUDIO"
+fi
+if [[ "$(git -C "$FLUIDAUDIO" rev-parse HEAD)" != "$FLUIDAUDIO_COMMIT" ]]; then
+  git -C "$FLUIDAUDIO" fetch --quiet origin "$FLUIDAUDIO_COMMIT"
+  git -C "$FLUIDAUDIO" checkout --quiet --detach "$FLUIDAUDIO_COMMIT"
+fi
+# Two jobs keep the build inside Bruce's 8 GB alongside everything else.
+(cd "$FLUIDAUDIO" && /usr/bin/nice -n 10 swift build -c release --product fluidaudiocli -j 2)
+install -m 755 "$FLUIDAUDIO/.build/release/fluidaudiocli" "$ROOT/runtime/bin/fluidaudiocli"
+# Diarize a second of silence so the model downloads and compiles now, not
+# during the first meeting. It caches under ~/Library/Application Support/FluidAudio.
+WARMUP="$ROOT/runtime/tmp/nemotron-warmup"
+mkdir -p "$WARMUP"
+"$PYTHON" -c 'import sys, wave; w = wave.open(sys.argv[1], "wb"); w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(bytes(32000)); w.close()' "$WARMUP/silence.wav"
+"$ROOT/runtime/bin/fluidaudiocli" nemotron3-diarize "$WARMUP/silence.wav" --variant offline --output "$WARMUP/silence.rttm" >/dev/null
+rm -rf "$WARMUP"
+echo "Nemotron 3 Diarization is ready"
 echo "Installed worker at $ROOT. No background service has been enabled yet."

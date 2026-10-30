@@ -96,10 +96,32 @@ logged and falls back to the default. While jobs are held, `status` sets
 `quiet_hours_until` to the Unix time they can start, otherwise `null`, and the
 app shows a queued meeting as waiting for quiet hours to end.
 
+A track with more than one speaker is labelled by NVIDIA's Nemotron 3
+Diarization, through FluidAudio's CoreML port. `install-bruce.sh` builds
+FluidAudio's `fluidaudiocli` at a pinned commit into `runtime/bin`, and
+downloads the model by labelling a second of silence. In a 30 Oct 2026
+comparison on eight archived calls, pyannote split one person into two
+speakers in three of them and Nemotron in none, and on Bruce it labels a
+30 minute track in about seven seconds. Its port matched NVIDIA's own model
+on a GPU for 99-100% of speech.
+
+Nemotron gives turns but no voice embeddings, so each speaker's voice sample
+is the mean of pyannote's own embedding model over 10 second windows where
+that speaker talks alone. That is how community-1 builds its speaker
+embeddings, so samples keep pyannote's model id and match every profile
+enrolled before the switch. On the archived calls each person's new sample
+was 0.96-1.00 cosine to their old one, and the same names ranked first.
+
+pyannote labels the track instead when Nemotron fails, when the CLI isn't
+installed, when `MEETING_ARCHIVE_DIARIZER=pyannote`, or when Nemotron fills
+all 8 of its speaker slots, since a call that big probably had more people.
+`transcript.json` records which one labelled each track under
+`processing.track_diarizers`.
+
 Whisper defaults to two CPU threads and enables its voice-activity filter to
 avoid inventing text across long silent spans. On a track that is diarized it
 also asks for word timestamps, which slow Whisper down, and gives each word to
-the pyannote speaker active at the word's midpoint (the nearest speaker turn if
+the speaker active at the word's midpoint (the nearest speaker turn if
 none is). A Whisper line is split into separate turns where the speaker
 changes, so someone cutting in mid-sentence no longer has their words labelled
 as the previous speaker's. A run of one or two words spanning under 0.3 seconds

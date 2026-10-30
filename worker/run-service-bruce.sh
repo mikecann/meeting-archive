@@ -84,6 +84,9 @@ export PYTHONUNBUFFERED=1
 # Sammy Cam has Bruce's memory from 22:00 to 06:00, so no heavy job starts
 # then. A job already running finishes. Local time; "off" turns it off.
 export MEETING_ARCHIVE_QUIET_HOURS="22:00-06:00"
+# Nemotron 3 Diarization labels the call audio; install-bruce.sh builds this
+# CLI. Without it, or with MEETING_ARCHIVE_DIARIZER=pyannote, pyannote does.
+export MEETING_ARCHIVE_NEMOTRON_CLI="${RUNTIME_ROOT}/bin/fluidaudiocli"
 unset MEETING_ARCHIVE_ALLOW_TRANSCRIPTION_WITHOUT_DIARIZATION || true
 
 cd "${WORKER_ROOT}"

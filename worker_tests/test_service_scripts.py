@@ -42,6 +42,7 @@ class ServiceScriptContractTests(unittest.TestCase):
         self.assertIn("export MEETING_ARCHIVE_TORCH_THREADS=2", wrapper)
         self.assertIn("export MEETING_ARCHIVE_WHISPER_CPU_THREADS=2", wrapper)
         self.assertIn('export MEETING_ARCHIVE_QUIET_HOURS="22:00-06:00"', wrapper)
+        self.assertIn('export MEETING_ARCHIVE_NEMOTRON_CLI="${RUNTIME_ROOT}/bin/fluidaudiocli"', wrapper)
 
     def test_worker_installer_stages_private_bounded_stderr_diagnostics(self) -> None:
         installer = (WORKER_ROOT / "install-service-bruce.sh").read_text(
@@ -64,6 +65,12 @@ class ServiceScriptContractTests(unittest.TestCase):
         self.assertIn('<string>${STDERR_LOG}</string>', installer)
         self.assertIn("<key>StandardOutPath</key>", installer)
         self.assertIn("<string>/dev/null</string>", installer)
+
+    def test_installer_builds_the_nemotron_cli_at_a_pinned_commit(self) -> None:
+        installer = (WORKER_ROOT / "install-bruce.sh").read_text(encoding="utf-8")
+
+        self.assertRegex(installer, r'FLUIDAUDIO_COMMIT="[0-9a-f]{40}"')
+        self.assertIn('install -m 755 "$FLUIDAUDIO/.build/release/fluidaudiocli" "$ROOT/runtime/bin/fluidaudiocli"', installer)
 
     def test_installer_does_not_build_the_removed_ocr_helper(self) -> None:
         installer = (WORKER_ROOT / "install-bruce.sh").read_text(encoding="utf-8")
