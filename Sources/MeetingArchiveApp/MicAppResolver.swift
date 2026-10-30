@@ -13,6 +13,7 @@ struct MicAppResolver {
         // Mike's own tools
         meetingArchiveBundleID,
         "com.mikerosoft.voice-type",
+        "com.mikerosoft.voice-type-native",
         "com.mikerosoft.record-it",
         "com.mikerosoft.record-meeting",
         "com.mikerosoft.telemprompit",
