@@ -1050,6 +1050,7 @@ final class ArchiveController: ObservableObject {
     /// Quit goes through the app delegate, so logout and shutdown save the
     /// current part the same way.
     func quit() {
+        Log.controller.notice("Quit chosen from the menu")
         NSApp.terminate(nil)
     }
 

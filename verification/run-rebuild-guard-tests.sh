@@ -64,7 +64,8 @@ fail() {
 
 expect_refused() {
   [[ "$status" -eq 1 ]] || fail "$1: expected a refusal, got exit $status"
-  grep -q "Quit Meeting Archive from its menu" "$ROOT/output" || fail "$1: no quit message"
+  grep -q "Stop Meeting Archive before rebuilding" "$ROOT/output" || fail "$1: no stop message"
+  grep -q "uninstall-startup.sh" "$ROOT/output" || fail "$1: no way to stop the login item"
   [[ ! -s "$ROOT/calls" ]] || fail "$1: ran $(tr '\n' ' ' <"$ROOT/calls")after refusing"
 }
 
@@ -96,7 +97,7 @@ expect_refused "app opened from Finder"
 run build-app.sh "" "" yes
 [[ "$status" -eq 1 && "$(cat "$ROOT/calls")" == "swift" ]] \
   || fail "app opened during the build: expected a refusal right after building, got exit $status after $(tr '\n' ' ' <"$ROOT/calls")"
-grep -q "Quit Meeting Archive from its menu" "$ROOT/output" || fail "app opened during the build: no quit message"
+grep -q "Stop Meeting Archive before rebuilding" "$ROOT/output" || fail "app opened during the build: no stop message"
 [[ ! -e "$ROOT/Meeting Archive.app.staging" ]] || fail "app opened during the build: left a staging bundle"
 # If the processes can't be listed, the app might be running, so don't build.
 PS_FAILS=yes
@@ -109,16 +110,14 @@ expect_refused "restart.sh"
 run setup_mac.sh "$login_item" "running"
 expect_refused "setup_mac.sh"
 
-# restart.sh opens the app once a build succeeds. A copy runs against a
-# stand-in build-app.sh, since the real build always stops at the swift stub.
+# restart.sh hands over to setup_mac.sh, which builds and starts the login
+# item. A copy runs against a stand-in setup_mac.sh.
 mkdir -p "$ROOT/restart"
 cp "$TOOL_DIR/restart.sh" "$ROOT/restart/restart.sh"
-printf '#!/bin/sh\necho build >>"$CALLS"\n' >"$ROOT/restart/build-app.sh"
-chmod +x "$ROOT/restart/build-app.sh"
+printf '#!/bin/sh\necho "setup $*" >>"$CALLS"\n' >"$ROOT/restart/setup_mac.sh"
 : >"$ROOT/calls"
-PATH="$ROOT/bin:$PATH" CALLS="$ROOT/calls" MEETING_ARCHIVE_APP_DIR="$ROOT/Meeting Archive.app" \
-  bash "$ROOT/restart/restart.sh" >"$ROOT/output" 2>&1 || fail "restart.sh: failed after a successful build"
-[[ "$(cat "$ROOT/calls")" == "build"$'\n'"open $ROOT/Meeting Archive.app" ]] \
-  || fail "restart.sh: expected a build, then the app to open"
+PATH="$ROOT/bin:$PATH" CALLS="$ROOT/calls" \
+  bash "$ROOT/restart/restart.sh" --with-launcher >"$ROOT/output" 2>&1 || fail "restart.sh: failed after a successful setup"
+[[ "$(cat "$ROOT/calls")" == "setup --with-launcher" ]] || fail "restart.sh: expected setup_mac.sh to run with its arguments"
 
 echo "Rebuild guard tests passed"

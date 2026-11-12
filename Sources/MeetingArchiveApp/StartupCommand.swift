@@ -12,7 +12,7 @@ enum MeetingArchiveEntry {
         do {
             if CommandLine.arguments.contains("--disable-startup") {
                 try await service.unregister()
-                print("Meeting Archive login item disabled. Recordings and archive data were retained.")
+                print("Meeting Archive login item disabled. If it was running, it saved any recording and quit. Recordings and archive data were retained.")
                 return
             }
             if CommandLine.arguments.contains("--enable-startup") {
@@ -23,6 +23,12 @@ enum MeetingArchiveEntry {
         } catch {
             FileHandle.standardError.write(Data("Could not change startup registration: \(error.localizedDescription)\n".utf8))
             exit(1)
+        }
+        // launchd relaunches the login item however it exits. If a copy opened
+        // by hand is already recording, wait for it to quit rather than exit
+        // and be relaunched every ten seconds.
+        if CommandLine.arguments.contains("--background"), InstanceLock.isHeld() {
+            await Task.detached { InstanceLock.waitUntilFree() }.value
         }
         MeetingArchiveApplication.main()
     }
