@@ -15,7 +15,11 @@ refuse_while_running() {
   fi
   if printf '%s\n' "$executables" | awk -F/ '$NF == "meeting-archive-app" { found = 1 } END { exit !found }' \
     || [[ "$login_item" == *"state = running"* ]]; then
-    echo "Quit Meeting Archive from its menu before rebuilding, so any live writer can finish." >&2
+    # The login item comes straight back after a quit, so it's stopped by
+    # disabling it; setup_mac.sh turns it back on.
+    echo "Stop Meeting Archive before rebuilding, so any live writer can finish:" >&2
+    echo "bash uninstall-startup.sh stops the login item (Quit only restarts it), or Quit from its menu if you opened it yourself." >&2
+    echo "setup_mac.sh turns the login item back on." >&2
     exit 1
   fi
 }

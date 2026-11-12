@@ -25,10 +25,16 @@ archive worker. All source paths and commands below are relative to this clone.
   Full Xcode is required for XCTest; select it with `xcode-select` or
   `DEVELOPER_DIR` when the command line tools alone lack XCTest.
 - `install.sh` creates the command symlink. `setup_mac.sh` builds and signs
-  `~/Applications/Meeting Archive.app`, and `restart.sh` rebuilds and opens it.
-  Both refuse while the app is running, however it was started; the login item
-  runs as plain `meeting-archive-app --background`, so a path match misses it.
-  Finish recording and quit from the menu before rebuilding.
+  `~/Applications/Meeting Archive.app` and registers the login item, and
+  `restart.sh` runs it. Both refuse while the app is running, however it was
+  started; the login item runs as plain `meeting-archive-app --background`, so
+  a path match misses it.
+- The login item has `KeepAlive` true, so launchd restarts it after any exit,
+  including Quit from its menu (labelled Restart). Don't go back to restarting
+  only on failure: a clean quit once left nothing recording for 33 hours. To
+  stop it, run `bash uninstall-startup.sh` (SIGTERM, which the app turns into
+  a normal quit that saves the recording, within `ExitTimeOut`). Finish
+  recording first, and never stop it during a call.
 - Verify capture through the signed app bundle, not the SwiftPM executable.
   macOS permissions depend on app identity, and the system audio tap only
   prompts for a signed app. Preserve the existing bundle, LaunchAgent and log

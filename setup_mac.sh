@@ -7,17 +7,20 @@ LAUNCHER_DIR="${MEETING_ARCHIVE_LAUNCHER_DIR:-$HOME/.local/bin}"
 
 usage() {
   cat <<'EOF'
-Usage: bash setup_mac.sh [--with-launcher]
+Usage: bash setup_mac.sh [--with-launcher] [--no-login-item]
 
-Build and install the signed Meeting Archive.app bundle. The optional launcher
-is a symlink in ~/.local/bin (or MEETING_ARCHIVE_LAUNCHER_DIR).
+Build and install the signed Meeting Archive.app bundle, then start it as a
+login item that launchd keeps running. --no-login-item leaves that off. The
+optional launcher is a symlink in ~/.local/bin (or MEETING_ARCHIVE_LAUNCHER_DIR).
 EOF
 }
 
 WITH_LAUNCHER=0
+LOGIN_ITEM=1
 for arg in "$@"; do
   case "$arg" in
     --with-launcher) WITH_LAUNCHER=1 ;;
+    --no-login-item) LOGIN_ITEM=0 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "meeting-archive setup: unknown option: $arg" >&2; usage >&2; exit 1 ;;
   esac
@@ -32,14 +35,16 @@ if [[ "$WITH_LAUNCHER" -eq 1 ]]; then
   echo "Launcher: $LAUNCHER_DIR/meeting-archive"
 fi
 
-echo "Installed: $HOME/Applications/Meeting Archive.app"
+APP="${MEETING_ARCHIVE_APP_DIR:-$HOME/Applications/Meeting Archive.app}"
+echo "Installed: $APP"
 
 # A replaced bundle is refused by launchd (EX_CONFIG) until its login item is
 # registered again from the app itself; registering from a shell is not enough.
-# Going through LaunchServices with `open` makes the app the registrant.
+# Going through LaunchServices with `open` makes the app the registrant. It's
+# registered every time, not only when it already was: stopping the app for a
+# rebuild means disabling the login item, since launchd restarts it after a quit.
 AGENT="gui/$(id -u)/com.mikerosoft.meeting-archive"
-if launchctl print "$AGENT" >/dev/null 2>&1; then
-  APP="$HOME/Applications/Meeting Archive.app"
+if [[ "$LOGIN_ITEM" -eq 1 ]]; then
   open -W -n "$APP" --args --disable-startup 2>/dev/null || true
   open -W -n "$APP" --args --enable-startup 2>/dev/null || true
   sleep 2
@@ -51,5 +56,5 @@ if launchctl print "$AGENT" >/dev/null 2>&1; then
     echo "Login item needs attention: open Meeting Archive, then Settings > Disable at login, Enable at login." >&2
   fi
 else
-  echo "Open the app yourself after reviewing the permissions in the README."
+  echo "Login item left off. Open the app yourself after reviewing the permissions in the README."
 fi

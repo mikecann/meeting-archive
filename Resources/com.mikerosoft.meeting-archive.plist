@@ -5,7 +5,8 @@
 <key>BundleProgram</key><string>Contents/MacOS/meeting-archive-app</string>
 <key>ProgramArguments</key><array><string>meeting-archive-app</string><string>--background</string></array>
 <key>RunAtLoad</key><true/>
-<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+<key>KeepAlive</key><true/>
+<key>ExitTimeOut</key><integer>30</integer>
 <key>ThrottleInterval</key><integer>10</integer>
 <key>ProcessType</key><string>Interactive</string>
 <key>LimitLoadToSessionType</key><string>Aqua</string>

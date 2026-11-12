@@ -47,7 +47,8 @@ struct MeetingArchiveApplication: App {
             WindowButton()
             SettingsLink { Text("Settings…") }
             Divider()
-            Button("Quit Meeting Archive") { controller.quit() }.keyboardShortcut("q")
+            // The login item comes straight back after any quit, so say so.
+            Button(AppDelegate.isLoginItem ? "Restart Meeting Archive" : "Quit Meeting Archive") { controller.quit() }.keyboardShortcut("q")
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: controller.isRecording ? "record.circle.fill" : controller.failure != nil ? "exclamationmark.circle" : controller.isPaused ? "pause.circle" : "waveform.circle")
@@ -95,7 +96,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         }
     }
 
+    /// Started by the login item, which launchd brings back whenever it exits.
+    static let isLoginItem = CommandLine.arguments.contains("--background")
+    private var terminateSignal: DispatchSourceSignal?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // launchd stops the login item with SIGTERM, for instance when it's
+        // disabled. By default that kills the app on the spot and loses the
+        // end of a recording, so quit properly instead and save it first.
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            Log.controller.notice("SIGTERM received; saving and quitting")
+            // Not NSApp.terminate right here: this runs as a main-queue block,
+            // and terminate then waits in a nested run loop for shutDown's
+            // Task, which needs the main queue this block is holding. So it
+            // never saves or quits. A run loop timer fires outside the queue,
+            // and in the common modes it fires during a modal alert too.
+            NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0, inModes: [.common])
+        }
+        source.resume()
+        terminateSignal = source
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // It once quit without a trace, so say who asked. A quit Apple Event
+        // (osascript, logout, shutdown) carries the sender's process ID.
+        let asker = NSAppleEventManager.shared().currentAppleEvent?
+            .attributeDescriptor(forKeyword: keySenderPIDAttr)?.int32Value
+        Log.controller.notice("Quitting, asked by \(asker.map { "pid \($0)" } ?? "the app itself", privacy: .public)")
         guard let controller = ArchiveController.running else { return .terminateNow }
         Task { @MainActor in
             await controller.shutDown()

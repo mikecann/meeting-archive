@@ -44,19 +44,21 @@ git clone https://github.com/mikecann/meeting-archive.git
 cd meeting-archive
 bash install.sh
 bash setup_mac.sh
-open "$HOME/Applications/Meeting Archive.app"
 ```
 
 `install.sh` links the `meeting-archive` command into `~/.local/bin`. You can
 pass a different bin directory as its first argument. Add that directory to
 PATH if needed. Re-run it after moving the clone. `setup_mac.sh` builds and
-signs the app, and `--with-launcher` can also create the default launcher.
-Neither script downloads models or enables the Bruce worker.
+signs the app, then starts it as a login item, and `--with-launcher` can also
+create the default launcher. Pass `--no-login-item` if you'd rather open it
+yourself. Neither script downloads models or enables the Bruce worker.
 
-Quit Meeting Archive from its menu before updating or rebuilding it so an
-active recording can finish cleanly. `setup_mac.sh` and `restart.sh` won't
-replace it while it's still running. Use `bash restart.sh` to rebuild and open
-the staged app after a change.
+The login item is kept running: if it quits or crashes, launchd starts it
+again about ten seconds later, so a stray Quit can't leave you with a day of
+calls that weren't recorded. Its Quit item says Restart for that reason. To
+stop it for an update, run `bash uninstall-startup.sh`, which saves any
+recording first. `setup_mac.sh` and `restart.sh` won't replace the app while
+it's still running, and both turn the login item back on when they're done.
 
 The capture app needs no API keys. For local worker commands, copy
 `.env.example` to `.env`, fill in your Hugging Face token and optional Notion
@@ -74,8 +76,8 @@ The Hugging Face token needs access to the configured pyannote diarization
 model. The managed Bruce service loads a private credential file instead of
 `.env`; see [worker setup](worker/README.md#bruce-background-service).
 
-When a login item already exists, the setup script re-registers it through
-LaunchServices and restarts the background agent. A replaced bundle is otherwise
+The setup script registers the login item through LaunchServices every time
+and starts the background agent. A replaced bundle is otherwise
 refused by launchd (`EX_CONFIG`) until it is re-registered, and registering from
 a shell does not count. The build signs with your Apple Development identity
 when one is available, so the signature stays stable across rebuilds.
@@ -86,8 +88,7 @@ Open Settings from the menu bar, allow the microphone, call audio and
 notifications, and select the calendars you want to use. Allowing call audio
 records a second of nothing so macOS asks you there and then, rather than in
 the middle of your first call. Set the worker host and archive path to match
-your worker installation, and enable launch at login if you want it running
-after a restart.
+your worker installation.
 
 After that you shouldn't need to do anything. When a call starts you get a
 notification with Stop and Discard buttons, and the menu bar icon goes red.
@@ -98,9 +99,9 @@ can change that list in Settings.
 
 You can hide the menu bar icon under System Settings › Menu Bar and it carries
 on recording in the background, with the call notifications still showing.
-To get the icon back, switch it on again, then quit and reopen the app. With
-the icon hidden you can still quit it with
-`osascript -e 'quit app "Meeting Archive"'`, and it saves any recording first.
+To get the icon back, switch it on again, then restart the app with
+`osascript -e 'quit app "Meeting Archive"'`. It saves any recording first and
+the login item brings it straight back.
 
 If something goes wrong mid-call, like the mic stalling or AirPods switching
 mode, it rebuilds that source and carries on with a bit of silence over the
@@ -180,8 +181,9 @@ needs. macOS may require reopening the app after granting them:
 It doesn't need Screen Recording, Accessibility or camera access anymore.
 
 The app can register or unregister its login item from Settings. The standalone
-`uninstall-startup.sh` does the same startup-only unregister through Apple’s
-documented `SMAppService` API and does not delete recordings or archive data.
+`uninstall-startup.sh` does the same unregister through Apple’s documented
+`SMAppService` API. Either one stops the running login item too, after it saves
+any recording, and neither deletes recordings or archive data.
 
 ## Bruce archive and cleanup
 
