@@ -108,7 +108,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         source.setEventHandler {
             Log.controller.notice("SIGTERM received; saving and quitting")
-            NSApp.terminate(nil)
+            // Not NSApp.terminate right here: this runs as a main-queue block,
+            // and terminate then waits in a nested run loop for shutDown's
+            // Task, which needs the main queue this block is holding. So it
+            // never saves or quits. A run loop timer fires outside the queue.
+            NSApp.perform(#selector(NSApplication.terminate(_:)), with: nil, afterDelay: 0)
         }
         source.resume()
         terminateSignal = source

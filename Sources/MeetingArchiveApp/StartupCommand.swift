@@ -27,8 +27,12 @@ enum MeetingArchiveEntry {
         // launchd relaunches the login item however it exits. If a copy opened
         // by hand is already recording, wait for it to quit rather than exit
         // and be relaunched every ten seconds.
+        // Blocks the main thread on purpose, and must never become an await:
+        // after a real suspension the rest of main(), App.main() included,
+        // runs inside a main-queue job, so the main queue never drains and
+        // every Task { @MainActor } (saving on quit, too) hangs for good.
         if CommandLine.arguments.contains("--background") {
-            InstanceLock.taken = await Task.detached { InstanceLock.waitAndTake() }.value
+            InstanceLock.taken = InstanceLock.waitAndTake()
         }
         MeetingArchiveApplication.main()
     }
