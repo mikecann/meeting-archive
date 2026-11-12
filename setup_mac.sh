@@ -35,7 +35,8 @@ if [[ "$WITH_LAUNCHER" -eq 1 ]]; then
   echo "Launcher: $LAUNCHER_DIR/meeting-archive"
 fi
 
-echo "Installed: $HOME/Applications/Meeting Archive.app"
+APP="${MEETING_ARCHIVE_APP_DIR:-$HOME/Applications/Meeting Archive.app}"
+echo "Installed: $APP"
 
 # A replaced bundle is refused by launchd (EX_CONFIG) until its login item is
 # registered again from the app itself; registering from a shell is not enough.
@@ -44,7 +45,6 @@ echo "Installed: $HOME/Applications/Meeting Archive.app"
 # rebuild means disabling the login item, since launchd restarts it after a quit.
 AGENT="gui/$(id -u)/com.mikerosoft.meeting-archive"
 if [[ "$LOGIN_ITEM" -eq 1 ]]; then
-  APP="$HOME/Applications/Meeting Archive.app"
   open -W -n "$APP" --args --disable-startup 2>/dev/null || true
   open -W -n "$APP" --args --enable-startup 2>/dev/null || true
   sleep 2

@@ -28,31 +28,37 @@ final class StayRunningTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(timeout, 20)
     }
 
-    func testABackgroundCopyWaitsForTheOtherCopyToQuit() throws {
+    func testABackgroundCopyWaitsForTheOtherCopyToQuitThenHoldsTheLock() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
+        // First run: the data folder doesn't exist yet.
         let path = directory.appendingPathComponent("instance.lock").path
-
-        XCTAssertFalse(InstanceLock.isHeld(at: path))
+        let first = try XCTUnwrap(InstanceLock.waitAndTake(at: path, pollEvery: 0.05))
+        close(first)
 
         // Another copy holds the lock, the way ArchiveController does.
         let other = open(path, O_CREAT | O_RDWR, 0o600)
         XCTAssertEqual(flock(other, LOCK_EX | LOCK_NB), 0)
-        XCTAssertTrue(InstanceLock.isHeld(at: path))
 
-        let waited = expectation(description: "stops waiting once the other copy quits")
+        let waited = expectation(description: "takes the lock once the other copy quits")
         let start = Date()
+        nonisolated(unsafe) var taken: Int32?
         DispatchQueue.global().async {
-            InstanceLock.waitUntilFree(at: path, pollEvery: 0.05)
+            taken = InstanceLock.waitAndTake(at: path, pollEvery: 0.05)
             waited.fulfill()
         }
         Thread.sleep(forTimeInterval: 0.3)
         close(other)
         wait(for: [waited], timeout: 5)
         XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(start), 0.3)
-        // Checking must not leave the lock held, or the controller's own
-        // non-blocking attempt would fail and quit the app.
-        XCTAssertFalse(InstanceLock.isHeld(at: path))
+        let descriptor = try XCTUnwrap(taken)
+        defer { close(descriptor) }
+
+        // Still held, so a copy opened by hand now can't start recording too.
+        let late = open(path, O_CREAT | O_RDWR, 0o600)
+        defer { close(late) }
+        XCTAssertNotEqual(flock(late, LOCK_EX | LOCK_NB), 0)
+        // And ArchiveController's own attempt on the same descriptor succeeds.
+        XCTAssertEqual(flock(descriptor, LOCK_EX | LOCK_NB), 0)
     }
 }

@@ -27,8 +27,8 @@ enum MeetingArchiveEntry {
         // launchd relaunches the login item however it exits. If a copy opened
         // by hand is already recording, wait for it to quit rather than exit
         // and be relaunched every ten seconds.
-        if CommandLine.arguments.contains("--background"), InstanceLock.isHeld() {
-            await Task.detached { InstanceLock.waitUntilFree() }.value
+        if CommandLine.arguments.contains("--background") {
+            InstanceLock.taken = await Task.detached { InstanceLock.waitAndTake() }.value
         }
         MeetingArchiveApplication.main()
     }

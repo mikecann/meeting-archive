@@ -1,24 +1,28 @@
 import Foundation
 
-/// The instance lock ArchiveController takes so only one copy records.
+/// The instance lock that makes sure only one copy records.
 enum InstanceLock {
     static var path: String { AppPaths.root.appendingPathComponent("instance.lock").path }
 
-    /// Whether another copy holds the lock. Checking takes it briefly and lets
-    /// it go again, so the caller can still take it for real afterwards.
-    static func isHeld(at path: String = path) -> Bool {
-        let descriptor = open(path, O_CREAT | O_RDWR, 0o600)
-        guard descriptor >= 0 else { return false }
-        defer { close(descriptor) }
-        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { return true }
-        flock(descriptor, LOCK_UN)
-        return false
-    }
+    /// Taken by a background copy before the app starts, for ArchiveController
+    /// to keep rather than take the lock a second time.
+    @MainActor static var taken: Int32?
 
     /// The login item restarts the app whenever it exits, so a background copy
     /// that found another copy running would quit and be relaunched every ten
-    /// seconds. Instead it sits here until the other copy quits, then takes over.
-    static func waitUntilFree(at path: String = path, pollEvery interval: TimeInterval = 5) {
-        while isHeld(at: path) { Thread.sleep(forTimeInterval: interval) }
+    /// seconds. Instead it waits here until the other copy quits, and takes the
+    /// lock in the same step, so nothing can slip in between. Returns nil if
+    /// the lock file can't be opened at all; the controller then reports it.
+    static func waitAndTake(at path: String = path, pollEvery interval: TimeInterval = 5) -> Int32? {
+        try? FileManager.default.createDirectory(
+            at: URL(fileURLWithPath: path).deletingLastPathComponent(),
+            withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        while true {
+            let descriptor = open(path, O_CREAT | O_RDWR, 0o600)
+            guard descriptor >= 0 else { return nil }
+            if flock(descriptor, LOCK_EX | LOCK_NB) == 0 { return descriptor }
+            close(descriptor)
+            Thread.sleep(forTimeInterval: interval)
+        }
     }
 }

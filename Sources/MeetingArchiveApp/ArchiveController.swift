@@ -212,7 +212,9 @@ final class ArchiveController: ObservableObject {
             for directory in [AppPaths.root, AppPaths.spool, AppPaths.index] {
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             }
-            lockFD = open(AppPaths.root.appendingPathComponent("instance.lock").path, O_CREAT | O_RDWR, 0o600)
+            // A background copy already holds it (InstanceLock.waitAndTake);
+            // locking the same descriptor again below just succeeds.
+            lockFD = InstanceLock.taken ?? open(InstanceLock.path, O_CREAT | O_RDWR, 0o600)
             // Acquire before reading or restoring state. A second launch must
             // never turn the first instance's live recording into recovery.
             guard lockFD >= 0, flock(lockFD, LOCK_EX | LOCK_NB) == 0 else { exit(0) }
